@@ -52,6 +52,7 @@ jobs:
         run: |
 
           echo "Private logger contents:"
+
           ls -la private_logger
 
 
@@ -61,6 +62,7 @@ jobs:
       # =========================
 
       - name: Setup Python
+
         uses: actions/setup-python@v5
 
         with:
@@ -89,6 +91,7 @@ jobs:
         run: |
 
           echo "Checking secrets..."
+
 
           if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]; then
             echo "❌ NEON_DATABASE_URL missing"
@@ -143,6 +146,7 @@ jobs:
 
           echo "Creating VPN config..."
 
+
           echo "${{ secrets.VPNBOOK_CONFIG }}" > vpnbook.ovpn
 
 
@@ -155,9 +159,6 @@ jobs:
 
 
           echo "VPN config created"
-
-          echo "Server lines:"
-          grep -E "remote|auth" vpnbook.ovpn || true
 
 
 
@@ -190,6 +191,7 @@ jobs:
 
 
           echo ""
+
           echo "VPN log:"
 
           cat vpn.log || true
@@ -212,11 +214,6 @@ jobs:
           curl -s https://ipinfo.io/country
 
           echo
-
-
-          echo "Full location:"
-
-          curl -s https://ipinfo.io
 
 
 
@@ -308,6 +305,90 @@ jobs:
             exit 1
 
           fi
+
+
+
+      # =========================
+      # VERIFY CSV
+      # =========================
+
+      - name: Check generated CSV
+
+        run: |
+
+          cd private_logger
+
+
+          echo "Checking CSV..."
+
+
+          if [ ! -f price_log.csv ]
+
+          then
+
+            echo "❌ price_log.csv missing"
+
+            exit 1
+
+          fi
+
+
+          echo "CSV exists"
+
+          echo "Rows:"
+
+          wc -l price_log.csv
+
+
+
+      # =========================
+      # SYNC CSV BACK TO PRIVATE REPO
+      # =========================
+
+      - name: Save CSV to private repo
+
+        env:
+
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+        run: |
+
+          echo "Syncing CSV back to private repo..."
+
+
+          cd private_logger
+
+
+          git config user.name "github-actions"
+
+          git config user.email "actions@github.com"
+
+
+
+          git status
+
+
+
+          git add price_log.csv
+
+
+
+          git commit \
+          -m "Update crypto price log $(date)" \
+          || echo "No CSV changes"
+
+
+
+          echo "Pushing CSV..."
+
+
+          git push \
+          https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
+          HEAD:main
+
+
+
+          echo "✅ CSV sync completed"
 
 
 
