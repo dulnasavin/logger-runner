@@ -1,0 +1,219 @@
+name: Crypto Price Logger
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+
+  workflow_dispatch:
+
+
+permissions:
+  contents: read
+
+
+jobs:
+
+  run-logger:
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+
+      # =========================
+      # CHECKOUT RUNNER REPO
+      # =========================
+
+      - name: Checkout runner
+        uses: actions/checkout@v4
+
+
+
+      # =========================
+      # DOWNLOAD PRIVATE LOGGER
+      # =========================
+
+      - name: Clone private crypto logger
+        env:
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+        run: |
+
+          echo "Downloading private logger..."
+
+          git clone https://${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git private_logger
+
+          echo "Private repo downloaded"
+
+
+
+      # =========================
+      # PYTHON
+      # =========================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+
+        with:
+          python-version: "3.13"
+
+
+
+      - name: Install dependencies
+
+        run: |
+
+          cd private_logger
+
+          python -m pip install --upgrade pip
+
+          pip install -r requirements.txt
+
+
+
+      # =========================
+      # VPN
+      # =========================
+
+      - name: Install OpenVPN
+
+        run: |
+
+          sudo apt-get update
+
+          sudo apt-get install -y openvpn
+
+
+
+      - name: Create VPN config
+
+        run: |
+
+          echo "${{ secrets.VPNBOOK_CONFIG }}" > vpnbook.ovpn
+
+
+          printf "%s\n%s\n" \
+          "${{ secrets.VPNBOOK_USERNAME }}" \
+          "${{ secrets.VPNBOOK_PASSWORD }}" > auth.txt
+
+
+          echo "auth-user-pass auth.txt" >> vpnbook.ovpn
+
+
+
+      - name: Connect VPN
+
+        run: |
+
+          sudo openvpn \
+          --config vpnbook.ovpn \
+          --daemon
+
+
+          echo "Waiting for VPN..."
+
+          sleep 30
+
+
+
+      - name: Verify VPN
+
+        run: |
+
+          echo "IP:"
+
+          curl -s https://api.ipify.org
+
+          echo
+
+
+          echo "Country:"
+
+          curl -s https://ipinfo.io/country
+
+          echo
+
+
+
+
+      # =========================
+      # RUN LOGGER
+      # =========================
+
+
+      - name: Run logger
+
+        env:
+
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+
+          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+
+
+        run: |
+
+          cd private_logger
+
+
+          echo "Starting logger..."
+
+
+          success=0
+
+
+          for i in 1 2 3
+
+          do
+
+            if python price_logger.py
+
+            then
+
+              success=1
+
+              echo "Logger completed"
+
+              break
+
+            fi
+
+
+            echo "Attempt $i failed"
+
+            sleep 10
+
+
+          done
+
+
+
+          if [ "$success" -eq 0 ]
+
+          then
+
+            echo "Logger failed"
+
+            exit 1
+
+          fi
+
+
+
+      # =========================
+      # CLEAN PRIVATE DATA
+      # =========================
+
+
+      - name: Remove private files
+
+        run: |
+
+          rm -rf private_logger
+
+          rm -f vpnbook.ovpn auth.txt
+
+
+          echo "Cleaned runner"
