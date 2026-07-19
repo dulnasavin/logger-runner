@@ -1,0 +1,183 @@
+name: Neon Weekly Audit
+
+
+on:
+
+  workflow_dispatch:
+
+
+  # Optional GitHub schedule
+  # Remove this if using cron-job.org
+  schedule:
+
+    - cron: "0 0 * * 0"
+
+
+permissions:
+
+  contents: read
+
+
+
+jobs:
+
+
+  neon-audit:
+
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+
+
+    steps:
+
+
+      # =========================
+      # CHECKOUT PUBLIC REPO
+      # =========================
+
+      - name: Checkout runner
+
+        uses: actions/checkout@v4
+
+
+
+      # =========================
+      # CLONE PRIVATE LOGGER REPO
+      # =========================
+
+      - name: Clone private crypto logger
+
+        env:
+
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+
+        run: |
+
+
+          git clone \
+          https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
+          private_logger
+
+
+          echo "Private repo downloaded"
+
+
+
+      # =========================
+      # CHECK CSV
+      # =========================
+
+      - name: Verify CSV exists
+
+        run: |
+
+
+          if [ ! -f private_logger/price_log.csv ]
+
+          then
+
+            echo "❌ CSV missing"
+
+            exit 1
+
+          fi
+
+
+          echo "✅ CSV found"
+
+
+          wc -l private_logger/price_log.csv
+
+
+
+
+      # =========================
+      # PYTHON
+      # =========================
+
+      - name: Setup Python
+
+        uses: actions/setup-python@v5
+
+        with:
+
+          python-version: "3.13"
+
+
+
+      - name: Install dependencies
+
+        run: |
+
+
+          pip install psycopg2-binary
+
+
+
+
+      # =========================
+      # CHECK NEON SECRET
+      # =========================
+
+      - name: Check Neon connection
+
+        run: |
+
+
+          if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]
+
+          then
+
+            echo "❌ Neon secret missing"
+
+            exit 1
+
+          fi
+
+
+          echo "✅ Neon secret exists"
+
+
+
+
+      # =========================
+      # RUN AUDIT
+      # =========================
+
+      - name: Run Neon audit
+
+        env:
+
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+
+
+        run: |
+
+
+          cd private_logger
+
+
+          python neon_audit.py
+
+
+
+
+      # =========================
+      # CLEAN
+      # =========================
+
+      - name: Cleanup
+
+        if: always()
+
+        run: |
+
+
+          rm -rf private_logger
+
+
+          echo "Cleaned runner"
