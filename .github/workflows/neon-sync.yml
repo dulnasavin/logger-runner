@@ -4,14 +4,18 @@ name: Neon Database Sync
 on:
 
   workflow_run:
+
     workflows:
+
       - "Crypto Price Logger"
 
     types:
+
       - completed
 
 
   workflow_dispatch:
+
 
 
 permissions:
@@ -22,12 +26,20 @@ permissions:
 
 jobs:
 
+
   sync-to-neon:
 
 
+    timeout-minutes: 10
+
+
     if: >
+
       github.event.workflow_run.conclusion == 'success'
-      || github.event_name == 'workflow_dispatch'
+
+      ||
+
+      github.event_name == 'workflow_dispatch'
 
 
     runs-on: ubuntu-latest
@@ -38,8 +50,9 @@ jobs:
 
 
       # =========================
-      # CHECKOUT PUBLIC RUNNER
+      # CHECKOUT PUBLIC REPO
       # =========================
+
 
       - name: Checkout runner
 
@@ -47,11 +60,14 @@ jobs:
 
 
 
+
       # =========================
-      # DOWNLOAD PRIVATE REPO
+      # CLONE PRIVATE REPO
       # =========================
 
+
       - name: Clone private crypto logger
+
 
         env:
 
@@ -61,23 +77,45 @@ jobs:
         run: |
 
 
-          echo "Downloading private repo..."
+          echo "Downloading private repo"
 
 
           git clone \
+
           https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
+
           private_logger
 
 
-          echo "Private repo downloaded"
+
+          echo "Private repo ready"
 
 
 
-      - name: Check private files
+
+      - name: Check CSV
+
 
         run: |
 
-          ls -lah private_logger
+
+          if [ ! -f private_logger/price_log.csv ]
+
+          then
+
+            echo "❌ price_log.csv missing"
+
+            exit 1
+
+          fi
+
+
+
+          echo "✅ CSV found"
+
+
+          wc -l private_logger/price_log.csv
+
 
 
 
@@ -85,9 +123,12 @@ jobs:
       # PYTHON
       # =========================
 
+
       - name: Setup Python
 
+
         uses: actions/setup-python@v5
+
 
         with:
 
@@ -95,7 +136,9 @@ jobs:
 
 
 
+
       - name: Install dependencies
+
 
         run: |
 
@@ -112,39 +155,12 @@ jobs:
 
 
       # =========================
-      # CHECK CSV
+      # CHECK SECRET
       # =========================
 
-      - name: Verify CSV exists
-
-        run: |
-
-
-          if [ ! -f private_logger/price_log.csv ]
-
-          then
-
-            echo "❌ CSV missing"
-
-            exit 1
-
-          fi
-
-
-
-          echo "CSV found"
-
-
-          wc -l private_logger/price_log.csv
-
-
-
-
-      # =========================
-      # SECRET CHECK
-      # =========================
 
       - name: Check Neon secret
+
 
         run: |
 
@@ -153,11 +169,14 @@ jobs:
 
           then
 
-            echo "❌ Neon URL missing"
+
+            echo "❌ Neon secret missing"
 
             exit 1
 
+
           fi
+
 
 
           echo "✅ Neon secret exists"
@@ -166,12 +185,15 @@ jobs:
 
 
       # =========================
-      # RUN SYNC
+      # SYNC
       # =========================
 
-      - name: Run Neon Sync
+
+      - name: CSV to Neon sync
+
 
         env:
+
 
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
@@ -182,11 +204,10 @@ jobs:
           cd private_logger
 
 
-          echo "🚀 Starting CSV → Neon sync"
+          echo "🚀 Starting Neon sync"
 
 
           python sync_to_neon.py
-
 
 
           echo "✅ Neon sync completed"
@@ -198,9 +219,12 @@ jobs:
       # CLEAN
       # =========================
 
+
       - name: Cleanup
 
+
         if: always()
+
 
         run: |
 
