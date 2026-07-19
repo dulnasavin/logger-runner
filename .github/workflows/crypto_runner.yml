@@ -50,6 +50,8 @@ jobs:
 
       - name: Check private repo files
         run: |
+
+          echo "Private logger contents:"
           ls -la private_logger
 
 
@@ -79,6 +81,49 @@ jobs:
 
 
       # =========================
+      # SECRET CHECK
+      # =========================
+
+      - name: Check required secrets exist
+
+        run: |
+
+          echo "Checking secrets..."
+
+          if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]; then
+            echo "❌ NEON_DATABASE_URL missing"
+            exit 1
+          else
+            echo "✅ NEON_DATABASE_URL exists"
+          fi
+
+
+          if [ -z "${{ secrets.BINANCE_API_KEY }}" ]; then
+            echo "❌ BINANCE_API_KEY missing"
+            exit 1
+          else
+            echo "✅ BINANCE_API_KEY exists"
+          fi
+
+
+          if [ -z "${{ secrets.BINANCE_SECRET_KEY }}" ]; then
+            echo "❌ BINANCE_SECRET_KEY missing"
+            exit 1
+          else
+            echo "✅ BINANCE_SECRET_KEY exists"
+          fi
+
+
+          if [ -z "${{ secrets.VPNBOOK_CONFIG }}" ]; then
+            echo "❌ VPNBOOK_CONFIG missing"
+            exit 1
+          else
+            echo "✅ VPNBOOK_CONFIG exists"
+          fi
+
+
+
+      # =========================
       # VPN
       # =========================
 
@@ -96,6 +141,8 @@ jobs:
 
         run: |
 
+          echo "Creating VPN config..."
+
           echo "${{ secrets.VPNBOOK_CONFIG }}" > vpnbook.ovpn
 
 
@@ -107,14 +154,24 @@ jobs:
           echo "auth-user-pass auth.txt" >> vpnbook.ovpn
 
 
+          echo "VPN config created"
+
+          echo "Server lines:"
+          grep -E "remote|auth" vpnbook.ovpn || true
+
+
 
       - name: Connect VPN
 
         run: |
 
+          echo "Connecting VPN..."
+
+
           sudo openvpn \
           --config vpnbook.ovpn \
-          --daemon
+          --daemon \
+          --log vpn.log
 
 
           echo "Waiting for VPN..."
@@ -123,11 +180,27 @@ jobs:
 
 
 
-      - name: Verify VPN
+      - name: Check VPN status
 
         run: |
 
-          echo "IP:"
+          echo "VPN processes:"
+
+          ps aux | grep openvpn || true
+
+
+          echo ""
+          echo "VPN log:"
+
+          cat vpn.log || true
+
+
+
+      - name: Verify VPN location
+
+        run: |
+
+          echo "Public IP:"
 
           curl -s https://api.ipify.org
 
@@ -139,6 +212,35 @@ jobs:
           curl -s https://ipinfo.io/country
 
           echo
+
+
+          echo "Full location:"
+
+          curl -s https://ipinfo.io
+
+
+
+      # =========================
+      # NETWORK TESTS
+      # =========================
+
+      - name: Test CoinGecko
+
+        run: |
+
+          echo "Testing CoinGecko..."
+
+          curl -i https://api.coingecko.com/api/v3/ping
+
+
+
+      - name: Test Binance public API
+
+        run: |
+
+          echo "Testing Binance..."
+
+          curl -i https://api.binance.com/api/v3/time || true
 
 
 
@@ -172,20 +274,23 @@ jobs:
 
           do
 
+            echo "Attempt $i"
+
+
             if python price_logger.py
 
             then
 
               success=1
 
-              echo "Logger completed"
+              echo "✅ Logger completed"
 
               break
 
             fi
 
 
-            echo "Attempt $i failed"
+            echo "❌ Attempt $i failed"
 
             sleep 10
 
@@ -198,7 +303,7 @@ jobs:
 
           then
 
-            echo "Logger failed"
+            echo "❌ Logger failed after 3 attempts"
 
             exit 1
 
@@ -207,16 +312,18 @@ jobs:
 
 
       # =========================
-      # CLEAN PRIVATE DATA
+      # CLEAN
       # =========================
 
       - name: Remove private files
+
+        if: always()
 
         run: |
 
           rm -rf private_logger
 
-          rm -f vpnbook.ovpn auth.txt
+          rm -f vpnbook.ovpn auth.txt vpn.log
 
 
           echo "Cleaned runner"
