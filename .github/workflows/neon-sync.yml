@@ -68,28 +68,17 @@ jobs:
 
       - name: Clone private crypto logger
 
-
         env:
 
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
-
         run: |
 
+          echo "Downloading private repo..."
 
-          echo "Downloading private repo"
-
-
-          git clone \
-
-          https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
-
-          private_logger
-
-
+          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
 
           echo "Private repo ready"
-
 
 
 
