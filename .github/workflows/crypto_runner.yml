@@ -45,9 +45,8 @@ jobs:
           git clone https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git private_logger
 
           echo "Private repo downloaded"
-
-
-
+ 
+     
       # =========================
       # PYTHON
       # =========================
@@ -146,8 +145,8 @@ jobs:
 
         env:
 
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
 
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
