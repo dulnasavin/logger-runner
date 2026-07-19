@@ -42,7 +42,7 @@ jobs:
 
           echo "Downloading private logger..."
 
-          git clone https://${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git private_logger
+          git clone https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git private_logger
 
           echo "Private repo downloaded"
 
