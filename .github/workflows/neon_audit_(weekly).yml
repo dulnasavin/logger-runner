@@ -110,13 +110,18 @@ jobs:
 
 
       - name: Install dependencies
-
         run: |
+          set -e
 
+          cd private_logger
 
-          pip install psycopg2-binary
+          python -m pip install --upgrade pip
 
-
+          if [ -f "Crypto Logger-Private Repo/requirements.txt" ]; then
+            pip install -r "Crypto Logger-Private Repo/requirements.txt"
+          else
+            pip install psycopg2-binary
+          fi
 
 
       # =========================
@@ -149,20 +154,21 @@ jobs:
       # =========================
 
       - name: Run Neon audit
-
         env:
-
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-
-
         run: |
-
+          set -e
 
           cd private_logger
 
+          echo "Repository structure:"
+          find . -maxdepth 2 -type f | sort
 
-          python neon_audit.py
+          echo "Running Neon audit..."
 
+          python "Neon Weekly Audit/neon_audit.py"
+
+          echo "✅ Audit completed"
 
 
 
