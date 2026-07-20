@@ -1,7 +1,6 @@
 name: Crypto Price Logger
 
 on:
-
 workflow_dispatch:
 
 permissions:
@@ -28,7 +27,6 @@ steps:
       TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
     run: |
       set -e
-
       echo "Downloading private repo..."
 
       git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
