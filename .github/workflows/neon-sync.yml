@@ -1,63 +1,41 @@
 name: Neon Database Sync
 
-
 on:
 
   workflow_run:
-
     workflows:
-
       - "Crypto Price Logger"
-
     types:
-
       - completed
-
 
   workflow_dispatch:
 
 
-
 permissions:
-
   contents: read
-
 
 
 jobs:
 
-
   sync-to-neon:
 
-
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
-
     if: >
-
       github.event.workflow_run.conclusion == 'success'
-
       ||
-
       github.event_name == 'workflow_dispatch'
 
 
-    runs-on: ubuntu-latest
-
-
-
     steps:
-
 
       # =========================
       # CHECKOUT PUBLIC REPO
       # =========================
 
-
       - name: Checkout runner
-
         uses: actions/checkout@v4
-
 
 
 
@@ -65,46 +43,40 @@ jobs:
       # CLONE PRIVATE REPO
       # =========================
 
-
       - name: Clone private crypto logger
 
         env:
-
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
         run: |
 
           echo "Downloading private repo..."
 
-          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
+          git clone \
+          "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+          private_logger
 
           echo "Private repo ready"
 
 
 
-      - name: Check CSV
+      # =========================
+      # CHECK CSV
+      # =========================
 
+      - name: Check CSV
 
         run: |
 
-
           if [ ! -f private_logger/price_log.csv ]
-
           then
-
             echo "❌ price_log.csv missing"
-
             exit 1
-
           fi
-
-
 
           echo "✅ CSV found"
 
-
           wc -l private_logger/price_log.csv
-
 
 
 
@@ -112,85 +84,69 @@ jobs:
       # PYTHON
       # =========================
 
-
       - name: Setup Python
-
 
         uses: actions/setup-python@v5
 
-
         with:
-
           python-version: "3.13"
 
 
 
+      # =========================
+      # INSTALL DEPENDENCIES
+      # =========================
 
       - name: Install dependencies
 
-
         run: |
 
+          set -e
 
-          cd private_logger
+          cd private_logger/"Crypto Logger-Private Repo"
 
+          echo "Installing dependencies..."
 
           python -m pip install --upgrade pip
-
 
           pip install -r requirements.txt
 
 
 
-
       # =========================
-      # CHECK SECRET
+      # CHECK NEON SECRET
       # =========================
-
 
       - name: Check Neon secret
 
-
         run: |
 
-
           if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]
-
           then
-
-
             echo "❌ Neon secret missing"
-
             exit 1
-
-
           fi
-
 
 
           echo "✅ Neon secret exists"
 
 
 
-
       # =========================
-      # SYNC
+      # RUN SYNC
       # =========================
-
 
       - name: CSV to Neon sync
 
-
         env:
-
 
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
-
         run: |
 
+          set -e
 
-          cd private_logger
+          cd private_logger/"Neon Sync"
 
 
           echo "🚀 Starting Neon sync"
@@ -203,22 +159,16 @@ jobs:
 
 
 
-
       # =========================
       # CLEAN
       # =========================
 
-
       - name: Cleanup
-
 
         if: always()
 
-
         run: |
 
-
           rm -rf private_logger
-
 
           echo "Runner cleaned"
