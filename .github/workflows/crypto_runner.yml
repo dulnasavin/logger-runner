@@ -1,392 +1,274 @@
 name: Crypto Price Logger
 
 on:
-  workflow_dispatch:
-
+workflow_dispatch:
 
 permissions:
-  contents: read
-
+contents: read
 
 jobs:
-
-  run-logger:
-
-    runs-on: ubuntu-latest
-
-
-    steps:
-
-
-      # =========================
-      # CHECKOUT PUBLIC RUNNER
-      # =========================
-
-      - name: Checkout runner
-        uses: actions/checkout@v4
-
-
-
-      # =========================
-      # DOWNLOAD PRIVATE LOGGER
-      # =========================
-
-           - name: Clone private crypto logger
-        env:
-          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          set -e
-          echo "Downloading private repo..."
-
-          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
-
-          echo "Private repo ready"
-          ls -la private_logger
-
-      # =========================
-      # PYTHON
-      # =========================
-
-      - name: Setup Python
-
-        uses: actions/setup-python@v5
-
-        with:
-          python-version: "3.13"
-
-
-
-      - name: Install dependencies
-
-        run: |
-
-          cd private_logger
-
-          python -m pip install --upgrade pip
-
-          pip install -r requirements.txt
-
-
-
-      # =========================
-      # SECRET CHECK
-      # =========================
-
-      - name: Check required secrets exist
-
-        run: |
-
-          echo "Checking secrets..."
-
-
-          if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]; then
-            echo "❌ NEON_DATABASE_URL missing"
-            exit 1
-          else
-            echo "✅ NEON_DATABASE_URL exists"
-          fi
-
-
-          if [ -z "${{ secrets.BINANCE_API_KEY }}" ]; then
-            echo "❌ BINANCE_API_KEY missing"
-            exit 1
-          else
-            echo "✅ BINANCE_API_KEY exists"
-          fi
-
-
-          if [ -z "${{ secrets.BINANCE_SECRET_KEY }}" ]; then
-            echo "❌ BINANCE_SECRET_KEY missing"
-            exit 1
-          else
-            echo "✅ BINANCE_SECRET_KEY exists"
-          fi
-
-
-          if [ -z "${{ secrets.VPNBOOK_CONFIG }}" ]; then
-            echo "❌ VPNBOOK_CONFIG missing"
-            exit 1
-          else
-            echo "✅ VPNBOOK_CONFIG exists"
-          fi
-
-
-
-      # =========================
-      # VPN
-      # =========================
-
-      - name: Install OpenVPN
-
-        run: |
-
-          sudo apt-get update
-
-          sudo apt-get install -y openvpn
-
-
-
-      - name: Create VPN config
-
-        run: |
-
-          echo "Creating VPN config..."
-
-
-          echo "${{ secrets.VPNBOOK_CONFIG }}" > vpnbook.ovpn
-
-
-          printf "%s\n%s\n" \
-          "${{ secrets.VPNBOOK_USERNAME }}" \
-          "${{ secrets.VPNBOOK_PASSWORD }}" > auth.txt
-
-
-          echo "auth-user-pass auth.txt" >> vpnbook.ovpn
-
-
-          echo "VPN config created"
-
-
-
-      - name: Connect VPN
-
-        run: |
-
-          echo "Connecting VPN..."
-
-
-          sudo openvpn \
-          --config vpnbook.ovpn \
-          --daemon \
-          --log vpn.log
-
-
-          echo "Waiting for VPN..."
-
-          sleep 30
-
-
-
-      - name: Check VPN status
-
-        run: |
-
-          echo "VPN processes:"
-
-          ps aux | grep openvpn || true
-
-
-          echo ""
-
-          echo "VPN log:"
-
-          cat vpn.log || true
-
-
-
-      - name: Verify VPN location
-
-        run: |
-
-          echo "Public IP:"
-
-          curl -s https://api.ipify.org
-
-          echo
-
-
-          echo "Country:"
-
-          curl -s https://ipinfo.io/country
-
-          echo
-
-
-
-      # =========================
-      # NETWORK TESTS
-      # =========================
-
-      - name: Test CoinGecko
-
-        run: |
-
-          echo "Testing CoinGecko..."
-
-          curl -i https://api.coingecko.com/api/v3/ping
-
-
-
-      - name: Test Binance public API
-
-        run: |
-
-          echo "Testing Binance..."
-
-          curl -i https://api.binance.com/api/v3/time || true
-
-
-
-      # =========================
-      # RUN LOGGER
-      # =========================
-
-      - name: Run logger
-
-        env:
-
-          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-
-          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-
-          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
-
-
-        run: |
-
-          cd private_logger
-
-
-          echo "Starting logger..."
-
-
-          success=0
-
-
-          for i in 1 2 3
-
-          do
-
-            echo "Attempt $i"
-
-
-            if python price_logger.py
-
-            then
-
-              success=1
-
-              echo "✅ Logger completed"
-
-              break
-
-            fi
-
-
-            echo "❌ Attempt $i failed"
-
-            sleep 10
-
-
-          done
-
-
-
-          if [ "$success" -eq 0 ]
-
-          then
-
-            echo "❌ Logger failed after 3 attempts"
-
-            exit 1
-
-          fi
-
-
-
-      # =========================
-      # VERIFY CSV
-      # =========================
-
-      - name: Check generated CSV
-
-        run: |
-
-          cd private_logger
-
-
-          echo "Checking CSV..."
-
-
-          if [ ! -f price_log.csv ]
-
-          then
-
-            echo "❌ price_log.csv missing"
-
-            exit 1
-
-          fi
-
-
-          echo "CSV exists"
-
-          echo "Rows:"
-
-          wc -l price_log.csv
-
-
-
-      # =========================
-      # SYNC CSV BACK TO PRIVATE REPO
-      # =========================
-
-      - name: Save CSV to private repo
-        env:
-          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          set -e
-
-          echo "🔄 Syncing CSV back to private repo..."
-
-          cd private_logger
-
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-
-          # Always pull latest before committing
-          git fetch origin main
-          git pull --rebase origin main
-
-          git add price_log.csv
-
-          if git diff --cached --quiet; then
-            echo "No CSV changes"
-            exit 0
-          fi
-
-          git commit -m "Update crypto price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-
-          # Retry push in case another run pushed first
-          for i in 1 2 3
-          do
-            if git push origin main; then
-              echo "✅ CSV sync completed"
-              exit 0
-            fi
-
-            echo "Push conflict, retrying..."
-            git pull --rebase origin main
-            sleep 2
-          done
-
-          echo "❌ Failed to push CSV after retries"
-          exit 1
-
-
-      # =========================
-      # CLEAN
-      # =========================
-
-      - name: Remove private files
-
-        if: always()
-
-        run: |
-
-          rm -rf private_logger
-
-          rm -f vpnbook.ovpn auth.txt vpn.log
-
-
-          echo "Cleaned runner"
+run-logger:
+runs-on: ubuntu-latest
+timeout-minutes: 15
+
+```
+steps:
+
+  # =========================
+  # CHECKOUT PUBLIC RUNNER
+  # =========================
+  - name: Checkout runner
+    uses: actions/checkout@v4
+
+  # =========================
+  # DOWNLOAD PRIVATE LOGGER
+  # =========================
+  - name: Clone private crypto logger
+    env:
+      TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+    run: |
+      set -e
+
+      echo "Downloading private repo..."
+
+      git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
+
+      echo "Private repo ready"
+      ls -la private_logger
+
+  # =========================
+  # PYTHON
+  # =========================
+  - name: Setup Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.13"
+
+  - name: Install dependencies
+    run: |
+      set -e
+
+      cd private_logger
+
+      echo "Installing Python dependencies..."
+
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt
+
+  # =========================
+  # SECRET CHECK
+  # =========================
+  - name: Check required secrets exist
+    run: |
+      echo "Checking secrets..."
+
+      if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]; then
+        echo "❌ NEON_DATABASE_URL missing"
+        exit 1
+      else
+        echo "✅ NEON_DATABASE_URL exists"
+      fi
+
+      if [ -z "${{ secrets.BINANCE_API_KEY }}" ]; then
+        echo "❌ BINANCE_API_KEY missing"
+        exit 1
+      else
+        echo "✅ BINANCE_API_KEY exists"
+      fi
+
+      if [ -z "${{ secrets.BINANCE_SECRET_KEY }}" ]; then
+        echo "❌ BINANCE_SECRET_KEY missing"
+        exit 1
+      else
+        echo "✅ BINANCE_SECRET_KEY exists"
+      fi
+
+      if [ -z "${{ secrets.VPNBOOK_CONFIG }}" ]; then
+        echo "❌ VPNBOOK_CONFIG missing"
+        exit 1
+      else
+        echo "✅ VPNBOOK_CONFIG exists"
+      fi
+
+  # =========================
+  # VPN
+  # =========================
+  - name: Install OpenVPN
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y openvpn
+
+  - name: Create VPN config
+    run: |
+      echo "Creating VPN config..."
+
+      echo "${{ secrets.VPNBOOK_CONFIG }}" > vpnbook.ovpn
+
+      printf "%s\n%s\n" \
+      "${{ secrets.VPNBOOK_USERNAME }}" \
+      "${{ secrets.VPNBOOK_PASSWORD }}" > auth.txt
+
+      echo "auth-user-pass auth.txt" >> vpnbook.ovpn
+
+      echo "VPN config created"
+
+  - name: Connect VPN
+    run: |
+      echo "Connecting VPN..."
+
+      sudo openvpn \
+      --config vpnbook.ovpn \
+      --daemon \
+      --log vpn.log
+
+      echo "Waiting for VPN..."
+      sleep 30
+
+  - name: Check VPN status
+    run: |
+      echo "VPN processes:"
+      ps aux | grep openvpn || true
+
+      echo ""
+      echo "VPN log:"
+      cat vpn.log || true
+
+  - name: Verify VPN location
+    run: |
+      echo "Public IP:"
+      curl -s https://api.ipify.org
+      echo
+
+      echo "Country:"
+      curl -s https://ipinfo.io/country
+      echo
+
+  # =========================
+  # NETWORK TESTS
+  # =========================
+  - name: Test CoinGecko
+    run: |
+      echo "Testing CoinGecko..."
+      curl -i https://api.coingecko.com/api/v3/ping
+
+  - name: Test Binance public API
+    run: |
+      echo "Testing Binance..."
+      curl -i https://api.binance.com/api/v3/time || true
+
+  # =========================
+  # RUN LOGGER
+  # =========================
+  - name: Run logger
+    env:
+      DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+      BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+      BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+    run: |
+      set -e
+
+      cd private_logger
+
+      echo "Starting logger..."
+
+      success=0
+
+      for i in 1 2 3
+      do
+        echo "Attempt $i"
+
+        if python price_logger.py
+        then
+          success=1
+          echo "✅ Logger completed"
+          break
+        fi
+
+        echo "❌ Attempt $i failed"
+        sleep 10
+      done
+
+      if [ "$success" -eq 0 ]
+      then
+        echo "❌ Logger failed after 3 attempts"
+        exit 1
+      fi
+
+  # =========================
+  # VERIFY CSV
+  # =========================
+  - name: Check generated CSV
+    run: |
+      set -e
+
+      cd private_logger
+
+      echo "Checking CSV..."
+
+      if [ ! -f price_log.csv ]
+      then
+        echo "❌ price_log.csv missing"
+        exit 1
+      fi
+
+      echo "✅ CSV exists"
+      echo "Rows:"
+      wc -l price_log.csv
+
+  # =========================
+  # SYNC CSV BACK TO PRIVATE REPO
+  # =========================
+  - name: Save CSV to private repo
+    env:
+      TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+    run: |
+      set -e
+
+      echo "🔄 Syncing CSV back to private repo..."
+
+      cd private_logger
+
+      git config user.name "github-actions"
+      git config user.email "actions@github.com"
+
+      # Get latest remote state
+      git fetch origin main
+      git pull --rebase origin main
+
+      git add price_log.csv
+
+      # Skip if no changes
+      if git diff --cached --quiet; then
+        echo "No CSV changes"
+        exit 0
+      fi
+
+      git commit -m "Update crypto price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+
+      # Retry push if another run pushed first
+      for i in 1 2 3
+      do
+        if git push origin main; then
+          echo "✅ CSV sync completed"
+          exit 0
+        fi
+
+        echo "Push conflict, retrying..."
+        git pull --rebase origin main
+        sleep 2
+      done
+
+      echo "❌ Failed to push CSV after retries"
+      exit 1
+
+  # =========================
+  # CLEAN
+  # =========================
+  - name: Remove private files
+    if: always()
+    run: |
+      rm -rf private_logger
+      rm -f vpnbook.ovpn auth.txt vpn.log
+
+      echo "Cleaned runner"
+```
