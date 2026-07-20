@@ -18,8 +18,6 @@ jobs:
 
   sync-to-neon:
 
-    timeout-minutes: 10
-
     if: >
       github.event.workflow_run.conclusion == 'success'
       ||
@@ -27,14 +25,27 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    timeout-minutes: 10
+
 
     steps:
+
+
+      # =========================
+      # CHECKOUT
+      # =========================
 
       - name: Checkout runner
         uses: actions/checkout@v4
 
 
+
+      # =========================
+      # CLONE PRIVATE REPO
+      # =========================
+
       - name: Clone private crypto logger
+
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
@@ -46,9 +57,33 @@ jobs:
           https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
           private_logger
 
+          echo "✅ Private repo downloaded"
 
-          echo "Private repo ready"
 
+
+      # =========================
+      # DEBUG STRUCTURE
+      # =========================
+
+      - name: Debug private repo
+
+        run: |
+
+          cd private_logger
+
+          echo "Current directory:"
+          pwd
+
+          echo ""
+
+          echo "Files:"
+          find . -maxdepth 2 -type f | sort
+
+
+
+      # =========================
+      # CHECK CSV
+      # =========================
 
       - name: Check CSV
 
@@ -57,8 +92,11 @@ jobs:
           if [ ! -f private_logger/price_log.csv ]
 
           then
+
             echo "❌ price_log.csv missing"
+
             exit 1
+
           fi
 
 
@@ -67,6 +105,10 @@ jobs:
           wc -l private_logger/price_log.csv
 
 
+
+      # =========================
+      # PYTHON
+      # =========================
 
       - name: Setup Python
 
@@ -91,6 +133,10 @@ jobs:
 
 
 
+      # =========================
+      # NEON SECRET
+      # =========================
+
       - name: Check Neon secret
 
         run: |
@@ -98,28 +144,35 @@ jobs:
           if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]
 
           then
+
             echo "❌ Neon secret missing"
+
             exit 1
+
           fi
 
 
           echo "✅ Neon secret exists"
-          - name: Debug paths
-            run: |
-                cd private_logger
-                echo "Current folder:"
-                pwd
 
-                echo "Files:"
-                find . -maxdepth 2 -type f | sort
-   
+
+
+      # =========================
+      # SYNC
+      # =========================
+
+      - name: Run Neon sync
+
+        env:
+
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
-          run: |
+        run: |
 
           set -e
 
+
           cd private_logger/"Neon Sync"
+
 
           echo "🚀 Starting Neon sync"
 
@@ -131,6 +184,10 @@ jobs:
 
 
 
+      # =========================
+      # CLEAN
+      # =========================
+
       - name: Cleanup
 
         if: always()
@@ -139,4 +196,4 @@ jobs:
 
           rm -rf private_logger
 
-          echo "Runner cleaned"
+          echo "✅ Runner cleaned"
