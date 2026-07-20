@@ -53,9 +53,12 @@ jobs:
 
           set -e
 
+          echo "Downloading private repo..."
+
           git clone \
           https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
           private_logger
+
 
           echo "✅ Private repo downloaded"
 
@@ -69,15 +72,15 @@ jobs:
 
         run: |
 
+          echo "Repository structure"
+
           cd private_logger
 
-          echo "Current directory:"
           pwd
 
           echo ""
 
-          echo "Files:"
-          find . -maxdepth 2 -type f | sort
+          find . -maxdepth 3 -type f | sort
 
 
 
@@ -89,7 +92,10 @@ jobs:
 
         run: |
 
-          if [ ! -f private_logger/price_log.csv ]
+          set -e
+
+
+          if [ ! -f "private_logger/price_log.csv" ]
 
           then
 
@@ -106,6 +112,33 @@ jobs:
 
 
 
+
+      # =========================
+      # CHECK SYNC FILE
+      # =========================
+
+      - name: Check sync script
+
+        run: |
+
+          set -e
+
+
+          if [ ! -f "private_logger/Neon Sync/sync_to_neon.py" ]
+
+          then
+
+            echo "❌ sync_to_neon.py missing"
+
+            exit 1
+
+          fi
+
+
+          echo "✅ sync_to_neon.py found"
+
+
+
       # =========================
       # PYTHON
       # =========================
@@ -115,7 +148,9 @@ jobs:
         uses: actions/setup-python@v5
 
         with:
+
           python-version: "3.13"
+
 
 
 
@@ -125,9 +160,12 @@ jobs:
 
           set -e
 
+
           cd private_logger/"Crypto Logger-Private Repo"
 
+
           python -m pip install --upgrade pip
+
 
           pip install -r requirements.txt
 
@@ -141,11 +179,12 @@ jobs:
 
         run: |
 
+
           if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]
 
           then
 
-            echo "❌ Neon secret missing"
+            echo "❌ NEON_DATABASE_URL missing"
 
             exit 1
 
@@ -156,8 +195,9 @@ jobs:
 
 
 
+
       # =========================
-      # SYNC
+      # RUN SYNC
       # =========================
 
       - name: Run Neon sync
@@ -166,21 +206,36 @@ jobs:
 
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
+
         run: |
 
           set -e
 
 
-          cd private_logger/"Neon Sync"
+          cd private_logger
 
+
+          echo "Current folder:"
+          pwd
+
+
+          echo ""
+
+          echo "Checking CSV:"
+
+          ls -lh price_log.csv
+
+
+          echo ""
 
           echo "🚀 Starting Neon sync"
 
 
-          python sync_to_neon.py
+          python "Neon Sync/sync_to_neon.py"
 
 
           echo "✅ Neon sync completed"
+
 
 
 
