@@ -31,28 +31,17 @@ jobs:
       # DOWNLOAD PRIVATE LOGGER
       # =========================
 
-      - name: Clone private crypto logger
+           - name: Clone private crypto logger
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-
         run: |
+          set -e
+          echo "Downloading private repo..."
 
-          echo "Downloading private logger..."
+          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
 
-          git clone https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git private_logger
-
-          echo "Private repo downloaded"
-
-
-
-      - name: Check private repo files
-        run: |
-
-          echo "Private logger contents:"
-
+          echo "Private repo ready"
           ls -la private_logger
-
-
 
       # =========================
       # PYTHON
@@ -343,50 +332,46 @@ jobs:
       # =========================
 
       - name: Save CSV to private repo
-
         env:
-
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-
         run: |
+          set -e
 
-          echo "Syncing CSV back to private repo..."
-
+          echo "🔄 Syncing CSV back to private repo..."
 
           cd private_logger
 
-
           git config user.name "github-actions"
-
           git config user.email "actions@github.com"
 
-
-
-          git status
-
-
+          # Always pull latest before committing
+          git fetch origin main
+          git pull --rebase origin main
 
           git add price_log.csv
 
+          if git diff --cached --quiet; then
+            echo "No CSV changes"
+            exit 0
+          fi
 
+          git commit -m "Update crypto price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
-          git commit \
-          -m "Update crypto price log $(date)" \
-          || echo "No CSV changes"
+          # Retry push in case another run pushed first
+          for i in 1 2 3
+          do
+            if git push origin main; then
+              echo "✅ CSV sync completed"
+              exit 0
+            fi
 
+            echo "Push conflict, retrying..."
+            git pull --rebase origin main
+            sleep 2
+          done
 
-
-          echo "Pushing CSV..."
-
-
-          git push \
-          https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
-          HEAD:main
-
-
-
-          echo "✅ CSV sync completed"
-
+          echo "❌ Failed to push CSV after retries"
+          exit 1
 
 
       # =========================
