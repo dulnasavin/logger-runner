@@ -1,8 +1,6 @@
 name: Crypto Price Logger
-
 on:
-workflow_dispatch:
-
+  workflow_dispatch:
 permissions:
 contents: read
 
