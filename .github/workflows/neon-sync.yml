@@ -1,7 +1,6 @@
 name: Neon Database Sync
 
 on:
-
   workflow_run:
     workflows:
       - "Crypto Price Logger"
@@ -19,7 +18,6 @@ jobs:
 
   sync-to-neon:
 
-    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     if: >
@@ -27,62 +25,48 @@ jobs:
       ||
       github.event_name == 'workflow_dispatch'
 
+    runs-on: ubuntu-latest
+
 
     steps:
-
-      # =========================
-      # CHECKOUT PUBLIC REPO
-      # =========================
 
       - name: Checkout runner
         uses: actions/checkout@v4
 
 
-
-      # =========================
-      # CLONE PRIVATE REPO
-      # =========================
-
       - name: Clone private crypto logger
-
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
         run: |
 
-          echo "Downloading private repo..."
+          set -e
 
           git clone \
-          "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+          https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
           private_logger
+
 
           echo "Private repo ready"
 
-
-
-      # =========================
-      # CHECK CSV
-      # =========================
 
       - name: Check CSV
 
         run: |
 
           if [ ! -f private_logger/price_log.csv ]
+
           then
             echo "❌ price_log.csv missing"
             exit 1
           fi
+
 
           echo "✅ CSV found"
 
           wc -l private_logger/price_log.csv
 
 
-
-      # =========================
-      # PYTHON
-      # =========================
 
       - name: Setup Python
 
@@ -93,10 +77,6 @@ jobs:
 
 
 
-      # =========================
-      # INSTALL DEPENDENCIES
-      # =========================
-
       - name: Install dependencies
 
         run: |
@@ -105,23 +85,18 @@ jobs:
 
           cd private_logger/"Crypto Logger-Private Repo"
 
-          echo "Installing dependencies..."
-
           python -m pip install --upgrade pip
 
           pip install -r requirements.txt
 
 
 
-      # =========================
-      # CHECK NEON SECRET
-      # =========================
-
       - name: Check Neon secret
 
         run: |
 
           if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]
+
           then
             echo "❌ Neon secret missing"
             exit 1
@@ -131,10 +106,6 @@ jobs:
           echo "✅ Neon secret exists"
 
 
-
-      # =========================
-      # RUN SYNC
-      # =========================
 
       - name: CSV to Neon sync
 
@@ -148,7 +119,6 @@ jobs:
 
           cd private_logger/"Neon Sync"
 
-
           echo "🚀 Starting Neon sync"
 
 
@@ -158,10 +128,6 @@ jobs:
           echo "✅ Neon sync completed"
 
 
-
-      # =========================
-      # CLEAN
-      # =========================
 
       - name: Cleanup
 
