@@ -265,4 +265,3 @@ steps:
       rm -f vpnbook.ovpn auth.txt vpn.log
 
       echo "Cleaned runner"
-```
