@@ -104,16 +104,18 @@ jobs:
 
 
           echo "✅ Neon secret exists"
+          - name: Debug paths
+            run: |
+                cd private_logger
+                echo "Current folder:"
+                pwd
 
-
-
-      - name: CSV to Neon sync
-
-        env:
-
+                echo "Files:"
+                find . -maxdepth 2 -type f | sort
+   
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
-        run: |
+          run: |
 
           set -e
 
