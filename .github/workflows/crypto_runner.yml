@@ -13,7 +13,6 @@ timeout-minutes: 15
 
 ```
 steps:
-
   # =========================
   # CHECKOUT PUBLIC RUNNER
   # =========================
@@ -48,7 +47,7 @@ steps:
     run: |
       set -e
 
-      cd private_logger
+      cd private_logger/"Crypto Logger-Private Repo"
 
       echo "Installing Python dependencies..."
 
@@ -117,9 +116,9 @@ steps:
       echo "Connecting VPN..."
 
       sudo openvpn \
-      --config vpnbook.ovpn \
-      --daemon \
-      --log vpn.log
+        --config vpnbook.ovpn \
+        --daemon \
+        --log vpn.log
 
       echo "Waiting for VPN..."
       sleep 30
@@ -167,7 +166,7 @@ steps:
     run: |
       set -e
 
-      cd private_logger
+      cd private_logger/"Crypto Logger-Private Repo"
 
       echo "Starting logger..."
 
@@ -201,7 +200,7 @@ steps:
     run: |
       set -e
 
-      cd private_logger
+      cd private_logger/"Crypto Logger-Private Repo"
 
       echo "Checking CSV..."
 
@@ -235,7 +234,7 @@ steps:
       git fetch origin main
       git pull --rebase origin main
 
-      git add price_log.csv
+      git add "Crypto Logger-Private Repo/price_log.csv"
 
       # Skip if no changes
       if git diff --cached --quiet; then
