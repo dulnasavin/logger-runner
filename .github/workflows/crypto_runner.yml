@@ -1,34 +1,32 @@
 name: Crypto Price Logger
 on:
-  workflow_dispatch:
+ workflow_dispatch: 
 permissions:
-contents: read
-
+ contents: read
 jobs:
-run-logger:
-runs-on: ubuntu-latest
-timeout-minutes: 15
-steps:
+  run-logger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+ steps:
   # =========================
   # CHECKOUT PUBLIC RUNNER
   # =========================
-  - name: Checkout runner
-    uses: actions/checkout@v4
-
+- name: Checkout runner
+  uses: actions/checkout@v4
   # =========================
   # DOWNLOAD PRIVATE LOGGER
   # =========================
-  - name: Clone private crypto logger
-    env:
-      TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-    run: |
-      set -e
-      echo "Downloading private repo..."
+ - name: Clone private crypto logger
+   env:
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -e
 
-      git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
+          echo "Downloading private repo..."
 
-      echo "Private repo ready"
-      ls -la private_logger
+          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
+
+          echo "Private repo ready"
 
   # =========================
   # PYTHON
