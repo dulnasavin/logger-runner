@@ -68,19 +68,28 @@ jobs:
       # DEBUG STRUCTURE
       # =========================
 
-      - name: Debug private repo
+       # =========================
+      # SAFE STRUCTURE CHECK
+      # =========================
 
+      - name: Verify required files
         run: |
-
-          echo "Repository structure"
-
+          set -e
           cd private_logger
 
-          pwd
+          echo "Checking required files..."
 
-          echo ""
+          test -f "Crypto Logger-Private Repo/price_logger.py" \
+            && echo "✓ price_logger.py found" \
+            || (echo "✗ price_logger.py missing" && exit 1)
 
-          find . -maxdepth 3 -type f | sort
+          test -f "Neon Sync/sync_to_neon.py" \
+            && echo "✓ sync_to_neon.py found" \
+            || (echo "✗ sync_to_neon.py missing" && exit 1)
+
+          test -f "price_log.csv" \
+            && echo "✓ price_log.csv found" \
+            || echo "• price_log.csv will be created automatically"
 
 
 
