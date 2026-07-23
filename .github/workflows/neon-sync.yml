@@ -4,29 +4,39 @@ name: Neon Database Sync
 on:
 
   workflow_run:
+
     workflows:
+
       - "Crypto Price Logger"
+
     types:
+
       - completed
 
+
   workflow_dispatch:
+
 
 
 permissions:
 
   contents: read
 
+  actions: read
 
 
-# =========================
-# PREVENT DOUBLE SYNC
-# =========================
+
+# ============================================================
+# PREVENT DATABASE JOB COLLISIONS
+# Sync and Audit share this group
+# ============================================================
 
 concurrency:
 
-  group: neon-sync
+  group: neon-database-operations
 
   cancel-in-progress: false
+
 
 
 
@@ -36,16 +46,24 @@ jobs:
   sync-to-neon:
 
 
+
     if: >
+
       github.event.workflow_run.conclusion == 'success'
+
       ||
+
       github.event_name == 'workflow_dispatch'
+
 
 
     runs-on: ubuntu-latest
 
 
+
     timeout-minutes: 5
+
+
 
 
 
@@ -53,9 +71,9 @@ jobs:
 
 
 
-      # =========================
-      # CHECKOUT PUBLIC REPO
-      # =========================
+      # ======================================================
+      # CHECKOUT PUBLIC RUNNER
+      # ======================================================
 
       - name: Checkout runner
 
@@ -64,9 +82,11 @@ jobs:
 
 
 
-      # =========================
-      # CLONE PRIVATE REPO
-      # =========================
+
+
+      # ======================================================
+      # CLONE PRIVATE LOGGER REPO
+      # ======================================================
 
       - name: Clone private crypto logger
 
@@ -76,17 +96,23 @@ jobs:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
 
+
         run: |
+
 
           set -e
 
 
-          echo "Downloading private repo..."
+          echo "📦 Downloading private repo..."
+
 
 
           git clone \
+
           https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
+
           private_logger
+
 
 
           echo "✅ Private repo downloaded"
@@ -94,9 +120,12 @@ jobs:
 
 
 
-      # =========================
-      # CHECK FILES
-      # =========================
+
+
+
+      # ======================================================
+      # CHECK REQUIRED FILES
+      # ======================================================
 
       - name: Verify required files
 
@@ -107,26 +136,67 @@ jobs:
           set -e
 
 
-          echo "Checking files..."
+
+          echo "🔎 Checking files..."
+
 
 
           test -f "private_logger/Neon Sync/sync_to_neon.py" \
+
           && echo "✅ sync_to_neon.py found" \
+
           || exit 1
+
 
 
 
           test -f "private_logger/price_log.csv" \
+
           && echo "✅ price_log.csv found" \
+
           || exit 1
 
 
 
 
 
-      # =========================
-      # PYTHON
-      # =========================
+
+
+      # ======================================================
+      # SHOW CSV INFORMATION
+      # ======================================================
+
+      - name: Check CSV information
+
+
+        run: |
+
+
+          set -e
+
+
+
+          echo "📊 CSV information"
+
+
+          wc -l private_logger/price_log.csv
+
+
+
+          echo "Latest CSV rows:"
+
+
+          tail -5 private_logger/price_log.csv
+
+
+
+
+
+
+
+      # ======================================================
+      # PYTHON SETUP
+      # ======================================================
 
       - name: Setup Python
 
@@ -138,10 +208,18 @@ jobs:
 
         with:
 
+
           python-version: "3.13"
 
 
 
+
+
+
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
 
       - name: Install dependencies
 
@@ -152,10 +230,13 @@ jobs:
           set -e
 
 
+
           cd private_logger/"Crypto Logger-Private Repo"
 
 
+
           python -m pip install --upgrade pip
+
 
 
           pip install -r requirements.txt
@@ -165,9 +246,10 @@ jobs:
 
 
 
-      # =========================
+
+      # ======================================================
       # PYTHON SYNTAX CHECK
-      # =========================
+      # ======================================================
 
       - name: Validate sync syntax
 
@@ -178,23 +260,32 @@ jobs:
           set -e
 
 
+
           cd private_logger
 
 
+
+          echo "🐍 Checking Python syntax..."
+
+
+
           python -m py_compile \
+
           "Neon Sync/sync_to_neon.py"
 
 
-          echo "✅ Syntax check passed"
+
+          echo "✅ Syntax OK"
 
 
 
 
 
 
-      # =========================
+
+      # ======================================================
       # CHECK NEON SECRET
-      # =========================
+      # ======================================================
 
       - name: Check Neon secret
 
@@ -202,15 +293,20 @@ jobs:
         run: |
 
 
+
           if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]
 
           then
 
+
             echo "❌ NEON_DATABASE_URL missing"
+
 
             exit 1
 
+
           fi
+
 
 
           echo "✅ Neon secret exists"
@@ -220,14 +316,16 @@ jobs:
 
 
 
-      # =========================
-      # RUN SYNC
-      # =========================
 
-      - name: Run Neon sync
+      # ======================================================
+      # TEST NEON CONNECTION
+      # ======================================================
+
+      - name: Test Neon database connection
 
 
         env:
+
 
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
@@ -236,28 +334,118 @@ jobs:
         run: |
 
 
+          python - <<EOF
+
+
+          import os
+
+          import psycopg2
+
+
+
+          url = os.getenv(
+              "NEON_DATABASE_URL"
+          )
+
+
+
+          conn = psycopg2.connect(url)
+
+
+          cur = conn.cursor()
+
+
+
+          cur.execute(
+              "SELECT NOW();"
+          )
+
+
+
+          print(
+              "Neon database time:",
+              cur.fetchone()[0]
+          )
+
+
+
+          cur.close()
+
+          conn.close()
+
+
+
+          print(
+              "✅ Neon connection OK"
+          )
+
+
+          EOF
+
+
+
+
+
+
+
+      # ======================================================
+      # RUN SYNC
+      # ======================================================
+
+      - name: Run Neon sync
+
+
+
+        env:
+
+
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+
+
+
+        run: |
+
+
+
           set -e
+
 
 
           cd private_logger
 
 
-          echo "🚀 Starting Neon sync"
+
+          echo "=============================="
+
+          echo "🚀 STARTING NEON SYNC"
+
+          echo "UTC Time: $(date -u)"
+
+          echo "=============================="
+
 
 
           python "Neon Sync/sync_to_neon.py"
 
 
-          echo "✅ Neon sync completed"
+
+          echo "=============================="
+
+          echo "✅ NEON SYNC COMPLETED"
+
+          echo "UTC Time: $(date -u)"
+
+          echo "=============================="
 
 
 
 
 
 
-      # =========================
+
+      # ======================================================
       # CLEAN RUNNER
-      # =========================
+      # ======================================================
 
       - name: Cleanup
 
@@ -265,10 +453,13 @@ jobs:
         if: always()
 
 
+
         run: |
 
 
+
           rm -rf private_logger
+
 
 
           echo "🧹 Runner cleaned"
