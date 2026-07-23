@@ -5,7 +5,9 @@ on:
 
   workflow_dispatch:
 
+
   schedule:
+
     - cron: "0 0 * * 0"
 
 
@@ -14,14 +16,22 @@ permissions:
 
   contents: read
 
+  actions: read
 
 
-# Prevent overlapping audits
+
+# ============================================================
+# PREVENT DATABASE JOB COLLISIONS
+# Shared with neon-sync.yml
+# ============================================================
+
 concurrency:
 
-  group: neon-weekly-audit
+  group: neon-database-operations
 
   cancel-in-progress: false
+
+
 
 
 
@@ -31,18 +41,23 @@ jobs:
   neon-audit:
 
 
+
     runs-on: ubuntu-latest
 
+
     timeout-minutes: 30
+
+
 
 
 
     steps:
 
 
-      # =========================
-      # CHECKOUT PUBLIC REPO
-      # =========================
+
+      # ======================================================
+      # CHECKOUT PUBLIC RUNNER
+      # ======================================================
 
       - name: Checkout runner repository
 
@@ -50,23 +65,32 @@ jobs:
 
 
 
-      # =========================
-      # DEBUG RUN INFO
-      # =========================
+
+
+
+      # ======================================================
+      # RUNNER DEBUG INFORMATION
+      # ======================================================
 
       - name: Show runner information
 
+
         run: |
 
-          echo "=============================="
-
-          echo "Runner information"
 
           echo "=============================="
+
+          echo "🚀 Neon Audit Runner"
+
+          echo "=============================="
+
+
+          echo ""
 
           echo "Date:"
 
-          date
+          date -u
+
 
 
           echo ""
@@ -74,6 +98,7 @@ jobs:
           echo "Python version:"
 
           python --version
+
 
 
           echo ""
@@ -84,10 +109,13 @@ jobs:
 
 
 
-      # =========================
-      # CLONE PRIVATE REPO
-      # =========================
 
+
+
+
+      # ======================================================
+      # CLONE PRIVATE REPOSITORY
+      # ======================================================
 
       - name: Clone private crypto logger
 
@@ -97,28 +125,37 @@ jobs:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
 
+
         run: |
 
 
           set -e
 
 
-          echo "Downloading private repository..."
+
+          echo "📦 Downloading private repository..."
+
 
 
           git clone \
-          https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
+
+          https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
+
           private_logger
+
 
 
           echo "✅ Private repository downloaded"
 
 
 
-      # =========================
-      # DEBUG PRIVATE STRUCTURE
-      # =========================
 
+
+
+
+      # ======================================================
+      # SHOW PRIVATE STRUCTURE
+      # ======================================================
 
       - name: Show private repository structure
 
@@ -128,19 +165,23 @@ jobs:
 
           echo "=============================="
 
-          echo "Private repo files"
+          echo "Private repository files"
 
           echo "=============================="
+
 
 
           find private_logger -maxdepth 3 -type f | sort
 
 
 
-      # =========================
-      # CHECK CSV
-      # =========================
 
+
+
+
+      # ======================================================
+      # CHECK CSV
+      # ======================================================
 
       - name: Validate CSV file
 
@@ -151,16 +192,21 @@ jobs:
           set -e
 
 
+
           CSV="private_logger/price_log.csv"
+
 
 
           if [ ! -f "$CSV" ]
 
           then
 
+
             echo "❌ CSV missing"
 
+
             exit 1
+
 
           fi
 
@@ -169,11 +215,13 @@ jobs:
           echo "✅ CSV exists"
 
 
+
           echo ""
 
           echo "CSV size:"
 
           ls -lh "$CSV"
+
 
 
           echo ""
@@ -196,14 +244,17 @@ jobs:
 
           echo "Latest CSV rows:"
 
-          tail -n 10 "$CSV"
+          tail -10 "$CSV"
 
 
 
-      # =========================
-      # PYTHON
-      # =========================
 
+
+
+
+      # ======================================================
+      # PYTHON SETUP
+      # ======================================================
 
       - name: Setup Python
 
@@ -213,9 +264,18 @@ jobs:
 
         with:
 
+
           python-version: "3.13"
 
 
+
+
+
+
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
 
       - name: Install dependencies
 
@@ -224,6 +284,7 @@ jobs:
 
 
           set -e
+
 
 
           cd private_logger
@@ -238,13 +299,16 @@ jobs:
 
           then
 
+
             pip install -r "Crypto Logger-Private Repo/requirements.txt"
+
 
 
           else
 
 
             pip install psycopg2-binary
+
 
 
           fi
@@ -259,10 +323,13 @@ jobs:
 
 
 
-      # =========================
-      # NEON SECRET CHECK
-      # =========================
 
+
+
+
+      # ======================================================
+      # CHECK NEON SECRET
+      # ======================================================
 
       - name: Check Neon configuration
 
@@ -272,6 +339,7 @@ jobs:
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
 
+
         run: |
 
 
@@ -279,9 +347,13 @@ jobs:
 
           then
 
+
             echo "❌ NEON_DATABASE_URL missing"
 
+
             exit 1
+
+
 
           fi
 
@@ -291,17 +363,94 @@ jobs:
 
 
 
-      # =========================
-      # RUN AUDIT
-      # =========================
 
 
-      - name: Run Neon audit
+
+
+      # ======================================================
+      # TEST NEON CONNECTION
+      # ======================================================
+
+      - name: Test Neon database connection
 
 
         env:
 
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+
+
+
+        run: |
+
+
+          python - <<EOF
+
+
+          import os
+
+          import psycopg2
+
+
+
+          conn = psycopg2.connect(
+
+              os.getenv(
+                  "NEON_DATABASE_URL"
+              )
+
+          )
+
+
+
+          cur = conn.cursor()
+
+
+
+          cur.execute(
+
+              "SELECT NOW();"
+
+          )
+
+
+
+          print(
+
+              "Neon database time:",
+
+              cur.fetchone()[0]
+
+          )
+
+
+
+          cur.close()
+
+          conn.close()
+
+
+
+          print(
+
+              "✅ Neon connection successful"
+
+          )
+
+
+
+          EOF
+
+
+
+
+
+
+
+      # ======================================================
+      # PYTHON SYNTAX CHECK
+      # ======================================================
+
+      - name: Validate audit syntax
 
 
         run: |
@@ -310,13 +459,59 @@ jobs:
           set -e
 
 
+
+          cd private_logger
+
+
+
+          echo "🐍 Checking audit Python syntax..."
+
+
+
+          python -m py_compile \
+
+          "Neon Weekly Audit/neon_audit.py"
+
+
+
+          echo "✅ Audit syntax OK"
+
+
+
+
+
+
+
+      # ======================================================
+      # RUN AUDIT
+      # ======================================================
+
+      - name: Run Neon audit
+
+
+        env:
+
+
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+
+
+
+        run: |
+
+
+          set -e
+
+
+
           cd private_logger
 
 
 
           echo "=============================="
 
-          echo "Starting Neon Audit"
+          echo "🚀 STARTING NEON WEEKLY AUDIT"
+
+          echo "UTC Time: $(date -u)"
 
           echo "=============================="
 
@@ -328,15 +523,23 @@ jobs:
 
           echo ""
 
-          echo "✅ Neon audit completed successfully"
+          echo "=============================="
+
+          echo "✅ NEON AUDIT COMPLETED"
+
+          echo "UTC Time: $(date -u)"
+
+          echo "=============================="
 
 
 
 
-      # =========================
+
+
+
+      # ======================================================
       # FAILURE DEBUG ARTIFACT
-      # =========================
-
+      # ======================================================
 
       - name: Upload debug files if failed
 
@@ -344,7 +547,9 @@ jobs:
         if: failure()
 
 
+
         uses: actions/upload-artifact@v4
+
 
 
         with:
@@ -353,9 +558,12 @@ jobs:
           name: neon-audit-debug
 
 
+
           path:
 
+
             private_logger/
+
 
 
           retention-days: 7
@@ -363,15 +571,18 @@ jobs:
 
 
 
-      # =========================
-      # CLEANUP
-      # =========================
 
+
+
+      # ======================================================
+      # CLEANUP
+      # ======================================================
 
       - name: Cleanup runner
 
 
         if: always()
+
 
 
         run: |
@@ -380,4 +591,5 @@ jobs:
           rm -rf private_logger
 
 
-          echo "✅ Runner cleaned"
+
+          echo "🧹 Runner cleaned"
