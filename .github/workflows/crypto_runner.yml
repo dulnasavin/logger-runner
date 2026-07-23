@@ -1,81 +1,166 @@
 name: Crypto Price Logger
 
+
 on:
+
   workflow_dispatch:
 
+
 permissions:
+
   contents: read
 
+
+
+# ============================================================
+# PREVENT MULTIPLE LOGGER RUNS
+# ============================================================
+
+concurrency:
+
+  group: crypto-price-logger
+
+  cancel-in-progress: false
+
+
+
 jobs:
+
+
   run-logger:
+
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 15
 
+
+
     steps:
+
 
       # =========================
       # CHECKOUT PUBLIC RUNNER
       # =========================
 
+
       - name: Checkout runner
+
         uses: actions/checkout@v4
+
+
+
 
 
       # =========================
       # DOWNLOAD PRIVATE LOGGER
       # =========================
 
+
       - name: Clone private crypto logger
+
+
         env:
+
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
+
         run: |
+
+
           set -e
+
 
           echo "Downloading private repo..."
 
-          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
+
+          git clone \
+          "https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+          private_logger
+
 
           echo "Private repo ready"
 
-          ls -la private_logger
+
+
+          cd private_logger
+
+
+          echo "Current branch:"
+
+          git branch
+
+
+
+          echo "Latest commit:"
+
+          git log -1 --oneline
+
+
+
 
 
       # =========================
       # PYTHON
       # =========================
 
+
       - name: Setup Python
+
+
         uses: actions/setup-python@v5
+
+
         with:
+
           python-version: "3.13"
 
 
+
+
       - name: Install dependencies
+
+
         run: |
+
+
           set -e
+
 
           cd private_logger/"Crypto Logger-Private Repo"
 
+
           echo "Installing dependencies..."
+
 
           python -m pip install --upgrade pip
 
+
           pip install -r requirements.txt
+
+
+
+
 
 
       # =========================
       # SECRET CHECK
       # =========================
 
+
       - name: Check required secrets exist
+
+
         run: |
 
+
           echo "Checking secrets..."
+
 
           test -n "${{ secrets.NEON_DATABASE_URL }}" \
           && echo "✅ NEON_DATABASE_URL exists" \
           || exit 1
+
 
 
           test -n "${{ secrets.BINANCE_API_KEY }}" \
@@ -83,9 +168,11 @@ jobs:
           || exit 1
 
 
+
           test -n "${{ secrets.BINANCE_SECRET_KEY }}" \
           && echo "✅ BINANCE_SECRET_KEY exists" \
           || exit 1
+
 
 
           test -n "${{ secrets.VPNBOOK_CONFIG }}" \
@@ -93,18 +180,35 @@ jobs:
           || exit 1
 
 
+
+
+
+
       # =========================
       # VPN
       # =========================
 
+
       - name: Install OpenVPN
+
+
         run: |
+
+
           sudo apt-get update
+
           sudo apt-get install -y openvpn
 
 
+
+
+
+
       - name: Create VPN config
+
+
         run: |
+
 
           echo "${{ secrets.VPNBOOK_CONFIG }}" > vpnbook.ovpn
 
@@ -117,8 +221,15 @@ jobs:
           echo "auth-user-pass auth.txt" >> vpnbook.ovpn
 
 
+
+
+
+
       - name: Connect VPN
+
+
         run: |
+
 
           sudo openvpn \
           --config vpnbook.ovpn \
@@ -126,59 +237,92 @@ jobs:
           --log vpn.log
 
 
-          echo "Waiting for VPN..."
+
+          echo "Waiting VPN..."
 
           sleep 30
 
 
-      - name: Check VPN
+
+
+
+
+      - name: Verify VPN
+
+
         run: |
+
+
+          echo "VPN process:"
 
           ps aux | grep openvpn || true
 
-          echo "--- VPN LOG ---"
-
-          cat vpn.log || true
 
 
-      - name: Verify VPN location
-        run: |
+          echo ""
 
           echo "IP:"
 
           curl -s https://api.ipify.org
 
-          echo
+
+          echo ""
+
 
 
           echo "Country:"
 
           curl -s https://ipinfo.io/country
 
+          echo
+
+
+
+
+
 
       # =========================
       # NETWORK TESTS
       # =========================
 
+
       - name: Test CoinGecko
+
+
         run: |
+
 
           curl -i https://api.coingecko.com/api/v3/ping
 
 
+
+
+
+
       - name: Test Binance
+
+
         run: |
 
+
           curl -i https://api.binance.com/api/v3/time || true
+
+
+
+
+
 
 
       # =========================
       # RUN LOGGER
       # =========================
 
+
       - name: Run logger
 
+
         env:
+
 
           DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
@@ -186,7 +330,10 @@ jobs:
 
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
 
+
+
         run: |
+
 
           set -e
 
@@ -194,26 +341,43 @@ jobs:
           cd private_logger/"Crypto Logger-Private Repo"
 
 
+
           echo "Starting logger..."
+
 
 
           python price_logger.py
 
 
+
           echo "✅ Logger completed"
+
+
+
+
+
+
 
 
       # =========================
       # VERIFY CSV
       # =========================
 
+
       - name: Check generated CSV
+
+
         run: |
+
 
           set -e
 
 
-          if [ ! -f private_logger/price_log.csv ]
+          CSV="private_logger/price_log.csv"
+
+
+
+          if [ ! -f "$CSV" ]
 
           then
 
@@ -224,28 +388,49 @@ jobs:
           fi
 
 
+
           echo "✅ CSV exists"
 
 
-          wc -l private_logger/price_log.csv
+          wc -l "$CSV"
+
+
+          echo ""
+
+          echo "Latest rows:"
+
+          tail -n 10 "$CSV"
+
+
+
+
+
 
 
       # =========================
       # SAVE CSV BACK
       # =========================
 
+
       - name: Save CSV to private repo
+
 
         env:
 
+
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
+
+
         run: |
+
 
           set -e
 
 
+
           cd private_logger
+
 
 
           git config user.name "github-actions"
@@ -253,44 +438,113 @@ jobs:
           git config user.email "actions@github.com"
 
 
-          git add "price_log.csv"
+
+
+          echo "Fetching latest remote..."
+
+
+
+          git fetch origin main
+
+
+
+          echo "Rebasing latest changes..."
+
+
+
+          git rebase origin/main || {
+
+
+
+            echo "Rebase failed"
+
+            git rebase --abort
+
+            exit 1
+
+          }
+
+
+
+
+
+          git add price_log.csv
+
+
+
 
 
           if git diff --cached --quiet
 
           then
 
+
             echo "No CSV changes"
 
             exit 0
 
+
           fi
 
 
-          git commit -m "Update crypto price log $(date -u)"
+
+
+
+          echo "Changes:"
+
+
+          git diff --cached --stat
+
+
+
+
+
+
+          git commit \
+          -m "Update crypto price log $(date -u)"
+
+
+
+
+
+          echo "Pushing..."
+
 
 
           git push \
-          "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+          "https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
           HEAD:main
 
 
-          echo "✅ CSV pushed"
+
+
+          echo "✅ CSV pushed successfully"
+
+
+
+
+
 
 
       # =========================
       # CLEAN
       # =========================
 
+
       - name: Cleanup
+
 
         if: always()
 
+
         run: |
 
+
           rm -rf private_logger
+
 
           rm -f vpnbook.ovpn auth.txt vpn.log
 
 
-          echo "Cleaned runner"
+
+          echo "🧹 Runner cleaned"
