@@ -40,6 +40,7 @@ concurrency:
 
 
 
+
 jobs:
 
 
@@ -65,6 +66,7 @@ jobs:
 
 
 
+
     steps:
 
 
@@ -85,7 +87,7 @@ jobs:
 
 
       # ======================================================
-      # CHECK PRIVATE REPO TOKEN
+      # CHECK PRIVATE TOKEN
       # ======================================================
 
       - name: Check private repo token
@@ -97,7 +99,7 @@ jobs:
           set -e
 
 
-          echo "Checking private repo token..."
+          echo "🔐 Checking private repo token..."
 
 
           if [ -z "${{ secrets.PRIVATE_REPO_TOKEN }}" ]
@@ -111,7 +113,7 @@ jobs:
           fi
 
 
-          echo "✅ PRIVATE_REPO_TOKEN exists"
+          echo "✅ PRIVATE_REPO_TOKEN available"
 
 
 
@@ -137,30 +139,20 @@ jobs:
           set -e
 
 
-          echo "📦 Downloading private repo..."
+          echo "📦 Downloading private repository..."
 
 
           git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
 
 
-          echo "✅ Private repo downloaded"
+          echo "✅ Private repository downloaded"
 
 
+          echo ""
 
-          cd private_logger
+          echo "Repository contents:"
 
-
-          echo "Current branch:"
-
-
-          git branch
-
-
-
-          echo "Latest commit:"
-
-
-          git log -1 --oneline
+          ls -la private_logger
 
 
 
@@ -181,32 +173,41 @@ jobs:
           set -e
 
 
-          echo "🔎 Checking files..."
+          echo "🔎 Checking required files..."
 
 
 
-          test -f "private_logger/Neon Sync/sync_to_neon.py" \
+          if [ -f "private_logger/Neon Sync/sync_to_neon.py" ]
 
-          && echo "✅ sync_to_neon.py found" \
+          then
 
-          || exit 1
+            echo "✅ sync_to_neon.py found"
 
+          else
 
+            echo "❌ sync_to_neon.py missing"
 
+            exit 1
 
-          test -f "private_logger/price_log.csv" \
-
-          && echo "✅ price_log.csv found" \
-
-          || exit 1
-
-
-
+          fi
 
 
 
 
-      # ======================================================
+          if [ -f "private_logger/price_log.csv" ]
+
+          then
+
+            echo "✅ price_log.csv found"
+
+          else
+
+            echo "❌ price_log.csv missing"
+
+            exit 1
+
+          fi
+                # ======================================================
       # SHOW CSV INFORMATION
       # ======================================================
 
@@ -222,24 +223,42 @@ jobs:
           echo "📊 CSV information"
 
 
+          echo ""
+
           wc -l private_logger/price_log.csv
 
 
+
+          echo ""
+
+          echo "CSV header:"
+
+
+          head -n 1 private_logger/price_log.csv
+
+
+
+          echo ""
 
           echo "Latest CSV rows:"
 
 
           tail -5 private_logger/price_log.csv
-                # ======================================================
+
+
+
+
+
+
+
+      # ======================================================
       # PYTHON SETUP
       # ======================================================
 
       - name: Setup Python
 
 
-        uses:
-
-          actions/setup-python@v5
+        uses: actions/setup-python@v5
 
 
         with:
@@ -267,8 +286,7 @@ jobs:
           set -e
 
 
-
-          cd private_logger/"Crypto Logger-Private Repo"
+          cd private_logger
 
 
 
@@ -276,7 +294,38 @@ jobs:
 
 
 
-          pip install -r requirements.txt
+          if [ -f "Crypto Logger-Private Repo/requirements.txt" ]
+
+          then
+
+            echo "Installing requirements.txt"
+
+
+            pip install -r "Crypto Logger-Private Repo/requirements.txt"
+
+
+          else
+
+
+            echo "requirements.txt not found"
+
+
+            echo "Installing psycopg2 manually"
+
+
+            pip install psycopg2-binary
+
+
+          fi
+
+
+
+          echo ""
+
+          echo "Installed packages:"
+
+
+          pip list
 
 
 
@@ -297,7 +346,6 @@ jobs:
           set -e
 
 
-
           cd private_logger
 
 
@@ -306,13 +354,11 @@ jobs:
 
 
 
-          python -m py_compile \
-          "Neon Sync/sync_to_neon.py"
+          python -m py_compile "Neon Sync/sync_to_neon.py"
 
 
 
           echo "✅ Syntax OK"
-
 
 
 
@@ -436,7 +482,6 @@ jobs:
       - name: Run Neon sync
 
 
-
         env:
 
 
@@ -469,6 +514,8 @@ jobs:
 
 
 
+          echo ""
+
           echo "=============================="
 
           echo "✅ NEON SYNC COMPLETED"
@@ -476,6 +523,7 @@ jobs:
           echo "UTC Time: $(date -u)"
 
           echo "=============================="
+
 
 
 
@@ -497,9 +545,7 @@ jobs:
         run: |
 
 
-
           rm -rf private_logger
-
 
 
           echo "🧹 Runner cleaned"
