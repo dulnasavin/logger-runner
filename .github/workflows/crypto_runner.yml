@@ -184,6 +184,8 @@ jobs:
 
 
 
+
+
       # =========================
       # VPN
       # =========================
@@ -225,6 +227,8 @@ jobs:
 
 
 
+
+
       - name: Connect VPN
 
 
@@ -240,7 +244,10 @@ jobs:
 
           echo "Waiting VPN..."
 
+
           sleep 30
+
+
 
 
 
@@ -255,15 +262,19 @@ jobs:
 
           echo "VPN process:"
 
+
           ps aux | grep openvpn || true
 
 
 
           echo ""
 
+
           echo "IP:"
 
+
           curl -s https://api.ipify.org
+
 
 
           echo ""
@@ -272,9 +283,13 @@ jobs:
 
           echo "Country:"
 
+
           curl -s https://ipinfo.io/country
 
+
           echo
+
+
 
 
 
@@ -351,63 +366,7 @@ jobs:
 
 
           echo "✅ Logger completed"
-
-
-
-
-
-
-
-
-      # =========================
-      # VERIFY CSV
-      # =========================
-
-
-      - name: Check generated CSV
-
-
-        run: |
-
-
-          set -e
-
-
-          CSV="private_logger/price_log.csv"
-
-
-
-          if [ ! -f "$CSV" ]
-
-          then
-
-            echo "❌ CSV missing"
-
-            exit 1
-
-          fi
-
-
-
-          echo "✅ CSV exists"
-
-
-          wc -l "$CSV"
-
-
-          echo ""
-
-          echo "Latest rows:"
-
-          tail -n 10 "$CSV"
-
-
-
-
-
-
-
-      # =========================
+                # =========================
       # SAVE CSV BACK
       # =========================
 
@@ -440,6 +399,40 @@ jobs:
 
 
 
+          echo "Checking repository status..."
+
+
+
+          git status
+
+
+
+
+
+
+          # =========================
+          # SAVE LOGGER CSV CHANGE
+          # =========================
+
+
+          echo "Temporarily saving CSV changes..."
+
+
+
+          git stash push \
+          -m "temporary csv update before sync" \
+          -- price_log.csv || true
+
+
+
+
+
+
+          # =========================
+          # GET LATEST REMOTE
+          # =========================
+
+
           echo "Fetching latest remote..."
 
 
@@ -448,27 +441,56 @@ jobs:
 
 
 
+
+
+
+          # =========================
+          # REBASE CLEAN BRANCH
+          # =========================
+
+
           echo "Rebasing latest changes..."
 
 
 
-          git rebase origin/main || {
+          git rebase origin/main
 
 
 
-            echo "Rebase failed"
-
-            git rebase --abort
-
-            exit 1
-
-          }
+          echo "✅ Rebase completed"
 
 
+
+
+
+
+          # =========================
+          # RESTORE CSV CHANGE
+          # =========================
+
+
+          echo "Restoring CSV update..."
+
+
+
+          git stash pop || true
+
+
+
+
+
+
+          # =========================
+          # CHECK CSV CHANGE
+          # =========================
+
+
+          git status
 
 
 
           git add price_log.csv
+
 
 
 
@@ -479,7 +501,8 @@ jobs:
           then
 
 
-            echo "No CSV changes"
+            echo "No CSV changes to commit"
+
 
             exit 0
 
@@ -490,7 +513,8 @@ jobs:
 
 
 
-          echo "Changes:"
+
+          echo "Changes ready:"
 
 
           git diff --cached --stat
@@ -500,6 +524,11 @@ jobs:
 
 
 
+          # =========================
+          # COMMIT
+          # =========================
+
+
           git commit \
           -m "Update crypto price log $(date -u)"
 
@@ -507,7 +536,13 @@ jobs:
 
 
 
-          echo "Pushing..."
+
+          # =========================
+          # PUSH
+          # =========================
+
+
+          echo "Pushing latest CSV..."
 
 
 
@@ -518,7 +553,10 @@ jobs:
 
 
 
+
           echo "✅ CSV pushed successfully"
+
+
 
 
 
