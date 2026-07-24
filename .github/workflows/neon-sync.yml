@@ -28,7 +28,6 @@ permissions:
 
 # ============================================================
 # PREVENT DATABASE JOB COLLISIONS
-# Sync and Audit share this group
 # ============================================================
 
 concurrency:
@@ -40,11 +39,11 @@ concurrency:
 
 
 
+
 jobs:
 
 
   sync-to-neon:
-
 
 
     if: >
@@ -60,7 +59,6 @@ jobs:
     runs-on: ubuntu-latest
 
 
-
     timeout-minutes: 5
 
 
@@ -71,6 +69,7 @@ jobs:
 
 
 
+
       # ======================================================
       # CHECKOUT PUBLIC RUNNER
       # ======================================================
@@ -78,6 +77,42 @@ jobs:
       - name: Checkout runner
 
         uses: actions/checkout@v4
+
+
+
+
+
+
+
+      # ======================================================
+      # CHECK PRIVATE REPO TOKEN
+      # ======================================================
+
+      - name: Check private repo token
+
+
+        run: |
+
+
+          set -e
+
+
+          echo "Checking private repo token..."
+
+
+          if [ -z "${{ secrets.PRIVATE_REPO_TOKEN }}" ]
+
+          then
+
+            echo "❌ PRIVATE_REPO_TOKEN missing"
+
+            exit 1
+
+          fi
+
+
+          echo "✅ PRIVATE_REPO_TOKEN exists"
+
 
 
 
@@ -96,7 +131,6 @@ jobs:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
 
-
         run: |
 
 
@@ -106,16 +140,27 @@ jobs:
           echo "📦 Downloading private repo..."
 
 
-
-          git clone \
-
-          https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
-
-          private_logger
-
+          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
 
 
           echo "✅ Private repo downloaded"
+
+
+
+          cd private_logger
+
+
+          echo "Current branch:"
+
+
+          git branch
+
+
+
+          echo "Latest commit:"
+
+
+          git log -1 --oneline
 
 
 
@@ -134,7 +179,6 @@ jobs:
 
 
           set -e
-
 
 
           echo "🔎 Checking files..."
@@ -175,7 +219,6 @@ jobs:
           set -e
 
 
-
           echo "📊 CSV information"
 
 
@@ -187,14 +230,7 @@ jobs:
 
 
           tail -5 private_logger/price_log.csv
-
-
-
-
-
-
-
-      # ======================================================
+                # ======================================================
       # PYTHON SETUP
       # ======================================================
 
@@ -210,6 +246,7 @@ jobs:
 
 
           python-version: "3.13"
+
 
 
 
@@ -270,12 +307,12 @@ jobs:
 
 
           python -m py_compile \
-
           "Neon Sync/sync_to_neon.py"
 
 
 
           echo "✅ Syntax OK"
+
 
 
 
@@ -291,6 +328,9 @@ jobs:
 
 
         run: |
+
+
+          set -e
 
 
 
@@ -310,6 +350,7 @@ jobs:
 
 
           echo "✅ Neon secret exists"
+
 
 
 
@@ -404,7 +445,6 @@ jobs:
 
 
         run: |
-
 
 
           set -e
