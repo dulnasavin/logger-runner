@@ -114,6 +114,45 @@ jobs:
 
 
       # ======================================================
+      # CHECK PRIVATE TOKEN
+      # ======================================================
+
+      - name: Check private repository token
+
+
+        run: |
+
+
+          set -e
+
+
+          echo "Checking private repo token..."
+
+
+          if [ -z "${{ secrets.PRIVATE_REPO_TOKEN }}" ]
+
+          then
+
+
+            echo "❌ PRIVATE_REPO_TOKEN missing"
+
+
+            exit 1
+
+
+          fi
+
+
+
+          echo "✅ PRIVATE_REPO_TOKEN exists"
+
+
+
+
+
+
+
+      # ======================================================
       # CLONE PRIVATE REPOSITORY
       # ======================================================
 
@@ -137,15 +176,84 @@ jobs:
 
 
 
-          git clone \
+          for attempt in 1 2 3
 
-          https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git \
-
-          private_logger
+          do
 
 
+            echo "Clone attempt $attempt"
 
-          echo "✅ Private repository downloaded"
+
+
+            if git clone \
+            "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+            private_logger
+
+
+            then
+
+
+              echo "✅ Private repository downloaded"
+
+              break
+
+
+            fi
+
+
+
+            echo "⚠ Clone failed"
+
+
+
+            rm -rf private_logger
+
+
+
+            sleep 10
+
+
+
+
+            if [ "$attempt" -eq 3 ]
+
+            then
+
+
+              echo "❌ Clone failed after 3 attempts"
+
+
+              exit 1
+
+
+            fi
+
+
+          done
+
+
+
+
+
+          cd private_logger
+
+
+
+          echo ""
+
+          echo "Current branch:"
+
+
+          git branch
+
+
+
+          echo ""
+
+          echo "Latest commit:"
+
+
+          git log -1 --oneline
 
 
 
@@ -245,14 +353,7 @@ jobs:
           echo "Latest CSV rows:"
 
           tail -10 "$CSV"
-
-
-
-
-
-
-
-      # ======================================================
+                # ======================================================
       # PYTHON SETUP
       # ======================================================
 
@@ -341,6 +442,10 @@ jobs:
 
 
         run: |
+
+
+          set -e
+
 
 
           if [ -z "$NEON_DATABASE_URL" ]
