@@ -52,6 +52,7 @@ jobs:
 
 
 
+
       # =========================
       # DOWNLOAD PRIVATE LOGGER
       # =========================
@@ -74,9 +75,27 @@ jobs:
           echo "Downloading private repo..."
 
 
+
+          if [ -z "$TOKEN" ]
+
+          then
+
+            echo "❌ PRIVATE_REPO_TOKEN missing"
+
+            exit 1
+
+          fi
+
+
+
+          echo "✅ PRIVATE_REPO_TOKEN exists"
+
+
+
           git clone \
           "https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
           private_logger
+
 
 
           echo "Private repo ready"
@@ -84,6 +103,7 @@ jobs:
 
 
           cd private_logger
+
 
 
           echo "Current branch:"
@@ -95,6 +115,8 @@ jobs:
           echo "Latest commit:"
 
           git log -1 --oneline
+
+
 
 
 
@@ -118,6 +140,9 @@ jobs:
 
 
 
+
+
+
       - name: Install dependencies
 
 
@@ -127,16 +152,22 @@ jobs:
           set -e
 
 
+
           cd private_logger/"Crypto Logger-Private Repo"
+
 
 
           echo "Installing dependencies..."
 
 
+
           python -m pip install --upgrade pip
 
 
+
           pip install -r requirements.txt
+
+
 
 
 
@@ -157,9 +188,11 @@ jobs:
           echo "Checking secrets..."
 
 
+
           test -n "${{ secrets.NEON_DATABASE_URL }}" \
           && echo "✅ NEON_DATABASE_URL exists" \
           || exit 1
+
 
 
 
@@ -169,16 +202,17 @@ jobs:
 
 
 
+
           test -n "${{ secrets.BINANCE_SECRET_KEY }}" \
           && echo "✅ BINANCE_SECRET_KEY exists" \
           || exit 1
 
 
 
+
           test -n "${{ secrets.VPNBOOK_CONFIG }}" \
           && echo "✅ VPNBOOK_CONFIG exists" \
           || exit 1
-
 
 
 
@@ -199,7 +233,9 @@ jobs:
 
           sudo apt-get update
 
+
           sudo apt-get install -y openvpn
+
 
 
 
@@ -215,9 +251,11 @@ jobs:
           echo "${{ secrets.VPNBOOK_CONFIG }}" > vpnbook.ovpn
 
 
+
           printf "%s\n%s\n" \
           "${{ secrets.VPNBOOK_USERNAME }}" \
           "${{ secrets.VPNBOOK_PASSWORD }}" > auth.txt
+
 
 
           echo "auth-user-pass auth.txt" >> vpnbook.ovpn
@@ -242,7 +280,9 @@ jobs:
 
 
 
+
           echo "Waiting VPN..."
+
 
 
           sleep 30
@@ -263,17 +303,22 @@ jobs:
           echo "VPN process:"
 
 
+
           ps aux | grep openvpn || true
+
 
 
 
           echo ""
 
 
+
           echo "IP:"
 
 
+
           curl -s https://api.ipify.org
+
 
 
 
@@ -284,11 +329,12 @@ jobs:
           echo "Country:"
 
 
+
           curl -s https://ipinfo.io/country
 
 
-          echo
 
+          echo
 
 
 
@@ -341,7 +387,9 @@ jobs:
 
           DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
 
+
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+
 
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
 
@@ -353,7 +401,9 @@ jobs:
           set -e
 
 
+
           cd private_logger/"Crypto Logger-Private Repo"
+
 
 
 
@@ -361,12 +411,82 @@ jobs:
 
 
 
+
           python price_logger.py
+
 
 
 
           echo "✅ Logger completed"
                 # =========================
+      # VERIFY CSV
+      # =========================
+
+
+      - name: Check generated CSV
+
+
+        run: |
+
+
+          set -e
+
+
+
+          CSV="private_logger/price_log.csv"
+
+
+
+          if [ ! -f "$CSV" ]
+
+          then
+
+            echo "❌ CSV missing"
+
+            exit 1
+
+          fi
+
+
+
+
+          echo "✅ CSV exists"
+
+
+
+
+          echo ""
+
+          echo "CSV size:"
+
+          ls -lh "$CSV"
+
+
+
+
+          echo ""
+
+          echo "CSV rows:"
+
+          wc -l "$CSV"
+
+
+
+
+          echo ""
+
+          echo "Latest rows:"
+
+          tail -n 10 "$CSV"
+
+
+
+
+
+
+
+
+      # =========================
       # SAVE CSV BACK
       # =========================
 
@@ -388,7 +508,9 @@ jobs:
 
 
 
+
           cd private_logger
+
 
 
 
@@ -399,7 +521,7 @@ jobs:
 
 
 
-          echo "Checking repository status..."
+          echo "Checking repository state..."
 
 
 
@@ -408,29 +530,26 @@ jobs:
 
 
 
+          # ---------------------------------
+          # Remove any unwanted local changes
+          # ---------------------------------
 
-
-          # =========================
-          # SAVE LOGGER CSV CHANGE
-          # =========================
-
-
-          echo "Temporarily saving CSV changes..."
+          echo "Cleaning working tree..."
 
 
 
-          git stash push \
-          -m "temporary csv update before sync" \
-          -- price_log.csv || true
+          git reset --hard HEAD
 
 
+
+          git clean -fd
 
 
 
 
-          # =========================
-          # GET LATEST REMOTE
-          # =========================
+          # ---------------------------------
+          # Get latest remote safely
+          # ---------------------------------
 
 
           echo "Fetching latest remote..."
@@ -442,56 +561,38 @@ jobs:
 
 
 
-
-
-          # =========================
-          # REBASE CLEAN BRANCH
-          # =========================
-
-
-          echo "Rebasing latest changes..."
+          echo "Resetting to latest remote..."
 
 
 
-          git rebase origin/main
-
-
-
-          echo "✅ Rebase completed"
+          git reset --hard origin/main
 
 
 
 
+          # ---------------------------------
+          # Restore generated CSV
+          # ---------------------------------
 
 
-          # =========================
-          # RESTORE CSV CHANGE
-          # =========================
-
-
-          echo "Restoring CSV update..."
-
-
-
-          git stash pop || true
+          echo "Checking CSV after remote update..."
 
 
 
+          if [ ! -f price_log.csv ]
 
+          then
 
+            echo "❌ price_log.csv disappeared after reset"
 
-          # =========================
-          # CHECK CSV CHANGE
-          # =========================
+            exit 1
 
+          fi
 
-          git status
 
 
 
           git add price_log.csv
-
-
 
 
 
@@ -501,7 +602,8 @@ jobs:
           then
 
 
-            echo "No CSV changes to commit"
+            echo "No CSV changes"
+
 
 
             exit 0
@@ -512,9 +614,8 @@ jobs:
 
 
 
+          echo "CSV changes detected:"
 
-
-          echo "Changes ready:"
 
 
           git diff --cached --stat
@@ -522,11 +623,6 @@ jobs:
 
 
 
-
-
-          # =========================
-          # COMMIT
-          # =========================
 
 
           git commit \
@@ -537,26 +633,90 @@ jobs:
 
 
 
-          # =========================
-          # PUSH
-          # =========================
+          # ---------------------------------
+          # Push with retry protection
+          # ---------------------------------
 
 
-          echo "Pushing latest CSV..."
-
-
-
-          git push \
-          "https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
-          HEAD:main
+          echo "Pushing changes..."
 
 
 
+          for attempt in 1 2 3
+
+          do
 
 
-          echo "✅ CSV pushed successfully"
+            echo "Push attempt $attempt"
 
 
+
+            if git push \
+            "https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+            HEAD:main
+
+            then
+
+
+              echo "✅ CSV pushed successfully"
+
+              break
+
+
+            fi
+
+
+
+
+            echo "⚠ Push failed. Another update may have arrived."
+
+
+
+            if [ "$attempt" -lt 3 ]
+
+            then
+
+
+              echo "Refreshing remote..."
+
+
+
+              git fetch origin main
+
+
+
+              git reset --hard origin/main
+
+
+
+              git add price_log.csv
+
+
+
+              git commit \
+              -m "Update crypto price log retry $(date -u)" \
+              || true
+
+
+
+              sleep 5
+
+
+
+            else
+
+
+              echo "❌ Push failed after 3 attempts"
+
+
+
+              exit 1
+
+
+            fi
+
+
+          done
 
 
 
@@ -578,10 +738,13 @@ jobs:
         run: |
 
 
+
           rm -rf private_logger
 
 
+
           rm -f vpnbook.ovpn auth.txt vpn.log
+
 
 
 
