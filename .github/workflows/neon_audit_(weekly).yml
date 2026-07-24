@@ -41,7 +41,6 @@ jobs:
   neon-audit:
 
 
-
     runs-on: ubuntu-latest
 
 
@@ -152,6 +151,7 @@ jobs:
 
 
 
+
       # ======================================================
       # CLONE PRIVATE REPOSITORY
       # ======================================================
@@ -176,62 +176,13 @@ jobs:
 
 
 
-          for attempt in 1 2 3
-
-          do
-
-
-            echo "Clone attempt $attempt"
+          git clone \
+          "https://x-access-token:${TOKEN}@GitHub.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+          private_logger
 
 
 
-            if git clone \
-            "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
-            private_logger
-
-
-            then
-
-
-              echo "✅ Private repository downloaded"
-
-              break
-
-
-            fi
-
-
-
-            echo "⚠ Clone failed"
-
-
-
-            rm -rf private_logger
-
-
-
-            sleep 10
-
-
-
-
-            if [ "$attempt" -eq 3 ]
-
-            then
-
-
-              echo "❌ Clone failed after 3 attempts"
-
-
-              exit 1
-
-
-            fi
-
-
-          done
-
-
+          echo "✅ Private repository downloaded"
 
 
 
@@ -243,7 +194,6 @@ jobs:
 
           echo "Current branch:"
 
-
           git branch
 
 
@@ -251,7 +201,6 @@ jobs:
           echo ""
 
           echo "Latest commit:"
-
 
           git log -1 --oneline
 
@@ -278,8 +227,8 @@ jobs:
           echo "=============================="
 
 
-
           find private_logger -maxdepth 3 -type f | sort
+
 
 
 
@@ -353,7 +302,7 @@ jobs:
           echo "Latest CSV rows:"
 
           tail -10 "$CSV"
-                # ======================================================
+      # ======================================================
       # PYTHON SETUP
       # ======================================================
 
@@ -367,6 +316,7 @@ jobs:
 
 
           python-version: "3.13"
+
 
 
 
@@ -401,11 +351,19 @@ jobs:
           then
 
 
+            echo "Installing requirements.txt"
+
+
             pip install -r "Crypto Logger-Private Repo/requirements.txt"
 
 
 
           else
+
+
+            echo "requirements.txt not found"
+
+            echo "Installing psycopg2 manually"
 
 
             pip install psycopg2-binary
@@ -465,6 +423,7 @@ jobs:
 
 
           echo "✅ Neon secret available"
+
 
 
 
@@ -573,9 +532,7 @@ jobs:
 
 
 
-          python -m py_compile \
-
-          "Neon Weekly Audit/neon_audit.py"
+          python -m py_compile "Neon Weekly Audit/neon_audit.py"
 
 
 
@@ -642,6 +599,7 @@ jobs:
 
 
 
+
       # ======================================================
       # FAILURE DEBUG ARTIFACT
       # ======================================================
@@ -694,7 +652,6 @@ jobs:
 
 
           rm -rf private_logger
-
 
 
           echo "🧹 Runner cleaned"
