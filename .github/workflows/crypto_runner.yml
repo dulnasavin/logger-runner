@@ -8,7 +8,7 @@ permissions:
 
 # ============================================================
 # PREVENT MULTIPLE LOGGER RUNS
-# Only one logger run can update the CSV at a time.
+# Allows only one logger to update the CSV at a time.
 # ============================================================
 
 concurrency:
@@ -26,7 +26,7 @@ jobs:
 
       # ======================================================
       # CHECKOUT PUBLIC RUNNER
-      # Downloads the public GitHub Actions runner repository.
+      # Downloads the public GitHub Actions repository.
       # ======================================================
 
       - name: Checkout runner repository
@@ -35,7 +35,7 @@ jobs:
 
       # ======================================================
       # RUNNER INFORMATION
-      # Shows basic information for workflow troubleshooting.
+      # Displays basic runner information for troubleshooting.
       # ======================================================
 
       - name: Show runner information
@@ -59,13 +59,13 @@ jobs:
           pwd
 
           echo ""
-          echo "Disk space:"
+          echo "Available disk space:"
           df -h .
 
 
       # ======================================================
       # CHECK PRIVATE REPOSITORY TOKEN
-      # Confirms that the private GitHub token is available.
+      # Confirms the private repository token is available.
       # ======================================================
 
       - name: Check private repository token
@@ -87,7 +87,7 @@ jobs:
 
       # ======================================================
       # CLONE PRIVATE REPOSITORY
-      # Downloads the private crypto logger with retry support.
+      # Downloads the private logger with three retry attempts.
       # ======================================================
 
       - name: Clone private crypto logger
@@ -110,7 +110,12 @@ jobs:
 
             rm -rf private_logger
 
-            if git clone --branch main --single-branch "$REPOSITORY_URL" private_logger; then
+            if git clone \
+              --branch main \
+              --single-branch \
+              "$REPOSITORY_URL" \
+              private_logger
+            then
               echo "✅ Private repository downloaded"
               break
             fi
@@ -120,7 +125,7 @@ jobs:
               exit 1
             fi
 
-            echo "Waiting before retry..."
+            echo "Waiting 5 seconds before retry..."
             sleep 5
           done
 
@@ -146,7 +151,7 @@ jobs:
 
       # ======================================================
       # VALIDATE REPOSITORY STRUCTURE
-      # Checks that the logger and requirements files exist.
+      # Checks the logger and requirements files are present.
       # ======================================================
 
       - name: Validate private repository structure
@@ -156,6 +161,8 @@ jobs:
           LOGGER_DIRECTORY="private_logger/Crypto Logger-Private Repo"
           LOGGER_FILE="${LOGGER_DIRECTORY}/price_logger.py"
           REQUIREMENTS_FILE="${LOGGER_DIRECTORY}/requirements.txt"
+
+          echo "Checking private repository structure..."
 
           if [ ! -d "$LOGGER_DIRECTORY" ]; then
             echo "❌ Logger directory missing"
@@ -186,7 +193,7 @@ jobs:
 
       # ======================================================
       # SETUP PYTHON
-      # Installs Python 3.13 on the GitHub Actions runner.
+      # Installs Python 3.13 on the temporary runner.
       # ======================================================
 
       - name: Setup Python
@@ -198,7 +205,7 @@ jobs:
 
       # ======================================================
       # SHOW PYTHON INFORMATION
-      # Displays the Python and pip versions being used.
+      # Displays the active Python and pip versions.
       # ======================================================
 
       - name: Show Python information
@@ -250,7 +257,7 @@ jobs:
 
       # ======================================================
       # CHECK REQUIRED SECRETS
-      # Confirms that all logger and VPN secrets are available.
+      # Confirms all logger and VPN secrets are available.
       # ======================================================
 
       - name: Check required secrets
@@ -295,7 +302,7 @@ jobs:
 
       # ======================================================
       # INSTALL OPENVPN
-      # Installs OpenVPN on the temporary Actions runner.
+      # Installs OpenVPN on the GitHub Actions runner.
       # ======================================================
 
       - name: Install OpenVPN
@@ -307,10 +314,12 @@ jobs:
           echo "============================================================"
 
           sudo apt-get update
+
           sudo apt-get install -y openvpn
 
           echo ""
           echo "OpenVPN version:"
+
           openvpn --version | head -n 1
 
           echo ""
@@ -319,7 +328,7 @@ jobs:
 
       # ======================================================
       # CREATE VPN CONFIGURATION
-      # Creates protected temporary VPN authentication files.
+      # Creates protected VPN configuration and login files.
       # ======================================================
 
       - name: Create VPN configuration
@@ -331,12 +340,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Creating VPN configuration..."
+          echo "============================================================"
+          echo "🔐 CREATING VPN CONFIGURATION"
+          echo "============================================================"
 
           umask 077
 
           printf '%s\n' "$VPNBOOK_CONFIG" > vpnbook.ovpn
-          printf '%s\n%s\n' "$VPNBOOK_USERNAME" "$VPNBOOK_PASSWORD" > auth.txt
+
+          printf '%s\n%s\n' \
+            "$VPNBOOK_USERNAME" \
+            "$VPNBOOK_PASSWORD" \
+            > auth.txt
 
           echo "auth-user-pass auth.txt" >> vpnbook.ovpn
 
@@ -353,12 +368,12 @@ jobs:
             exit 1
           fi
 
-          echo "✅ VPN configuration created"
+          echo "✅ VPN configuration created securely"
 
 
       # ======================================================
       # CONNECT VPN
-      # Starts OpenVPN and waits for a successful connection.
+      # Starts OpenVPN and waits up to 60 seconds to connect.
       # ======================================================
 
       - name: Connect VPN
@@ -369,27 +384,63 @@ jobs:
           echo "🌐 CONNECTING TO VPN"
           echo "============================================================"
 
-          rm -f vpn.log
+          VPN_CONFIG="${GITHUB_WORKSPACE}/vpnbook.ovpn"
+          VPN_LOG="${GITHUB_WORKSPACE}/vpn.log"
 
-          sudo openvpn --config vpnbook.ovpn --daemon --log vpn.log
+          rm -f "$VPN_LOG"
+
+          # Create the file as the normal runner user.
+          # This prevents the artifact permission error.
+          touch "$VPN_LOG"
+
+          chmod 644 "$VPN_LOG"
+
+          sudo openvpn \
+            --config "$VPN_CONFIG" \
+            --daemon \
+            --log "$VPN_LOG"
+
+          # Ensure the normal runner can read the OpenVPN log.
+          sudo chown "$(id -u):$(id -g)" "$VPN_LOG"
+
+          sudo chmod 644 "$VPN_LOG"
 
           VPN_CONNECTED="false"
 
-          for attempt in 1 2 3 4 5 6
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12
           do
-            echo "VPN connection check ${attempt}/6"
+            echo "VPN connection check ${attempt}/12"
 
-            if grep -q "Initialization Sequence Completed" vpn.log 2>/dev/null; then
+            if grep -q \
+              "Initialization Sequence Completed" \
+              "$VPN_LOG"
+            then
               VPN_CONNECTED="true"
               break
             fi
 
-            if ! pgrep -x openvpn >/dev/null 2>&1; then
+            if grep -Eq \
+              "AUTH_FAILED|Options error|Exiting due to fatal error" \
+              "$VPN_LOG"
+            then
+              echo "❌ OpenVPN reported an error"
+
+              echo ""
+              echo "VPN log:"
+
+              cat "$VPN_LOG" || true
+
+              exit 1
+            fi
+
+            if ! sudo pgrep -x openvpn >/dev/null 2>&1
+            then
               echo "❌ OpenVPN process stopped unexpectedly"
 
               echo ""
               echo "VPN log:"
-              cat vpn.log 2>/dev/null || true
+
+              cat "$VPN_LOG" || true
 
               exit 1
             fi
@@ -397,22 +448,25 @@ jobs:
             sleep 5
           done
 
-          if [ "$VPN_CONNECTED" != "true" ]; then
-            echo "❌ VPN connection did not complete"
+          if [ "$VPN_CONNECTED" != "true" ]
+          then
+            echo "❌ VPN connection did not complete within 60 seconds"
 
             echo ""
             echo "VPN log:"
-            cat vpn.log 2>/dev/null || true
+
+            cat "$VPN_LOG" || true
 
             exit 1
           fi
 
+          echo ""
           echo "✅ VPN connection completed"
 
 
       # ======================================================
-      # VERIFY VPN
-      # Displays the VPN process, public IP and country.
+      # VERIFY VPN CONNECTION
+      # Displays the VPN process, log, public IP and country.
       # ======================================================
 
       - name: Verify VPN connection
@@ -426,23 +480,36 @@ jobs:
           echo ""
           echo "OpenVPN process:"
 
-          pgrep -a openvpn || true
+          sudo pgrep -a openvpn || true
 
           echo ""
           echo "Latest VPN log:"
 
-          tail -n 20 vpn.log || true
+          tail -n 50 vpn.log || true
 
           echo ""
           echo "Current public IP:"
 
-          curl --silent --show-error --connect-timeout 10 --max-time 20 https://api.ipify.org || true
+          curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 20 \
+            https://api.ipify.org \
+            || true
 
           echo ""
           echo ""
-          echo "Current country:"
 
-          curl --silent --show-error --connect-timeout 10 --max-time 20 https://ipinfo.io/country || true
+          echo "Current IP country:"
+
+          curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 20 \
+            https://ipinfo.io/country \
+            || true
 
           echo ""
 
@@ -458,7 +525,12 @@ jobs:
           echo "🦎 TESTING COINGECKO"
           echo "============================================================"
 
-          curl --include --connect-timeout 10 --max-time 20 https://api.coingecko.com/api/v3/ping || true
+          curl \
+            --include \
+            --connect-timeout 10 \
+            --max-time 20 \
+            https://api.coingecko.com/api/v3/ping \
+            || true
 
           echo ""
           echo "CoinGecko diagnostic test completed"
@@ -475,7 +547,12 @@ jobs:
           echo "🟡 TESTING BINANCE"
           echo "============================================================"
 
-          curl --include --connect-timeout 10 --max-time 20 https://api.binance.com/api/v3/time || true
+          curl \
+            --include \
+            --connect-timeout 10 \
+            --max-time 20 \
+            https://api.binance.com/api/v3/time \
+            || true
 
           echo ""
           echo "Binance diagnostic test completed"
@@ -483,7 +560,7 @@ jobs:
 
       # ======================================================
       # VALIDATE PYTHON SYNTAX
-      # Checks price_logger.py before running the main logger.
+      # Checks price_logger.py before running the logger.
       # ======================================================
 
       - name: Validate logger syntax
@@ -504,7 +581,7 @@ jobs:
 
       # ======================================================
       # SHOW LOGGER INFORMATION
-      # Displays the logger file size, lines and checksum.
+      # Displays logger size, line count and checksum.
       # ======================================================
 
       - name: Show logger file information
@@ -544,7 +621,7 @@ jobs:
 
           echo "============================================================"
           echo "🚀 STARTING CRYPTO PRICE LOGGER"
-          echo "UTC Time: $(date -u)"
+          echo "UTC time: $(date -u)"
           echo "============================================================"
 
           python price_logger.py
@@ -552,13 +629,13 @@ jobs:
           echo ""
           echo "============================================================"
           echo "✅ CRYPTO PRICE LOGGER COMPLETED"
-          echo "UTC Time: $(date -u)"
+          echo "UTC time: $(date -u)"
           echo "============================================================"
 
 
       # ======================================================
       # CHECK GENERATED CSV
-      # Confirms that price_log.csv exists and is not empty.
+      # Confirms price_log.csv exists and is not empty.
       # ======================================================
 
       - name: Check generated CSV
@@ -584,7 +661,7 @@ jobs:
           echo "✅ price_log.csv exists"
 
           echo ""
-          echo "CSV information:"
+          echo "CSV file information:"
           ls -lh "$CSV"
 
           echo ""
@@ -602,7 +679,7 @@ jobs:
 
       # ======================================================
       # VALIDATE CSV HEADER
-      # Stops malformed CSV files from being committed.
+      # Prevents a malformed CSV from being committed.
       # ======================================================
 
       - name: Validate CSV header
@@ -633,7 +710,7 @@ jobs:
 
       # ======================================================
       # VALIDATE CSV ROW COUNT
-      # Requires one header and at least one crypto data row.
+      # Requires a header and at least one crypto data row.
       # ======================================================
 
       - name: Validate CSV row count
@@ -755,12 +832,12 @@ jobs:
           COMMIT_MESSAGE="Update crypto price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
           echo ""
-          echo "Creating local commit..."
+          echo "Creating local CSV commit..."
 
           git commit -m "$COMMIT_MESSAGE"
 
           echo ""
-          echo "Local commit:"
+          echo "Local commit created:"
 
           git log -1 --oneline
 
@@ -808,11 +885,14 @@ jobs:
             echo "⚠ Push attempt ${attempt} failed"
 
             if [ "$attempt" -lt 3 ]; then
+              echo "The remote branch may have changed"
               echo "Waiting 5 seconds before retry..."
+
               sleep 5
             fi
           done
 
+          echo ""
           echo "❌ CSV push failed after 3 attempts"
 
           exit 1
@@ -820,7 +900,7 @@ jobs:
 
       # ======================================================
       # CREATE WORKFLOW SUMMARY
-      # Adds a clear result summary to the Actions run page.
+      # Adds a result summary to the GitHub Actions run page.
       # ======================================================
 
       - name: Create logger summary
@@ -852,8 +932,41 @@ jobs:
 
 
       # ======================================================
+      # PREPARE FAILURE DEBUG FILES
+      # Copies safe files into a readable debug directory.
+      # ======================================================
+
+      - name: Prepare debug files if failed
+        if: failure()
+
+        run: |
+          set +e
+
+          echo "Preparing failure debug files..."
+
+          mkdir -p debug
+
+          if [ -f vpn.log ]; then
+            sudo cp vpn.log debug/vpn.log
+          fi
+
+          if [ -f private_logger/price_log.csv ]; then
+            cp private_logger/price_log.csv debug/price_log.csv
+          fi
+
+          sudo chown -R "$(id -u):$(id -g)" debug
+
+          chmod -R u+rwX,go+rX debug
+
+          echo ""
+          echo "Prepared debug files:"
+
+          find debug -maxdepth 2 -type f -ls || true
+
+
+      # ======================================================
       # UPLOAD FAILURE DEBUG FILES
-      # Uploads safe troubleshooting files when the job fails.
+      # Uploads readable troubleshooting files after failure.
       # ======================================================
 
       - name: Upload debug files if failed
@@ -864,9 +977,7 @@ jobs:
         with:
           name: crypto-price-logger-debug
 
-          path: |
-            vpn.log
-            private_logger/price_log.csv
+          path: debug/
 
           if-no-files-found: ignore
 
@@ -875,7 +986,7 @@ jobs:
 
       # ======================================================
       # CLEANUP RUNNER
-      # Stops OpenVPN and removes temporary private files.
+      # Stops OpenVPN and removes all temporary private files.
       # ======================================================
 
       - name: Cleanup runner
@@ -886,18 +997,27 @@ jobs:
           echo "🧹 CLEANING RUNNER"
           echo "============================================================"
 
+          echo ""
           echo "Stopping OpenVPN..."
 
           sudo pkill openvpn 2>/dev/null || true
 
+          echo ""
           echo "Removing private repository..."
 
           rm -rf private_logger
 
+          echo ""
+          echo "Removing debug directory..."
+
+          sudo rm -rf debug
+
+          echo ""
           echo "Removing VPN files..."
 
-          rm -f vpnbook.ovpn
-          rm -f auth.txt
-          rm -f vpn.log
+          sudo rm -f vpnbook.ovpn
+          sudo rm -f auth.txt
+          sudo rm -f vpn.log
 
+          echo ""
           echo "✅ Runner cleaned"
