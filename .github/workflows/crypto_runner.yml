@@ -2,10 +2,10 @@ name: Crypto Price Logger - STAGING TEST
 
 on:
   workflow_dispatch:
-
   push:
     branches:
       - staging
+
 
 permissions:
   contents: read
