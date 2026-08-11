@@ -1,11 +1,11 @@
-name: Crypto Price Logger - STAGING TEST
+name: Crypto Price Logger
+run-name: "🧪 STAGING | ${{ github.event_name }} | ${{ github.sha }}"
 
 on:
   workflow_dispatch:
   push:
     branches:
       - staging
-
 
 permissions:
   contents: read
