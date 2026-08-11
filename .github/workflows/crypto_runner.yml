@@ -12,15 +12,15 @@ permissions:
 
 # ============================================================
 # STAGING SAFETY
-# - Runs only from the public staging branch.
-# - Clones the private staging branch.
-# - Never commits or pushes price_log.csv.
+# - Runs automatically on public staging updates or manually.
+# - Uses the same branch name in the private repository.
+# - Test price_log.csv is committed only to private staging.
 # - Never writes to Neon.
-# - Cancels older staging tests when a newer staging update arrives.
+# - Cancels an older staging test when a newer one starts.
 # ============================================================
 
 concurrency:
-  group: crypto-price-logger-staging
+  group: crypto-price-logger-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -30,13 +30,11 @@ jobs:
 
     steps:
       # ======================================================
-      # CHECKOUT PUBLIC STAGING BRANCH
+      # CHECKOUT CURRENT PUBLIC BRANCH
       # ======================================================
 
-      - name: Checkout public staging branch
+      - name: Checkout current public branch
         uses: actions/checkout@v6
-        with:
-          ref: staging
 
       # ======================================================
       # BASIC RUNNER INFORMATION
@@ -90,28 +88,33 @@ jobs:
           check_secret "VPNBOOK_PASSWORD" "$VPNBOOK_PASSWORD"
 
       # ======================================================
-      # CLONE PRIVATE STAGING BRANCH
-      # This is disposable test data. Nothing is pushed back.
+      # CLONE MATCHING PRIVATE BRANCH
+      # Public staging -> private staging.
+      # The same branch-name logic can later work on main.
       # ======================================================
 
-      - name: Clone private staging branch
+      - name: Clone matching private branch
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
 
+          TARGET_BRANCH="${GITHUB_REF_NAME}"
           REPOSITORY_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
+
+          echo "Public branch:  ${TARGET_BRANCH}"
+          echo "Private branch: ${TARGET_BRANCH}"
 
           for attempt in 1 2 3
           do
-            echo "Private staging clone attempt ${attempt}/3"
+            echo "Private branch clone attempt ${attempt}/3"
             rm -rf private_logger
 
             if git clone \
-              --branch staging \
+              --branch "$TARGET_BRANCH" \
               --single-branch \
-              --depth 1 \
+              --depth 20 \
               "$REPOSITORY_URL" \
               private_logger
             then
@@ -119,7 +122,7 @@ jobs:
             fi
 
             if [ "$attempt" -eq 3 ]; then
-              echo "❌ Private staging clone failed"
+              echo "❌ Private ${TARGET_BRANCH} clone failed"
               exit 1
             fi
 
@@ -128,12 +131,16 @@ jobs:
 
           cd private_logger
 
-          if [ "$(git branch --show-current)" != "staging" ]; then
+          ACTUAL_BRANCH="$(git branch --show-current)"
+
+          if [ "$ACTUAL_BRANCH" != "$TARGET_BRANCH" ]; then
             echo "❌ Wrong private branch checked out"
+            echo "Expected: $TARGET_BRANCH"
+            echo "Actual:   $ACTUAL_BRANCH"
             exit 1
           fi
 
-          echo "✅ Private staging branch cloned"
+          echo "✅ Matching private branch cloned"
           git log -1 --oneline
 
       # ======================================================
@@ -162,7 +169,7 @@ jobs:
           }
 
           test -s "private_logger/price_log.csv" || {
-            echo "❌ staging price_log.csv missing"
+            echo "❌ test price_log.csv missing"
             exit 1
           }
 
@@ -320,7 +327,6 @@ jobs:
 
       # ======================================================
       # NETWORK TESTS
-      # These expose failures but do not change production.
       # ======================================================
 
       - name: Verify staging VPN internet
@@ -413,9 +419,8 @@ jobs:
             "${RUNNER_TEMP}/binance-probe.txt"
 
       # ======================================================
-      # RUN LOGGER IN DISPOSABLE STAGING CLONE
-      # The CSV is changed only inside this temporary runner.
-      # No Git commit/push is performed.
+      # RUN LOGGER
+      # Updates the CSV only in the matching private branch clone.
       # ======================================================
 
       - name: Run staging crypto logger
@@ -447,11 +452,10 @@ jobs:
           fi
 
           echo "✅ Staging logger produced test rows"
-
           tail -n 12 "$CSV"
 
       # ======================================================
-      # DISCONNECT VPN BEFORE GITHUB ARTIFACT TRAFFIC
+      # DISCONNECT VPN BEFORE GITHUB/GIT TRAFFIC
       # ======================================================
 
       - name: Disconnect staging VPN
@@ -491,6 +495,91 @@ jobs:
           echo "✅ Staging VPN disconnected"
 
       # ======================================================
+      # VALIDATE TEST CSV BEFORE PUSH
+      # ======================================================
+
+      - name: Validate staging CSV
+        run: |
+          set -euo pipefail
+
+          CSV="private_logger/price_log.csv"
+          EXPECTED_HEADER="timestamp_nz,symbol,price_usd,price_nzd,status,usd_nzd_rate"
+          ACTUAL_HEADER="$(head -n 1 "$CSV" | tr -d '\r')"
+          CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
+
+          if [ "$ACTUAL_HEADER" != "$EXPECTED_HEADER" ]; then
+            echo "❌ CSV header is incorrect"
+            exit 1
+          fi
+
+          if [ "$CSV_ROWS" -lt 2 ]; then
+            echo "❌ CSV has no data rows"
+            exit 1
+          fi
+
+          echo "✅ Test CSV validated"
+          echo "Rows: $CSV_ROWS"
+
+      # ======================================================
+      # COMMIT + PUSH TEST CSV TO MATCHING PRIVATE BRANCH
+      # This is the end-to-end GitHub push test.
+      # ======================================================
+
+      - name: Push test CSV to private matching branch
+        env:
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+
+          TARGET_BRANCH="${GITHUB_REF_NAME}"
+          REMOTE_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
+
+          cd private_logger
+
+          git config user.name "github-actions-staging"
+          git config user.email "actions@github.com"
+
+          git add -- price_log.csv
+
+          if git diff --cached --quiet; then
+            echo "❌ Logger completed but there is no CSV change to push"
+            exit 1
+          fi
+
+          COMMIT_MESSAGE="STAGING test price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "$COMMIT_MESSAGE"
+
+          for attempt in 1 2 3
+          do
+            echo "Push attempt ${attempt}/3 to private ${TARGET_BRANCH}"
+
+            if git push "$REMOTE_URL" "HEAD:${TARGET_BRANCH}"; then
+              echo "✅ Test CSV pushed to private ${TARGET_BRANCH}"
+              git log -1 --oneline
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              break
+            fi
+
+            echo "Remote changed; fetching and rebasing before retry..."
+            git fetch origin "$TARGET_BRANCH" --depth=50
+
+            if ! git rebase "origin/${TARGET_BRANCH}"; then
+              echo "❌ Rebase conflict while updating test CSV"
+              git rebase --abort || true
+              exit 1
+            fi
+
+            sleep 3
+          done
+
+          echo "❌ Test CSV push failed after 3 attempts"
+          exit 1
+
+      # ======================================================
       # STAGING SUMMARY
       # ======================================================
 
@@ -500,16 +589,16 @@ jobs:
           {
             echo "## 🧪 Crypto Price Logger - STAGING"
             echo ""
-            echo "- **Public branch:** staging"
-            echo "- **Private branch:** staging"
-            echo "- **Production CSV push:** disabled"
+            echo "- **Public branch:** ${GITHUB_REF_NAME}"
+            echo "- **Private target branch:** ${GITHUB_REF_NAME}"
+            echo "- **Test CSV push:** enabled"
+            echo "- **Production main CSV:** untouched"
             echo "- **Neon writes:** disabled"
             echo "- **Completed UTC:** $(date -u)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ======================================================
       # FAILURE DIAGNOSTICS
-      # Only produced when the staging test fails.
       # ======================================================
 
       - name: Prepare staging failure diagnostics
@@ -530,6 +619,7 @@ jobs:
 
           {
             echo "UTC: $(date -u)"
+            echo "Public branch: ${GITHUB_REF_NAME}"
             echo ""
             echo "OpenVPN processes:"
             sudo pgrep -a openvpn || true
