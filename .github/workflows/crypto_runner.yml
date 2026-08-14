@@ -11,13 +11,14 @@ permissions:
   contents: read
 
 # ============================================================
-# STAGING WORKFLOW
+# STAGING S1 NETWORK QUALIFICATION
 # - Public staging reads/writes private staging.
 # - network_manager.py owns VPN process lifecycle.
-# - VPN1 is connected for this phase.
-# - VPN2 is fully provisioned and validated, but automatic
-#   provider-triggered switching is NOT wired yet.
-# - Neon writes remain disabled in staging.
+# - S1 self-test proves VPN1 + VPN2 independently connect.
+# - VPN1 and VPN2 must present different public IPs.
+# - After self-test the manager resets and reconnects VPN1.
+# - Provider-triggered automatic switching is NOT wired yet.
+# - Production main and Neon remain untouched.
 # ============================================================
 
 concurrency:
@@ -30,52 +31,32 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # ======================================================
-      # CHECKOUT PUBLIC RUNNER
-      # ======================================================
-
       - name: Checkout runner repository
         uses: actions/checkout@v6
-
-      # ======================================================
-      # RUNNER INFORMATION
-      # ======================================================
 
       - name: Show runner information
         run: |
           set -euo pipefail
-
           echo "============================================================"
-          echo "🧪 CRYPTO PRICE LOGGER - STAGING"
+          echo "🧪 CRYPTO PRICE LOGGER - STAGING S1"
           echo "============================================================"
           echo "UTC time: $(date -u)"
           echo "Public branch: ${GITHUB_REF_NAME}"
           echo "Public commit: ${GITHUB_SHA}"
-          echo "Operating system:"
           uname -a
-          echo "Working directory: $(pwd)"
+          pwd
           df -h .
-
-      # ======================================================
-      # PRIVATE REPOSITORY TOKEN
-      # ======================================================
 
       - name: Check private repository token
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set -euo pipefail
-
-          if [ -z "$TOKEN" ]; then
+          test -n "$TOKEN" || {
             echo "❌ PRIVATE_REPO_TOKEN missing"
             exit 1
-          fi
-
+          }
           echo "✅ PRIVATE_REPO_TOKEN exists"
-
-      # ======================================================
-      # CLONE MATCHING PRIVATE BRANCH
-      # ======================================================
 
       - name: Clone private crypto logger
         env:
@@ -83,12 +64,8 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-
           TARGET_BRANCH="${GITHUB_REF_NAME}"
           REPOSITORY_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
-
-          echo "Public branch:  ${TARGET_BRANCH}"
-          echo "Private branch: ${TARGET_BRANCH}"
 
           for attempt in 1 2 3
           do
@@ -101,68 +78,45 @@ jobs:
               "$REPOSITORY_URL" \
               private_logger
             then
-              echo "✅ Private repository downloaded"
               break
             fi
 
             if [ "$attempt" -eq 3 ]; then
-              echo "❌ Private repository clone failed after 3 attempts"
+              echo "❌ Private repository clone failed"
               exit 1
             fi
 
             sleep 5
           done
 
-          test -d private_logger/.git
-
           cd private_logger
           ACTUAL_BRANCH="$(git branch --show-current)"
 
           if [ "$ACTUAL_BRANCH" != "$TARGET_BRANCH" ]; then
             echo "❌ Wrong private branch checked out"
-            echo "Expected: $TARGET_BRANCH"
-            echo "Actual:   $ACTUAL_BRANCH"
             exit 1
           fi
 
           git log -1 --oneline
           git status --short
 
-      # ======================================================
-      # VALIDATE PRIVATE REPOSITORY STRUCTURE
-      # ======================================================
-
       - name: Validate private repository structure
         run: |
           set -euo pipefail
-
           LOGGER_DIRECTORY="private_logger/Crypto Logger-Private Repo"
-          LOGGER_FILE="${LOGGER_DIRECTORY}/price_logger.py"
-          NETWORK_MANAGER_FILE="${LOGGER_DIRECTORY}/network_manager.py"
-          REQUIREMENTS_FILE="${LOGGER_DIRECTORY}/requirements.txt"
-          CSV_FILE="private_logger/price_log.csv"
 
-          test -d "$LOGGER_DIRECTORY" || {
-            echo "❌ Logger directory missing"
-            exit 1
-          }
+          for required in \
+            "$LOGGER_DIRECTORY/price_logger.py" \
+            "$LOGGER_DIRECTORY/network_manager.py" \
+            "$LOGGER_DIRECTORY/requirements.txt"
+          do
+            test -s "$required" || {
+              echo "❌ Missing or empty: $required"
+              exit 1
+            }
+          done
 
-          test -s "$LOGGER_FILE" || {
-            echo "❌ price_logger.py missing or empty"
-            exit 1
-          }
-
-          test -s "$NETWORK_MANAGER_FILE" || {
-            echo "❌ network_manager.py missing or empty"
-            exit 1
-          }
-
-          test -s "$REQUIREMENTS_FILE" || {
-            echo "❌ requirements.txt missing or empty"
-            exit 1
-          }
-
-          test -f "$CSV_FILE" || {
+          test -f private_logger/price_log.csv || {
             echo "❌ price_log.csv missing"
             exit 1
           }
@@ -170,36 +124,19 @@ jobs:
           echo "✅ Private staging structure is valid"
           find "$LOGGER_DIRECTORY" -maxdepth 1 -type f | sort
 
-      # ======================================================
-      # PYTHON
-      # ======================================================
-
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-      - name: Show Python information
-        run: |
-          set -euo pipefail
-          python --version
-          python -m pip --version
-          which python
-
       - name: Install dependencies
         run: |
           set -euo pipefail
-
           cd private_logger/"Crypto Logger-Private Repo"
+          python --version
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip check
-
-      # ======================================================
-      # REQUIRED SECRETS
-      # Existing VPNBOOK_* secrets are VPN1.
-      # New VPN2_* secrets are the backup VPN profile.
-      # ======================================================
 
       - name: Check required secrets
         env:
@@ -217,29 +154,21 @@ jobs:
           check_secret() {
             local name="$1"
             local value="$2"
-
-            if [ -z "$value" ]; then
+            test -n "$value" || {
               echo "❌ ${name} missing"
               exit 1
-            fi
-
+            }
             echo "✅ ${name} exists"
           }
 
           check_secret "BINANCE_API_KEY" "$BINANCE_API_KEY"
           check_secret "BINANCE_SECRET_KEY" "$BINANCE_SECRET_KEY"
-          check_secret "VPN1_CONFIG (VPNBOOK_CONFIG)" "$VPN1_CONFIG"
-          check_secret "VPN1_USERNAME (VPNBOOK_USERNAME)" "$VPN1_USERNAME"
-          check_secret "VPN1_PASSWORD (VPNBOOK_PASSWORD)" "$VPN1_PASSWORD"
+          check_secret "VPNBOOK_CONFIG / VPN1_CONFIG" "$VPN1_CONFIG"
+          check_secret "VPNBOOK_USERNAME / VPN1_USERNAME" "$VPN1_USERNAME"
+          check_secret "VPNBOOK_PASSWORD / VPN1_PASSWORD" "$VPN1_PASSWORD"
           check_secret "VPN2_CONFIG" "$VPN2_CONFIG"
           check_secret "VPN2_USERNAME" "$VPN2_USERNAME"
           check_secret "VPN2_PASSWORD" "$VPN2_PASSWORD"
-
-          echo "✅ All staging secrets are available"
-
-      # ======================================================
-      # OPENVPN
-      # ======================================================
 
       - name: Install OpenVPN
         run: |
@@ -247,11 +176,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openvpn
           openvpn --version | head -n 1
-
-      # ======================================================
-      # CREATE VPN1 + VPN2 FILES
-      # Credentials are written to protected auth files.
-      # ======================================================
+          sudo -n true
+          echo "✅ OpenVPN and passwordless sudo available"
 
       - name: Create VPN1 and VPN2 files
         env:
@@ -263,45 +189,28 @@ jobs:
           VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
         run: |
           set -euo pipefail
-
           umask 077
 
           printf '%s\n' "$VPN1_CONFIG_SECRET" > vpn1.ovpn
           printf '%s\n%s\n' "$VPN1_USERNAME" "$VPN1_PASSWORD" > vpn1-auth.txt
-
           printf '%s\n' "$VPN2_CONFIG_SECRET" > vpn2.ovpn
           printf '%s\n%s\n' "$VPN2_USERNAME" "$VPN2_PASSWORD" > vpn2-auth.txt
 
           chmod 600 vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
-
           test -s vpn1.ovpn
           test -s vpn1-auth.txt
           test -s vpn2.ovpn
           test -s vpn2-auth.txt
-
           echo "✅ VPN1 and VPN2 files created securely"
-
-      # ======================================================
-      # VALIDATE PYTHON FILES
-      # ======================================================
 
       - name: Validate Python syntax
         run: |
           set -euo pipefail
-
           cd private_logger/"Crypto Logger-Private Repo"
           python -m py_compile price_logger.py network_manager.py
+          echo "✅ Python syntax valid"
 
-          echo "✅ price_logger.py syntax is valid"
-          echo "✅ network_manager.py syntax is valid"
-
-      # ======================================================
-      # VALIDATE BOTH NETWORK PROFILES
-      # This proves both VPN configs/auth files are structurally usable
-      # without switching live provider traffic to VPN2 yet.
-      # ======================================================
-
-      - name: Validate VPN1 and VPN2 profiles
+      - name: Reset S1 network state
         env:
           NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
           VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
@@ -310,19 +219,30 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set -euo pipefail
+          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
+          python "$MANAGER" reset
+          echo "✅ Network state reset"
 
+      - name: Validate complete S1 network configuration
+        env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+        run: |
+          set -euo pipefail
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
 
-          python "$MANAGER" validate --network VPN1
-          python "$MANAGER" validate --network VPN2
+          python "$MANAGER" validate-all
+          python "$MANAGER" policy --error-type RATE_LIMIT
+          python "$MANAGER" policy --error-type NETWORK_ERROR
+          python "$MANAGER" policy --error-type SERVER_ERROR
+          python "$MANAGER" policy --error-type AUTH_ERROR
 
-          echo "✅ Both VPN profiles validated"
+          echo "✅ S1 configuration and policy map validated"
 
-      # ======================================================
-      # CONNECT VPN1 THROUGH NETWORK MANAGER
-      # ======================================================
-
-      - name: Connect VPN1 with network manager
+      - name: Self-test VPN1 and VPN2
         env:
           NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
           VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
@@ -331,19 +251,24 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set -euo pipefail
-
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
+          SELF_TEST="${RUNNER_TEMP}/s1-self-test.json"
 
-          python "$MANAGER" disconnect --reset-switch-count || true
-          python "$MANAGER" connect --network VPN1
+          python "$MANAGER" self-test | tee "$SELF_TEST"
 
-          echo "✅ VPN1 connection requested through network manager"
+          grep -q '"passed": true' "$SELF_TEST" || {
+            echo "❌ S1 self-test did not pass"
+            exit 1
+          }
 
-      # ======================================================
-      # VERIFY NETWORK MANAGER STATE + PUBLIC IP
-      # ======================================================
+          grep -q '"different_public_ips": true' "$SELF_TEST" || {
+            echo "❌ VPN1 and VPN2 did not prove different public IPs"
+            exit 1
+          }
 
-      - name: Verify VPN1 connection
+          echo "✅ VPN1 and VPN2 independently connected with different exit IPs"
+
+      - name: Reconnect VPN1 for logger collection
         env:
           NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
           VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
@@ -352,32 +277,22 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set -euo pipefail
-
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
           STATUS_FILE="${RUNNER_TEMP}/network-manager-status.json"
 
+          python "$MANAGER" reset
+          python "$MANAGER" connect --network VPN1
           python "$MANAGER" status | tee "$STATUS_FILE"
 
-          grep -q '"active_network": "VPN1"' "$STATUS_FILE" || {
-            echo "❌ Network manager did not report VPN1 active"
-            exit 1
-          }
+          grep -q '"active_network": "VPN1"' "$STATUS_FILE"
+          grep -q '"running": true' "$STATUS_FILE"
+          grep -q '"switch_count": 0' "$STATUS_FILE"
 
-          grep -q '"running": true' "$STATUS_FILE" || {
-            echo "❌ Network manager did not report OpenVPN running"
-            exit 1
-          }
+          echo "✅ Clean VPN1 session ready for logger"
 
-          echo "✅ VPN1 verified through network manager"
-
-      # ======================================================
-      # PROVIDER CONNECTIVITY PROBES
-      # ======================================================
-
-      - name: Test CoinGecko connectivity
+      - name: Test CoinGecko connectivity on VPN1
         run: |
           set -euo pipefail
-
           HTTP_CODE="$(
             curl \
               --fail-with-body \
@@ -389,20 +304,12 @@ jobs:
               --write-out "%{http_code}" \
               https://api.coingecko.com/api/v3/ping
           )"
-
           echo "CoinGecko HTTP ${HTTP_CODE}"
+          test "$HTTP_CODE" = "200"
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ CoinGecko connectivity test failed"
-            exit 1
-          fi
-
-          echo "✅ CoinGecko connectivity test passed"
-
-      - name: Test Binance connectivity
+      - name: Test Binance connectivity on VPN1
         run: |
           set -euo pipefail
-
           HTTP_CODE="$(
             curl \
               --fail-with-body \
@@ -414,52 +321,24 @@ jobs:
               --write-out "%{http_code}" \
               https://api.binance.com/api/v3/time
           )"
-
           echo "Binance HTTP ${HTTP_CODE}"
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Binance connectivity test failed"
-            exit 1
-          fi
-
-          echo "✅ Binance connectivity test passed"
-
-      # ======================================================
-      # LOGGER FILE INFORMATION
-      # ======================================================
+          test "$HTTP_CODE" = "200"
 
       - name: Show logger file information
         run: |
           set -euo pipefail
-
           LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
-
-          ls -lh "$LOGGER_DIR/price_logger.py"
-          wc -l "$LOGGER_DIR/price_logger.py"
-          sha256sum "$LOGGER_DIR/price_logger.py"
-
-          ls -lh "$LOGGER_DIR/network_manager.py"
-          wc -l "$LOGGER_DIR/network_manager.py"
-          sha256sum "$LOGGER_DIR/network_manager.py"
-
-      # ======================================================
-      # RECORD CSV STATE BEFORE LOGGER
-      # ======================================================
+          ls -lh "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+          wc -l "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+          sha256sum "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
 
       - name: Record CSV state before logger
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
           BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
-
           echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
           echo "CSV rows before logger: $BEFORE_ROWS"
-
-      # ======================================================
-      # RUN LOGGER
-      # Provider-triggered VPN switching is intentionally not wired yet.
-      # ======================================================
 
       - name: Run crypto price logger
         env:
@@ -468,24 +347,13 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
-
           cd private_logger/"Crypto Logger-Private Repo"
-
           echo "============================================================"
           echo "🧪 STARTING STAGING CRYPTO PRICE LOGGER"
           echo "UTC time: $(date -u)"
           echo "============================================================"
-
           python price_logger.py
-
-          echo "============================================================"
           echo "✅ STAGING CRYPTO PRICE LOGGER COMPLETED"
-          echo "UTC time: $(date -u)"
-          echo "============================================================"
-
-      # ======================================================
-      # DISCONNECT THROUGH NETWORK MANAGER BEFORE GITHUB/GIT
-      # ======================================================
 
       - name: Disconnect VPN before GitHub operations
         if: always()
@@ -497,71 +365,42 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set +e
-
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
 
           if [ -f "$MANAGER" ]; then
-            python "$MANAGER" disconnect
-            RESULT=$?
-          else
-            RESULT=1
+            python "$MANAGER" reset
           fi
 
           if sudo pgrep -x openvpn >/dev/null 2>&1; then
-            echo "Network manager cleanup incomplete; applying runner safety cleanup"
+            echo "Applying final emergency OpenVPN cleanup"
             sudo pkill -x openvpn 2>/dev/null || true
             sleep 2
           fi
 
           if sudo pgrep -x openvpn >/dev/null 2>&1; then
-            echo "❌ OpenVPN still running after cleanup"
+            echo "❌ OpenVPN still running"
             sudo pgrep -a openvpn || true
             exit 1
           fi
 
-          if [ "$RESULT" -ne 0 ]; then
-            echo "⚠ Network manager disconnect returned ${RESULT}, but no OpenVPN process remains"
-          fi
-
-          echo "✅ VPN disconnected before GitHub operations"
-
-      # ======================================================
-      # CHECK GENERATED CSV
-      # ======================================================
+          echo "✅ VPN disconnected before Git/GitHub traffic"
 
       - name: Check generated CSV
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
-
-          test -f "$CSV" || {
-            echo "❌ price_log.csv was not created"
-            exit 1
-          }
-
           test -s "$CSV" || {
-            echo "❌ price_log.csv exists but is empty"
+            echo "❌ price_log.csv missing or empty"
             exit 1
           }
-
-          echo "CSV file information:"
           ls -lh "$CSV"
-          echo "CSV row count:"
           wc -l "$CSV"
-          echo "CSV header:"
           head -n 1 "$CSV"
-          echo "Latest CSV rows:"
           tail -n 12 "$CSV"
-
-      # ======================================================
-      # VALIDATE CSV HEADER
-      # ======================================================
 
       - name: Validate CSV header
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
           EXPECTED_HEADER="timestamp_nz,symbol,price_usd,price_nzd,status,usd_nzd_rate"
           ACTUAL_HEADER="$(head -n 1 "$CSV" | tr -d '\r')"
@@ -575,14 +414,9 @@ jobs:
 
           echo "✅ CSV header is correct"
 
-      # ======================================================
-      # VALIDATE CSV ROW COUNT
-      # ======================================================
-
       - name: Validate CSV row count
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
           BEFORE_ROWS="$(cat "${RUNNER_TEMP}/csv_rows_before.txt")"
           AFTER_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
@@ -592,11 +426,6 @@ jobs:
           echo "CSV rows after:  $AFTER_ROWS"
           echo "Rows added:      $ADDED_ROWS"
 
-          if [ "$AFTER_ROWS" -lt 2 ]; then
-            echo "❌ CSV does not contain crypto data"
-            exit 1
-          fi
-
           if [ "$ADDED_ROWS" -le 0 ]; then
             echo "❌ Logger produced no new CSV rows"
             exit 1
@@ -604,30 +433,12 @@ jobs:
 
           echo "✅ CSV contains new staging data"
 
-      # ======================================================
-      # CSV SAFETY BACKUP
-      # ======================================================
-
       - name: Create CSV safety backup
         run: |
           set -euo pipefail
-
-          SOURCE_CSV="private_logger/price_log.csv"
-          BACKUP_CSV="${RUNNER_TEMP}/price_log.csv"
-
-          cp -- "$SOURCE_CSV" "$BACKUP_CSV"
-
-          test -s "$BACKUP_CSV" || {
-            echo "❌ CSV safety backup failed"
-            exit 1
-          }
-
+          cp -- private_logger/price_log.csv "${RUNNER_TEMP}/price_log.csv"
+          test -s "${RUNNER_TEMP}/price_log.csv"
           echo "✅ CSV safety backup created"
-          ls -lh "$BACKUP_CSV"
-
-      # ======================================================
-      # SAVE CSV TO PRIVATE MATCHING BRANCH
-      # ======================================================
 
       - name: Save CSV to private repository
         env:
@@ -635,33 +446,24 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-
           TARGET_BRANCH="${GITHUB_REF_NAME}"
-
           cd private_logger
 
           CSV="price_log.csv"
           BACKUP_CSV="${RUNNER_TEMP}/price_log.csv"
           REMOTE_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
 
-          test -s "$CSV"
-          test -s "$BACKUP_CSV"
-
           git config user.name "github-actions-staging"
           git config user.email "actions@github.com"
-
           git add -- price_log.csv
 
           if git diff --cached --quiet; then
-            echo "❌ Logger completed but no CSV change was detected"
+            echo "❌ No CSV change detected"
             exit 1
           fi
 
           git diff --cached --stat
-
-          COMMIT_MESSAGE="STAGING test price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          git commit -m "$COMMIT_MESSAGE"
-          git log -1 --oneline
+          git commit -m "STAGING test price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
           for attempt in 1 2 3
           do
@@ -669,14 +471,14 @@ jobs:
             git fetch origin "$TARGET_BRANCH"
 
             if ! git rebase "origin/${TARGET_BRANCH}"; then
-              echo "❌ Rebase conflict detected"
               git rebase --abort || true
               cp -- "$BACKUP_CSV" "$CSV"
+              echo "❌ Rebase conflict"
               exit 1
             fi
 
             if git push "$REMOTE_URL" "HEAD:${TARGET_BRANCH}"; then
-              echo "✅ CSV pushed successfully to private ${TARGET_BRANCH}"
+              echo "✅ CSV pushed successfully"
               exit 0
             fi
 
@@ -688,20 +490,14 @@ jobs:
           echo "❌ CSV push failed after 3 attempts"
           exit 1
 
-      # ======================================================
-      # VERIFY PRIVATE REMOTE SHA
-      # ======================================================
-
       - name: Verify private branch push
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-
           TARGET_BRANCH="${GITHUB_REF_NAME}"
           REMOTE_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
-
           cd private_logger
 
           LOCAL_SHA="$(git rev-parse HEAD)"
@@ -709,67 +505,49 @@ jobs:
 
           echo "Local SHA:  $LOCAL_SHA"
           echo "Remote SHA: $REMOTE_SHA"
-
           test -n "$REMOTE_SHA"
-
-          if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
-            echo "❌ Remote branch does not match pushed staging commit"
-            exit 1
-          fi
-
+          test "$LOCAL_SHA" = "$REMOTE_SHA"
           echo "✅ Remote staging push verified"
-
-      # ======================================================
-      # SUMMARY
-      # ======================================================
 
       - name: Create logger summary
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
           CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
           DATA_ROWS="$((CSV_ROWS - 1))"
           LATEST_TIMESTAMP="$(tail -n 1 "$CSV" | cut -d',' -f1)"
 
           {
-            echo "## 🧪 Crypto Price Logger - STAGING"
+            echo "## 🧪 Crypto Price Logger - STAGING S1"
             echo ""
             echo "- **Workflow:** Successful"
-            echo "- **Public branch:** ${GITHUB_REF_NAME}"
-            echo "- **Private branch:** ${GITHUB_REF_NAME}"
-            echo "- **Network manager:** Enabled"
-            echo "- **VPN1:** Connected and verified for collection"
-            echo "- **VPN2:** Provisioned and profile-validated"
+            echo "- **S1 network manager:** Passed"
+            echo "- **VPN1 live connection:** Passed"
+            echo "- **VPN2 live connection:** Passed"
+            echo "- **VPN1/VPN2 different public IPs:** Passed"
+            echo "- **Normal logger collection network:** VPN1"
             echo "- **Automatic provider-triggered VPN2 switching:** Not enabled yet"
             echo "- **Maximum future VPN switches per run:** 1"
             echo "- **CSV total rows:** ${CSV_ROWS}"
             echo "- **CSV data rows:** ${DATA_ROWS}"
             echo "- **Latest timestamp:** ${LATEST_TIMESTAMP}"
-            echo "- **VPN before Git/GitHub operations:** Disconnected"
-            echo "- **Private branch push:** Verified"
+            echo "- **Git/GitHub traffic after VPN:** Yes"
             echo "- **Production main:** Untouched"
             echo "- **Neon writes:** Disabled"
             echo "- **Completed UTC:** $(date -u)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "✅ Workflow summary created"
-
-      # ======================================================
-      # FAILURE DEBUG FILES
-      # ======================================================
-
       - name: Prepare debug files if failed
         if: failure()
         run: |
           set +e
-
           mkdir -p debug
 
           [ -f private_logger/price_log.csv ] && cp private_logger/price_log.csv debug/price_log.csv
           [ -f "${RUNNER_TEMP}/coingecko-probe.txt" ] && cp "${RUNNER_TEMP}/coingecko-probe.txt" debug/
           [ -f "${RUNNER_TEMP}/binance-probe.txt" ] && cp "${RUNNER_TEMP}/binance-probe.txt" debug/
           [ -f "${RUNNER_TEMP}/network-manager-status.json" ] && cp "${RUNNER_TEMP}/network-manager-status.json" debug/
+          [ -f "${RUNNER_TEMP}/s1-self-test.json" ] && cp "${RUNNER_TEMP}/s1-self-test.json" debug/
 
           if [ -d "${RUNNER_TEMP}/network-manager" ]; then
             cp -R "${RUNNER_TEMP}/network-manager" debug/network-manager-state 2>/dev/null || true
@@ -778,23 +556,18 @@ jobs:
           {
             echo "UTC time: $(date -u)"
             echo "Public branch: ${GITHUB_REF_NAME}"
-            echo ""
             echo "OpenVPN processes:"
             sudo pgrep -a openvpn || true
-            echo ""
             echo "Network interfaces:"
             ip addr show || true
-            echo ""
             echo "IPv4 routes:"
             ip route show || true
-            echo ""
             echo "DNS status:"
             resolvectl status 2>/dev/null || cat /etc/resolv.conf || true
           } > debug/network-diagnostics.txt
 
           sudo chown -R "$(id -u):$(id -g)" debug
           chmod -R u+rwX,go+rX debug
-
           find debug -maxdepth 3 -type f -ls || true
 
       - name: Upload debug files if failed
@@ -806,10 +579,6 @@ jobs:
           path: debug/
           if-no-files-found: ignore
           retention-days: 3
-
-      # ======================================================
-      # FINAL CLEANUP
-      # ======================================================
 
       - name: Cleanup runner
         if: always()
@@ -825,9 +594,5 @@ jobs:
           sudo rm -rf debug
           rm -rf "${RUNNER_TEMP}/network-manager"
 
-          sudo rm -f vpn1.ovpn
-          sudo rm -f vpn1-auth.txt
-          sudo rm -f vpn2.ovpn
-          sudo rm -f vpn2-auth.txt
-
+          sudo rm -f vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
           echo "✅ Runner cleaned"
