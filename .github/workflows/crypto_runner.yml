@@ -40,6 +40,7 @@ permissions:
 # - Secret-update failure does not kill an already recovered logger run.
 # - Recovery failure stops the workflow.
 # - Email addresses and SMTP credentials are private GitHub Actions secrets.
+# - Email subject/body generation lives in alert_email.py, not multiline YAML.
 # - Provider-triggered VPN switching is NOT wired yet in S1.
 # - Neon writes remain disabled in staging.
 # ============================================================================
@@ -459,12 +460,6 @@ jobs:
       # ======================================================================
       # SECTION 21 - RUN STORED-AUTH TEST + AUTOMATIC VPNBOOK AUTH RECOVERY
       # ======================================================================
-      # Internal recovery stages:
-      # A1 - Test stored VPN credentials.
-      # A2 - On AUTH_FAILED only, fetch current VPNBook credentials.
-      # A3 - Mask them, replace temporary auth files, retry once.
-      # A4 - After successful authentication, update GitHub secrets if allowed.
-      # ======================================================================
       - name: "21.1 Run VPN auth recovery controller and full S1 qualification"
         id: vpn_auth_recovery
         env:
@@ -861,7 +856,7 @@ jobs:
           fi
 
       # ======================================================================
-      # SECTION 43 - SEND A HIGH-PRIORITY PRIVATE EMAIL WHEN HUMAN ACTION IS NEEDED
+      # SECTION 43 - SEND HIGH-PRIORITY PRIVATE EMAIL THROUGH PYTHON HELPER
       # ======================================================================
       - name: "43.1 Send standout VPN recovery email alert"
         if: always()
@@ -874,6 +869,7 @@ jobs:
           ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
           ALERT_EMAIL_TO_PRIMARY: ${{ secrets.ALERT_EMAIL_TO_PRIMARY }}
           ALERT_EMAIL_TO_SECONDARY: ${{ secrets.ALERT_EMAIL_TO_SECONDARY }}
+          CRYPTO_LOGGER_ENVIRONMENT: STAGING
         run: |
           set +e
           ALERT_FILE="${RUNNER_TEMP}/vpn-alert-type.txt"
@@ -882,8 +878,6 @@ jobs:
           [ -f "$ALERT_FILE" ] || { echo "No VPN recovery email required"; exit 0; }
           [ -f "$NOTIFIER" ] || { echo "⚠ alert_email.py unavailable"; exit 0; }
 
-          ALERT_TYPE="$(cat "$ALERT_FILE")"
-
           if [ -z "$ALERT_SMTP_USERNAME" ] || \
              [ -z "$ALERT_SMTP_PASSWORD" ] || \
              [ -z "$ALERT_EMAIL_TO_PRIMARY" ]; then
@@ -891,56 +885,9 @@ jobs:
             exit 0
           fi
 
-          if [ "$ALERT_TYPE" = "VPN_AUTH_RECOVERY_FAILED" ]; then
-            SUBJECT="🚨 CRYPTO LOGGER CRITICAL | VPN AUTH RECOVERY FAILED | STAGING | Run #${GITHUB_RUN_NUMBER}"
-            EVENT_DESCRIPTION="Stored VPNBook credentials were rejected and the live VPNBook recovery path also failed. The logger run could not safely continue."
-            ACTION_REQUIRED="Review the VPN authentication logs and debug artifact immediately."
-          else
-            SUBJECT="⚠️ CRYPTO LOGGER ACTION REQUIRED | VPN RECOVERED BUT SECRET UPDATE FAILED | STAGING | Run #${GITHUB_RUN_NUMBER}"
-            EVENT_DESCRIPTION="Live VPNBook credentials successfully recovered VPN access for this run, but GitHub Actions secrets could not be updated. A future run may reuse expired stored credentials."
-            ACTION_REQUIRED="Review VPN_SECRET_UPDATE_TOKEN permissions and the GitHub secret update logs."
-          fi
-
-          BODY="CRYPTO LOGGER - DEDICATED NETWORK RECOVERY ALERT
-
-SEVERITY
-${ALERT_TYPE}
-
-RUN IDENTITY
-Environment: STAGING
-Repository: ${GITHUB_REPOSITORY}
-Branch: ${GITHUB_REF_NAME}
-Workflow: ${GITHUB_WORKFLOW}
-Run number: #${GITHUB_RUN_NUMBER}
-Run ID: ${GITHUB_RUN_ID}
-Run attempt: ${GITHUB_RUN_ATTEMPT}
-UTC time: $(date -u)
-
-WHAT HAPPENED
-${EVENT_DESCRIPTION}
-
-AUTOMATIC RECOVERY PIPELINE
-1. Stored VPN1/VPN2 credentials were tried first.
-2. AUTH_FAILED was separated from network/server/provider failures.
-3. The official VPNBook OpenVPN page was queried only after AUTH_FAILED.
-4. Retrieved credentials were validated and immediately masked.
-5. VPN1 and VPN2 were retried exactly once.
-6. GitHub Actions secret update was attempted only after successful live authentication.
-
-SECURITY CONTROLS
-- VPN username/password are not included in this email.
-- Recipient addresses are stored as GitHub Actions secrets.
-- Credential values are not intentionally copied into debug artifacts.
-
-ACTION REQUIRED
-${ACTION_REQUIRED}
-
-GITHUB ACTIONS RUN
-https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-This is a dedicated Crypto Logger recovery alert and is intentionally different from generic GitHub workflow-failure notifications."
-
-          python "$NOTIFIER" --subject "$SUBJECT" --body "$BODY"
+          ALERT_TYPE="$(cat "$ALERT_FILE")"
+          echo "Sending private alert type: ${ALERT_TYPE}"
+          python "$NOTIFIER" --alert-type "$ALERT_TYPE"
 
       # ======================================================================
       # SECTION 44 - CREATE A STRUCTURED SUCCESS SUMMARY
