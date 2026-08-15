@@ -1,122 +1,127 @@
 name: Crypto Price Logger
+run-name: "🧪 STAGING S1 | ${{ github.event_name }} | ${{ github.sha }}"
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - staging
 
 permissions:
   contents: read
 
-# ============================================================
-# PREVENT MULTIPLE LOGGER RUNS
-# Allows only one logger to update the CSV at a time.
-# ============================================================
+# ============================================================================
+# CRYPTO PRICE LOGGER - STAGING S1
+# NETWORK QUALIFICATION + VPNBOOK AUTHENTICATION SELF-HEALING
+# ============================================================================
+#
+# PRIVATE MODULE LAYOUT
+#
+# Crypto Logger-Private Repo/
+#   price_logger.py
+#   network_manager.py
+#   requirements.txt
+#   vpn_auth_recovery/
+#     __init__.py
+#     recovery_controller.py
+#     vpnbook_credentials.py
+#     github_secret_updater.py
+#     alert_email.py
+#
+# S1 SAFETY RULES
+# - Main branch is untouched.
+# - Stored VPN credentials are attempted first.
+# - Only AUTH_FAILED triggers live VPNBook credential recovery.
+# - Live credentials are fetched only from the official VPNBook OpenVPN page.
+# - Retrieved credentials are masked before reuse.
+# - Recovery gets exactly one complete VPN1/VPN2 retry.
+# - VPN1 and VPN2 must prove different public exit IPs.
+# - GitHub Actions secrets are updated only after live credentials prove valid.
+# - Secret-update failure does not kill an already recovered logger run.
+# - Recovery failure stops the workflow.
+# - Email addresses and SMTP credentials are private GitHub Actions secrets.
+# - Email subject/body generation lives in alert_email.py, not multiline YAML.
+# - Provider-triggered VPN switching is NOT wired yet in S1.
+# - Neon writes remain disabled in staging.
+# ============================================================================
 
 concurrency:
-  group: crypto-price-logger
-  cancel-in-progress: false
+  group: crypto-price-logger-${{ github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
-
   run-logger:
-
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
+      # ======================================================================
+      # SECTION 01 - CHECK OUT THE PUBLIC STAGING RUNNER
+      # ======================================================================
+      - name: "01.1 Checkout public staging runner"
+        uses: actions/checkout@v6
 
-      # ======================================================
-      # CHECKOUT PUBLIC RUNNER
-      # Downloads the public GitHub Actions repository.
-      # ======================================================
-
-      - name: Checkout runner repository
-        uses: actions/checkout@v4
-
-
-      # ======================================================
-      # RUNNER INFORMATION
-      # Displays basic runner information for troubleshooting.
-      # ======================================================
-
-      - name: Show runner information
+      # ======================================================================
+      # SECTION 02 - IDENTIFY THIS EXACT WORKFLOW RUN
+      # ======================================================================
+      - name: "02.1 Display run identity and runner details"
         run: |
           set -euo pipefail
-
           echo "============================================================"
-          echo "🚀 CRYPTO PRICE LOGGER"
+          echo "🧪 CRYPTO PRICE LOGGER - STAGING S1"
           echo "============================================================"
-
-          echo ""
-          echo "UTC time:"
-          date -u
-
-          echo ""
-          echo "Operating system:"
+          echo "UTC time:        $(date -u)"
+          echo "Repository:      ${GITHUB_REPOSITORY}"
+          echo "Public branch:   ${GITHUB_REF_NAME}"
+          echo "Public commit:   ${GITHUB_SHA}"
+          echo "Workflow:        ${GITHUB_WORKFLOW}"
+          echo "Run number:      ${GITHUB_RUN_NUMBER}"
+          echo "Run ID:          ${GITHUB_RUN_ID}"
+          echo "Run attempt:     ${GITHUB_RUN_ATTEMPT}"
+          echo "Runner OS:       ${RUNNER_OS}"
+          echo "============================================================"
           uname -a
-
-          echo ""
-          echo "Working directory:"
           pwd
-
-          echo ""
-          echo "Available disk space:"
           df -h .
 
-
-      # ======================================================
-      # CHECK PRIVATE REPOSITORY TOKEN
-      # Confirms the private repository token is available.
-      # ======================================================
-
-      - name: Check private repository token
+      # ======================================================================
+      # SECTION 03 - VALIDATE PRIVATE REPOSITORY ACCESS
+      # ======================================================================
+      - name: "03.1 Validate PRIVATE_REPO_TOKEN"
         env:
-          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set -euo pipefail
-
-          echo "Checking PRIVATE_REPO_TOKEN..."
-
-          if [ -z "$TOKEN" ]; then
-            echo "❌ PRIVATE_REPO_TOKEN missing"
+          test -n "$PRIVATE_REPO_TOKEN" || {
+            echo "❌ PRIVATE_REPO_TOKEN is missing"
             exit 1
-          fi
+          }
+          echo "✅ PRIVATE_REPO_TOKEN is configured"
 
-          echo "✅ PRIVATE_REPO_TOKEN exists"
-
-
-      # ======================================================
-      # CLONE PRIVATE REPOSITORY
-      # Downloads the private logger with three retry attempts.
-      # ======================================================
-
-      - name: Clone private crypto logger
+      # ======================================================================
+      # SECTION 04 - CLONE THE MATCHING PRIVATE STAGING BRANCH
+      # ======================================================================
+      - name: "04.1 Clone private logger staging branch"
         env:
-          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
-
         run: |
           set -euo pipefail
-
-          echo "============================================================"
-          echo "📦 DOWNLOADING PRIVATE REPOSITORY"
-          echo "============================================================"
-
-          REPOSITORY_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
+          TARGET_BRANCH="${GITHUB_REF_NAME}"
+          REPOSITORY_URL="https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
 
           for attempt in 1 2 3
           do
-            echo "Clone attempt ${attempt}/3"
-
+            echo "Private clone attempt ${attempt}/3"
             rm -rf private_logger
 
             if git clone \
-              --branch main \
+              --branch "$TARGET_BRANCH" \
               --single-branch \
               "$REPOSITORY_URL" \
               private_logger
             then
-              echo "✅ Private repository downloaded"
+              echo "✅ Private repository clone completed"
               break
             fi
 
@@ -125,899 +130,898 @@ jobs:
               exit 1
             fi
 
-            echo "Waiting 5 seconds before retry..."
             sleep 5
           done
 
-          if [ ! -d "private_logger/.git" ]; then
-            echo "❌ Cloned Git repository was not found"
-            exit 1
-          fi
-
-          cd private_logger
-
-          echo ""
-          echo "Current branch:"
-          git branch --show-current
-
-          echo ""
-          echo "Latest commit:"
-          git log -1 --oneline
-
-          echo ""
-          echo "Repository status:"
-          git status --short
-
-
-      # ======================================================
-      # VALIDATE REPOSITORY STRUCTURE
-      # Checks the logger and requirements files are present.
-      # ======================================================
-
-      - name: Validate private repository structure
+      - name: "04.2 Verify public/private branch alignment"
         run: |
           set -euo pipefail
-
-          LOGGER_DIRECTORY="private_logger/Crypto Logger-Private Repo"
-          LOGGER_FILE="${LOGGER_DIRECTORY}/price_logger.py"
-          REQUIREMENTS_FILE="${LOGGER_DIRECTORY}/requirements.txt"
-
-          echo "Checking private repository structure..."
-
-          if [ ! -d "$LOGGER_DIRECTORY" ]; then
-            echo "❌ Logger directory missing"
-            echo "$LOGGER_DIRECTORY"
+          cd private_logger
+          ACTUAL_BRANCH="$(git branch --show-current)"
+          echo "Expected branch: ${GITHUB_REF_NAME}"
+          echo "Actual branch:   ${ACTUAL_BRANCH}"
+          test "$ACTUAL_BRANCH" = "$GITHUB_REF_NAME" || {
+            echo "❌ Public/private branch mismatch"
             exit 1
-          fi
+          }
+          git log -1 --oneline
+          git status --short
+          echo "✅ Public and private branches are aligned"
 
-          echo "✅ Logger directory exists"
+      # ======================================================================
+      # SECTION 05 - VERIFY THE PRIVATE LOGGER FILE STRUCTURE
+      # ======================================================================
+      - name: "05.1 Validate core private logger files"
+        run: |
+          set -euo pipefail
+          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
 
-          if [ ! -f "$LOGGER_FILE" ]; then
-            echo "❌ price_logger.py missing"
+          for required in \
+            "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/network_manager.py" \
+            "$LOGGER_DIR/requirements.txt"
+          do
+            test -s "$required" || {
+              echo "❌ Required core file missing or empty: $required"
+              exit 1
+            }
+            echo "✅ Found: $required"
+          done
+
+          test -f private_logger/price_log.csv || {
+            echo "❌ private_logger/price_log.csv is missing"
             exit 1
-          fi
+          }
 
-          echo "✅ price_logger.py exists"
+      - name: "05.2 Validate VPN auth recovery helper files"
+        run: |
+          set -euo pipefail
+          RECOVERY_DIR="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery"
 
-          if [ ! -f "$REQUIREMENTS_FILE" ]; then
-            echo "❌ requirements.txt missing"
-            exit 1
-          fi
+          for required in \
+            "$RECOVERY_DIR/__init__.py" \
+            "$RECOVERY_DIR/recovery_controller.py" \
+            "$RECOVERY_DIR/vpnbook_credentials.py" \
+            "$RECOVERY_DIR/github_secret_updater.py" \
+            "$RECOVERY_DIR/alert_email.py"
+          do
+            test -s "$required" || {
+              echo "❌ Required recovery file missing or empty: $required"
+              exit 1
+            }
+            echo "✅ Found: $required"
+          done
 
-          echo "✅ requirements.txt exists"
-
+      - name: "05.3 Display private logger module tree"
+        run: |
+          set -euo pipefail
+          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
+          echo "Core modules:"
+          find "$LOGGER_DIR" -maxdepth 1 -type f | sort
           echo ""
-          echo "Logger files:"
-          find "$LOGGER_DIRECTORY" -maxdepth 2 -type f | sort
+          echo "VPN auth recovery modules:"
+          find "$LOGGER_DIR/vpn_auth_recovery" -maxdepth 1 -type f | sort
 
-
-      # ======================================================
-      # SETUP PYTHON
-      # Installs Python 3.13 on the temporary runner.
-      # ======================================================
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-
+      # ======================================================================
+      # SECTION 06 - SET UP THE PYTHON RUNTIME
+      # ======================================================================
+      - name: "06.1 Setup Python 3.13"
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-
-      # ======================================================
-      # SHOW PYTHON INFORMATION
-      # Displays the active Python and pip versions.
-      # ======================================================
-
-      - name: Show Python information
+      - name: "06.2 Display Python runtime information"
         run: |
           set -euo pipefail
-
-          echo "Python version:"
           python --version
-
-          echo ""
-          echo "Pip version:"
           python -m pip --version
-
-          echo ""
-          echo "Python location:"
           which python
 
-
-      # ======================================================
-      # INSTALL DEPENDENCIES
-      # Installs all packages required by price_logger.py.
-      # ======================================================
-
-      - name: Install dependencies
+      # ======================================================================
+      # SECTION 07 - INSTALL AND VERIFY PYTHON DEPENDENCIES
+      # ======================================================================
+      - name: "07.1 Install private logger dependencies"
         run: |
           set -euo pipefail
-
           cd private_logger/"Crypto Logger-Private Repo"
-
-          echo "============================================================"
-          echo "📦 INSTALLING PYTHON DEPENDENCIES"
-          echo "============================================================"
-
           python -m pip install --upgrade pip
-
-          echo ""
-          echo "Installing requirements.txt..."
-
           python -m pip install -r requirements.txt
 
-          echo ""
-          echo "Checking installed dependencies..."
-
+      - name: "07.2 Verify Python dependency consistency"
+        run: |
+          set -euo pipefail
+          cd private_logger/"Crypto Logger-Private Repo"
           python -m pip check
+          echo "✅ Python dependency check passed"
 
-          echo ""
-          echo "✅ Dependencies installed successfully"
+      # ======================================================================
+      # SECTION 08 - STATIC-COMPILE ALL PRIVATE PYTHON MODULES
+      # ======================================================================
+      - name: "08.1 Compile core logger modules"
+        run: |
+          set -euo pipefail
+          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
+          python -m py_compile \
+            "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/network_manager.py"
+          echo "✅ Core logger modules compile"
 
+      - name: "08.2 Compile VPN auth recovery modules"
+        run: |
+          set -euo pipefail
+          RECOVERY_DIR="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery"
+          python -m py_compile \
+            "$RECOVERY_DIR/recovery_controller.py" \
+            "$RECOVERY_DIR/vpnbook_credentials.py" \
+            "$RECOVERY_DIR/github_secret_updater.py" \
+            "$RECOVERY_DIR/alert_email.py"
+          echo "✅ VPN auth recovery modules compile"
 
-      # ======================================================
-      # CHECK REQUIRED SECRETS
-      # Confirms all logger and VPN secrets are available.
-      # ======================================================
-
-      - name: Check required secrets
+      # ======================================================================
+      # SECTION 09 - VALIDATE BINANCE CREDENTIAL SECRETS
+      # ======================================================================
+      - name: "09.1 Validate Binance API secrets"
         env:
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
-          VPNBOOK_CONFIG: ${{ secrets.VPNBOOK_CONFIG }}
-          VPNBOOK_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
-          VPNBOOK_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
-
         run: |
           set -euo pipefail
+          test -n "$BINANCE_API_KEY" || { echo "❌ BINANCE_API_KEY missing"; exit 1; }
+          test -n "$BINANCE_SECRET_KEY" || { echo "❌ BINANCE_SECRET_KEY missing"; exit 1; }
+          echo "✅ Binance API secrets configured"
 
-          echo "============================================================"
-          echo "🔐 CHECKING REQUIRED SECRETS"
-          echo "============================================================"
-
-          check_secret()
-          {
-            SECRET_NAME="$1"
-            SECRET_VALUE="$2"
-
-            if [ -z "$SECRET_VALUE" ]; then
-              echo "❌ ${SECRET_NAME} missing"
-              exit 1
-            fi
-
-            echo "✅ ${SECRET_NAME} exists"
-          }
-
-          check_secret "NEON_DATABASE_URL" "$NEON_DATABASE_URL"
-          check_secret "BINANCE_API_KEY" "$BINANCE_API_KEY"
-          check_secret "BINANCE_SECRET_KEY" "$BINANCE_SECRET_KEY"
-          check_secret "VPNBOOK_CONFIG" "$VPNBOOK_CONFIG"
-          check_secret "VPNBOOK_USERNAME" "$VPNBOOK_USERNAME"
-          check_secret "VPNBOOK_PASSWORD" "$VPNBOOK_PASSWORD"
-
-          echo ""
-          echo "✅ All required secrets are available"
-
-
-      # ======================================================
-      # INSTALL OPENVPN
-      # Installs OpenVPN on the GitHub Actions runner.
-      # ======================================================
-
-      - name: Install OpenVPN
+      # ======================================================================
+      # SECTION 10 - VALIDATE VPN1 STORED CONFIGURATION AND CREDENTIALS
+      # ======================================================================
+      - name: "10.1 Validate VPN1 stored secrets"
+        env:
+          VPN1_CONFIG: ${{ secrets.VPNBOOK_CONFIG }}
+          VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
+          VPN1_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
         run: |
           set -euo pipefail
+          test -n "$VPN1_CONFIG" || { echo "❌ VPNBOOK_CONFIG missing"; exit 1; }
+          test -n "$VPN1_USERNAME" || { echo "❌ VPNBOOK_USERNAME missing"; exit 1; }
+          test -n "$VPN1_PASSWORD" || { echo "❌ VPNBOOK_PASSWORD missing"; exit 1; }
+          echo "✅ VPN1 stored secrets configured"
 
-          echo "============================================================"
-          echo "🌐 INSTALLING OPENVPN"
-          echo "============================================================"
+      # ======================================================================
+      # SECTION 11 - VALIDATE VPN2 STORED CONFIGURATION AND CREDENTIALS
+      # ======================================================================
+      - name: "11.1 Validate VPN2 stored secrets"
+        env:
+          VPN2_CONFIG: ${{ secrets.VPN2_CONFIG }}
+          VPN2_USERNAME: ${{ secrets.VPN2_USERNAME }}
+          VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$VPN2_CONFIG" || { echo "❌ VPN2_CONFIG missing"; exit 1; }
+          test -n "$VPN2_USERNAME" || { echo "❌ VPN2_USERNAME missing"; exit 1; }
+          test -n "$VPN2_PASSWORD" || { echo "❌ VPN2_PASSWORD missing"; exit 1; }
+          echo "✅ VPN2 stored secrets configured"
 
+      # ======================================================================
+      # SECTION 12 - CHECK OPTIONAL GITHUB VPN SECRET UPDATE CAPABILITY
+      # ======================================================================
+      - name: "12.1 Check VPN_SECRET_UPDATE_TOKEN"
+        env:
+          VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "$VPN_SECRET_UPDATE_TOKEN" ]; then
+            echo "✅ VPN secret update token configured"
+          else
+            echo "⚠ VPN_SECRET_UPDATE_TOKEN missing"
+            echo "   Runtime auth recovery can still work, but refreshed credentials cannot be persisted."
+          fi
+
+      # ======================================================================
+      # SECTION 13 - CHECK PRIVATE EMAIL ALERT SMTP SECRETS
+      # ======================================================================
+      - name: "13.1 Check SMTP connection and login secrets"
+        env:
+          ALERT_SMTP_HOST: ${{ secrets.ALERT_SMTP_HOST }}
+          ALERT_SMTP_PORT: ${{ secrets.ALERT_SMTP_PORT }}
+          ALERT_SMTP_USERNAME: ${{ secrets.ALERT_SMTP_USERNAME }}
+          ALERT_SMTP_PASSWORD: ${{ secrets.ALERT_SMTP_PASSWORD }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ALERT_SMTP_USERNAME" ] && [ -n "$ALERT_SMTP_PASSWORD" ]; then
+            echo "✅ SMTP authentication secrets configured"
+          else
+            echo "⚠ SMTP authentication secrets incomplete"
+          fi
+          [ -n "$ALERT_SMTP_HOST" ] && echo "✅ SMTP host override configured" || echo "ℹ SMTP host uses helper default"
+          [ -n "$ALERT_SMTP_PORT" ] && echo "✅ SMTP port override configured" || echo "ℹ SMTP port uses helper default"
+          [ -n "$ALERT_EMAIL_FROM" ] && echo "✅ Alert sender override configured" || echo "ℹ Alert sender falls back to SMTP username"
+
+      # ======================================================================
+      # SECTION 14 - CHECK PRIVATE EMAIL ALERT RECIPIENT SECRETS
+      # ======================================================================
+      - name: "14.1 Check primary and secondary private alert recipients"
+        env:
+          ALERT_EMAIL_TO_PRIMARY: ${{ secrets.ALERT_EMAIL_TO_PRIMARY }}
+          ALERT_EMAIL_TO_SECONDARY: ${{ secrets.ALERT_EMAIL_TO_SECONDARY }}
+        run: |
+          set -euo pipefail
+          [ -n "$ALERT_EMAIL_TO_PRIMARY" ] \
+            && echo "✅ Primary private alert recipient configured" \
+            || echo "⚠ ALERT_EMAIL_TO_PRIMARY missing"
+          [ -n "$ALERT_EMAIL_TO_SECONDARY" ] \
+            && echo "✅ Secondary private alert recipient configured" \
+            || echo "⚠ ALERT_EMAIL_TO_SECONDARY missing"
+
+      # ======================================================================
+      # SECTION 15 - INSTALL OPENVPN
+      # ======================================================================
+      - name: "15.1 Install OpenVPN package"
+        run: |
+          set -euo pipefail
           sudo apt-get update
-
           sudo apt-get install -y openvpn
 
-          echo ""
-          echo "OpenVPN version:"
-
+      - name: "15.2 Verify OpenVPN binary and passwordless sudo"
+        run: |
+          set -euo pipefail
           openvpn --version | head -n 1
+          sudo -n true
+          echo "✅ OpenVPN and passwordless sudo available"
 
-          echo ""
-          echo "✅ OpenVPN installed"
-
-
-      # ======================================================
-      # CREATE VPN CONFIGURATION
-      # Creates protected VPN configuration and login files.
-      # ======================================================
-
-      - name: Create VPN configuration
+      # ======================================================================
+      # SECTION 16 - CREATE PROTECTED VPN1 RUNTIME FILES
+      # ======================================================================
+      - name: "16.1 Create protected VPN1 runtime config and auth files"
         env:
-          VPNBOOK_CONFIG: ${{ secrets.VPNBOOK_CONFIG }}
-          VPNBOOK_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
-          VPNBOOK_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
-
+          VPN1_CONFIG_SECRET: ${{ secrets.VPNBOOK_CONFIG }}
+          VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
+          VPN1_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
         run: |
           set -euo pipefail
-
-          echo "============================================================"
-          echo "🔐 CREATING VPN CONFIGURATION"
-          echo "============================================================"
-
           umask 077
-
-          printf '%s\n' "$VPNBOOK_CONFIG" > vpnbook.ovpn
-
-          printf '%s\n%s\n' \
-            "$VPNBOOK_USERNAME" \
-            "$VPNBOOK_PASSWORD" \
-            > auth.txt
-
-          echo "auth-user-pass auth.txt" >> vpnbook.ovpn
-
-          chmod 600 vpnbook.ovpn
-          chmod 600 auth.txt
-
-          if [ ! -s vpnbook.ovpn ]; then
-            echo "❌ VPN configuration is empty"
-            exit 1
-          fi
-
-          if [ ! -s auth.txt ]; then
-            echo "❌ VPN authentication file is empty"
-            exit 1
-          fi
-
-          echo "✅ VPN configuration created securely"
-
-
-      # ======================================================
-      # CONNECT VPN
-      # Starts OpenVPN and waits up to 60 seconds to connect.
-      # ======================================================
-
-      - name: Connect VPN
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "🌐 CONNECTING TO VPN"
-          echo "============================================================"
-
-          VPN_CONFIG="${GITHUB_WORKSPACE}/vpnbook.ovpn"
-          VPN_LOG="${GITHUB_WORKSPACE}/vpn.log"
-
-          rm -f "$VPN_LOG"
-
-          # Create the file as the normal runner user.
-          # This prevents the artifact permission error.
-          touch "$VPN_LOG"
-
-          chmod 644 "$VPN_LOG"
-
-          sudo openvpn \
-            --config "$VPN_CONFIG" \
-            --daemon \
-            --log "$VPN_LOG"
-
-          # Ensure the normal runner can read the OpenVPN log.
-          sudo chown "$(id -u):$(id -g)" "$VPN_LOG"
-
-          sudo chmod 644 "$VPN_LOG"
-
-          VPN_CONNECTED="false"
-
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12
-          do
-            echo "VPN connection check ${attempt}/12"
-
-            if grep -q \
-              "Initialization Sequence Completed" \
-              "$VPN_LOG"
-            then
-              VPN_CONNECTED="true"
-              break
-            fi
-
-            if grep -Eq \
-              "AUTH_FAILED|Options error|Exiting due to fatal error" \
-              "$VPN_LOG"
-            then
-              echo "❌ OpenVPN reported an error"
-
-              echo ""
-              echo "VPN log:"
-
-              cat "$VPN_LOG" || true
-
-              exit 1
-            fi
-
-            if ! sudo pgrep -x openvpn >/dev/null 2>&1
-            then
-              echo "❌ OpenVPN process stopped unexpectedly"
-
-              echo ""
-              echo "VPN log:"
-
-              cat "$VPN_LOG" || true
-
-              exit 1
-            fi
-
-            sleep 5
-          done
-
-          if [ "$VPN_CONNECTED" != "true" ]
-          then
-            echo "❌ VPN connection did not complete within 60 seconds"
-
-            echo ""
-            echo "VPN log:"
-
-            cat "$VPN_LOG" || true
-
-            exit 1
-          fi
-
-          echo ""
-          echo "✅ VPN connection completed"
-
-
-      # ======================================================
-      # VERIFY VPN CONNECTION
-      # Displays the VPN process, log, public IP and country.
-      # ======================================================
-
-      - name: Verify VPN connection
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "🔎 VERIFYING VPN CONNECTION"
-          echo "============================================================"
-
-          echo ""
-          echo "OpenVPN process:"
-
-          sudo pgrep -a openvpn || true
-
-          echo ""
-          echo "Latest VPN log:"
-
-          tail -n 50 vpn.log || true
-
-          echo ""
-          echo "Current public IP:"
-
-          curl \
-            --silent \
-            --show-error \
-            --connect-timeout 10 \
-            --max-time 20 \
-            https://api.ipify.org \
-            || true
-
-          echo ""
-          echo ""
-
-          echo "Current IP country:"
-
-          curl \
-            --silent \
-            --show-error \
-            --connect-timeout 10 \
-            --max-time 20 \
-            https://ipinfo.io/country \
-            || true
-
-          echo ""
-
-
-      # ======================================================
-      # TEST COINGECKO
-      # Performs an informational CoinGecko connection test.
-      # ======================================================
-
-      - name: Test CoinGecko connectivity
-        run: |
-          echo "============================================================"
-          echo "🦎 TESTING COINGECKO"
-          echo "============================================================"
-
-          curl \
-            --include \
-            --connect-timeout 10 \
-            --max-time 20 \
-            https://api.coingecko.com/api/v3/ping \
-            || true
-
-          echo ""
-          echo "CoinGecko diagnostic test completed"
-
-
-      # ======================================================
-      # TEST BINANCE
-      # Performs an informational Binance connection test.
-      # ======================================================
-
-      - name: Test Binance connectivity
-        run: |
-          echo "============================================================"
-          echo "🟡 TESTING BINANCE"
-          echo "============================================================"
-
-          curl \
-            --include \
-            --connect-timeout 10 \
-            --max-time 20 \
-            https://api.binance.com/api/v3/time \
-            || true
-
-          echo ""
-          echo "Binance diagnostic test completed"
-
-
-      # ======================================================
-      # VALIDATE PYTHON SYNTAX
-      # Checks price_logger.py before running the logger.
-      # ======================================================
-
-      - name: Validate logger syntax
-        run: |
-          set -euo pipefail
-
-          cd private_logger/"Crypto Logger-Private Repo"
-
-          echo "============================================================"
-          echo "🐍 VALIDATING LOGGER SYNTAX"
-          echo "============================================================"
-
-          python -m py_compile price_logger.py
-
-          echo ""
-          echo "✅ price_logger.py syntax is valid"
-
-
-      # ======================================================
-      # SHOW LOGGER INFORMATION
-      # Displays logger size, line count and checksum.
-      # ======================================================
-
-      - name: Show logger file information
-        run: |
-          set -euo pipefail
-
-          LOGGER_FILE="private_logger/Crypto Logger-Private Repo/price_logger.py"
-
-          echo "Logger file:"
-          ls -lh "$LOGGER_FILE"
-
-          echo ""
-          echo "Logger line count:"
-          wc -l "$LOGGER_FILE"
-
-          echo ""
-          echo "Logger checksum:"
-          sha256sum "$LOGGER_FILE"
-
-
-      # ======================================================
-      # RUN CRYPTO LOGGER
-      # Collects prices and creates or updates price_log.csv.
-      # ======================================================
-
-      - name: Run crypto price logger
+          printf '%s\n' "$VPN1_CONFIG_SECRET" > vpn1.ovpn
+          printf '%s\n%s\n' "$VPN1_USERNAME" "$VPN1_PASSWORD" > vpn1-auth.txt
+          chmod 600 vpn1.ovpn vpn1-auth.txt
+          test -s vpn1.ovpn
+          test -s vpn1-auth.txt
+          echo "✅ VPN1 protected runtime files created"
+
+      # ======================================================================
+      # SECTION 17 - CREATE PROTECTED VPN2 RUNTIME FILES
+      # ======================================================================
+      - name: "17.1 Create protected VPN2 runtime config and auth files"
         env:
-          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          VPN2_CONFIG_SECRET: ${{ secrets.VPN2_CONFIG }}
+          VPN2_USERNAME: ${{ secrets.VPN2_USERNAME }}
+          VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$VPN2_CONFIG_SECRET" > vpn2.ovpn
+          printf '%s\n%s\n' "$VPN2_USERNAME" "$VPN2_PASSWORD" > vpn2-auth.txt
+          chmod 600 vpn2.ovpn vpn2-auth.txt
+          test -s vpn2.ovpn
+          test -s vpn2-auth.txt
+          echo "✅ VPN2 protected runtime files created"
+
+      # ======================================================================
+      # SECTION 18 - RESET NETWORK MANAGER RUNTIME STATE
+      # ======================================================================
+      - name: "18.1 Reset network manager state and VPN switch counter"
+        env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" reset
+          echo "✅ Network manager runtime state reset"
+
+      # ======================================================================
+      # SECTION 19 - VALIDATE BOTH VPN PROFILES AND LOCAL NETWORK DEPENDENCIES
+      # ======================================================================
+      - name: "19.1 Validate VPN1/VPN2 profiles with network manager"
+        env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" validate-all
+          echo "✅ VPN1/VPN2 profile validation passed"
+
+      # ======================================================================
+      # SECTION 20 - VERIFY THE FUTURE NETWORK ERROR POLICY MAP
+      # ======================================================================
+      - name: "20.1 Verify RATE_LIMIT network action"
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" policy --error-type RATE_LIMIT
+
+      - name: "20.2 Verify NETWORK_ERROR network action"
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" policy --error-type NETWORK_ERROR
+
+      - name: "20.3 Verify SERVER_ERROR network action"
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" policy --error-type SERVER_ERROR
+
+      - name: "20.4 Verify AUTH_ERROR network action"
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" policy --error-type AUTH_ERROR
+
+      # ======================================================================
+      # SECTION 21 - RUN STORED-AUTH TEST + AUTOMATIC VPNBOOK AUTH RECOVERY
+      # ======================================================================
+      - name: "21.1 Run VPN auth recovery controller and full S1 qualification"
+        id: vpn_auth_recovery
+        env:
+          VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          CONTROLLER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
+
+          python "$CONTROLLER" \
+            --state-dir "${RUNNER_TEMP}/network-manager" \
+            --vpn1-config "${GITHUB_WORKSPACE}/vpn1.ovpn" \
+            --vpn1-auth "${GITHUB_WORKSPACE}/vpn1-auth.txt" \
+            --vpn2-config "${GITHUB_WORKSPACE}/vpn2.ovpn" \
+            --vpn2-auth "${GITHUB_WORKSPACE}/vpn2-auth.txt" \
+            --self-test-output "${RUNNER_TEMP}/s1-self-test.json" \
+            --recovered-marker "${RUNNER_TEMP}/vpn-auth-recovered" \
+            --recovery-failed-marker "${RUNNER_TEMP}/vpn-auth-recovery-failed" \
+            --secret-update-success-marker "${RUNNER_TEMP}/vpn-secret-update-success" \
+            --secret-update-failed-marker "${RUNNER_TEMP}/vpn-secret-update-failed" \
+            --repository "$GITHUB_REPOSITORY" \
+            --persist-secrets \
+            --update-vpn2-secrets
+
+      # ======================================================================
+      # SECTION 22 - VERIFY THE S1 SELF-TEST RESULT FILE
+      # ======================================================================
+      - name: "22.1 Verify S1 result file exists and contains success"
+        run: |
+          set -euo pipefail
+          test -s "${RUNNER_TEMP}/s1-self-test.json" || {
+            echo "❌ S1 self-test result missing or empty"
+            exit 1
+          }
+          cat "${RUNNER_TEMP}/s1-self-test.json"
+          grep -q '"passed": true' "${RUNNER_TEMP}/s1-self-test.json"
+          echo "✅ Complete S1 VPN qualification passed"
+
+      - name: "22.2 Verify VPN1 and VPN2 use different public exit IPs"
+        run: |
+          set -euo pipefail
+          grep -q '"different_public_ips": true' "${RUNNER_TEMP}/s1-self-test.json"
+          echo "✅ VPN1 and VPN2 proved independent exit IPs"
+
+      # ======================================================================
+      # SECTION 23 - REPORT WHETHER LIVE VPNBOOK RECOVERY WAS NEEDED
+      # ======================================================================
+      - name: "23.1 Report VPNBook credential recovery outcome"
+        run: |
+          set -euo pipefail
+          if [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ]; then
+            echo "⚠ Stored VPN credentials were expired/rejected"
+            echo "✅ Live VPNBook credentials recovered the run"
+          else
+            echo "✅ Stored VPN credentials remained valid"
+            echo "ℹ Live VPNBook recovery was not needed"
+          fi
+
+      # ======================================================================
+      # SECTION 24 - REPORT GITHUB SECRET UPDATE OUTCOME
+      # ======================================================================
+      - name: "24.1 Report persisted credential update outcome"
+        run: |
+          set -euo pipefail
+          if [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ]; then
+            echo "✅ Recovered VPN credentials were updated in GitHub Actions secrets"
+          elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
+            echo "⚠ Current run recovered, but GitHub secret update failed"
+          else
+            echo "ℹ GitHub VPN secret update was not required"
+          fi
+
+      # ======================================================================
+      # SECTION 25 - RESET AFTER QUALIFICATION BEFORE REAL COLLECTION
+      # ======================================================================
+      - name: "25.1 Reset S1 test network state"
+        env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" reset
+          echo "✅ S1 test state cleared"
+
+      # ======================================================================
+      # SECTION 26 - ESTABLISH A FRESH VPN1 SESSION FOR PRICE COLLECTION
+      # ======================================================================
+      - name: "26.1 Connect fresh VPN1 collection session"
+        env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+        run: |
+          set -euo pipefail
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" connect --network VPN1
+          echo "✅ Fresh VPN1 collection connection established"
+
+      # ======================================================================
+      # SECTION 27 - VERIFY THE ACTIVE VPN1 COLLECTION SESSION
+      # ======================================================================
+      - name: "27.1 Verify VPN1 is active, running, and switch counter is zero"
+        env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+        run: |
+          set -euo pipefail
+          STATUS_FILE="${RUNNER_TEMP}/network-manager-status.json"
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" status | tee "$STATUS_FILE"
+          grep -q '"active_network": "VPN1"' "$STATUS_FILE"
+          grep -q '"running": true' "$STATUS_FILE"
+          grep -q '"switch_count": 0' "$STATUS_FILE"
+          echo "✅ Network manager confirms clean VPN1 collection session"
+
+      # ======================================================================
+      # SECTION 28 - PROBE COINGECKO THROUGH THE VERIFIED VPN1 SESSION
+      # ======================================================================
+      - name: "28.1 Test CoinGecko API through VPN1"
+        run: |
+          set -euo pipefail
+          HTTP_CODE="$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            --output "${RUNNER_TEMP}/coingecko-probe.txt" \
+            --write-out "%{http_code}" \
+            https://api.coingecko.com/api/v3/ping)"
+          echo "CoinGecko HTTP ${HTTP_CODE}"
+          test "$HTTP_CODE" = "200"
+          echo "✅ CoinGecko VPN1 probe passed"
+
+      # ======================================================================
+      # SECTION 29 - PROBE BINANCE THROUGH THE VERIFIED VPN1 SESSION
+      # ======================================================================
+      - name: "29.1 Test Binance API through VPN1"
+        run: |
+          set -euo pipefail
+          HTTP_CODE="$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            --output "${RUNNER_TEMP}/binance-probe.txt" \
+            --write-out "%{http_code}" \
+            https://api.binance.com/api/v3/time)"
+          echo "Binance HTTP ${HTTP_CODE}"
+          test "$HTTP_CODE" = "200"
+          echo "✅ Binance VPN1 probe passed"
+
+      # ======================================================================
+      # SECTION 30 - DISPLAY CORE LOGGER MODULE METADATA
+      # ======================================================================
+      - name: "30.1 Display core logger file sizes, line counts and checksums"
+        run: |
+          set -euo pipefail
+          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
+          ls -lh "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+          wc -l "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+          sha256sum "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+
+      # ======================================================================
+      # SECTION 31 - DISPLAY VPN AUTH RECOVERY MODULE METADATA
+      # ======================================================================
+      - name: "31.1 Display recovery helper sizes, line counts and checksums"
+        run: |
+          set -euo pipefail
+          RECOVERY_DIR="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery"
+          ls -lh "$RECOVERY_DIR"/*.py
+          wc -l "$RECOVERY_DIR"/*.py
+          sha256sum "$RECOVERY_DIR"/*.py
+
+      # ======================================================================
+      # SECTION 32 - RECORD CSV STATE BEFORE RUNNING THE LOGGER
+      # ======================================================================
+      - name: "32.1 Record pre-run CSV row count"
+        run: |
+          set -euo pipefail
+          CSV="private_logger/price_log.csv"
+          BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
+          echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
+          echo "CSV rows before logger: $BEFORE_ROWS"
+
+      # ======================================================================
+      # SECTION 33 - EXECUTE THE CRYPTO PRICE LOGGER
+      # ======================================================================
+      - name: "33.1 Run price_logger.py on the verified VPN1 session"
+        env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
           PYTHONUNBUFFERED: "1"
-
         run: |
           set -euo pipefail
-
           cd private_logger/"Crypto Logger-Private Repo"
-
           echo "============================================================"
-          echo "🚀 STARTING CRYPTO PRICE LOGGER"
+          echo "🧪 STARTING STAGING CRYPTO PRICE LOGGER"
           echo "UTC time: $(date -u)"
           echo "============================================================"
-
           python price_logger.py
-
-          echo ""
           echo "============================================================"
-          echo "✅ CRYPTO PRICE LOGGER COMPLETED"
+          echo "✅ STAGING CRYPTO PRICE LOGGER COMPLETED"
           echo "UTC time: $(date -u)"
           echo "============================================================"
 
+      # ======================================================================
+      # SECTION 34 - DISCONNECT MANAGED VPN BEFORE GITHUB/GIT TRAFFIC
+      # ======================================================================
+      - name: "34.1 Ask network manager to disconnect and reset"
+        if: always()
+        env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+        run: |
+          set +e
+          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
+          if [ -f "$MANAGER" ]; then
+            python "$MANAGER" reset
+          fi
 
-      # ======================================================
-      # CHECK GENERATED CSV
-      # Confirms price_log.csv exists and is not empty.
-      # ======================================================
+      - name: "34.2 Verify no OpenVPN process remains"
+        if: always()
+        run: |
+          set +e
+          if sudo pgrep -x openvpn >/dev/null 2>&1; then
+            echo "⚠ Managed disconnect left OpenVPN running; applying emergency cleanup"
+            sudo pkill -x openvpn 2>/dev/null || true
+            sleep 2
+          fi
 
-      - name: Check generated CSV
+          if sudo pgrep -x openvpn >/dev/null 2>&1; then
+            echo "❌ OpenVPN still running after emergency cleanup"
+            sudo pgrep -a openvpn || true
+            exit 1
+          fi
+
+          echo "✅ VPN fully disconnected before Git/GitHub traffic"
+
+      # ======================================================================
+      # SECTION 35 - VERIFY THE GENERATED CSV FILE EXISTS
+      # ======================================================================
+      - name: "35.1 Verify price_log.csv exists and is non-empty"
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
-
-          echo "============================================================"
-          echo "📄 CHECKING GENERATED CSV"
-          echo "============================================================"
-
-          if [ ! -f "$CSV" ]; then
-            echo "❌ price_log.csv was not created"
-            exit 1
-          fi
-
-          if [ ! -s "$CSV" ]; then
-            echo "❌ price_log.csv exists but is empty"
-            exit 1
-          fi
-
-          echo "✅ price_log.csv exists"
-
-          echo ""
-          echo "CSV file information:"
+          test -s "$CSV" || { echo "❌ price_log.csv missing or empty"; exit 1; }
           ls -lh "$CSV"
 
-          echo ""
-          echo "CSV row count:"
-          wc -l "$CSV"
-
-          echo ""
-          echo "CSV header:"
-          head -n 1 "$CSV"
-
-          echo ""
-          echo "Latest CSV rows:"
-          tail -n 12 "$CSV"
-
-
-      # ======================================================
-      # VALIDATE CSV HEADER
-      # Prevents a malformed CSV from being committed.
-      # ======================================================
-
-      - name: Validate CSV header
+      # ======================================================================
+      # SECTION 36 - VALIDATE THE CSV SCHEMA
+      # ======================================================================
+      - name: "36.1 Validate price_log.csv header"
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
-
           EXPECTED_HEADER="timestamp_nz,symbol,price_usd,price_nzd,status,usd_nzd_rate"
-
           ACTUAL_HEADER="$(head -n 1 "$CSV" | tr -d '\r')"
-
-          echo "Expected header:"
-          echo "$EXPECTED_HEADER"
-
-          echo ""
-          echo "Actual header:"
-          echo "$ACTUAL_HEADER"
-
-          if [ "$ACTUAL_HEADER" != "$EXPECTED_HEADER" ]; then
-            echo "❌ CSV header is incorrect"
+          test "$ACTUAL_HEADER" = "$EXPECTED_HEADER" || {
+            echo "❌ CSV header mismatch"
+            echo "Expected: $EXPECTED_HEADER"
+            echo "Actual:   $ACTUAL_HEADER"
             exit 1
-          fi
+          }
+          echo "✅ CSV header valid"
 
-          echo ""
-          echo "✅ CSV header is correct"
-
-
-      # ======================================================
-      # VALIDATE CSV ROW COUNT
-      # Requires a header and at least one crypto data row.
-      # ======================================================
-
-      - name: Validate CSV row count
+      # ======================================================================
+      # SECTION 37 - VERIFY THE LOGGER ADDED FRESH CSV ROWS
+      # ======================================================================
+      - name: "37.1 Compare pre-run and post-run CSV row counts"
         run: |
           set -euo pipefail
-
           CSV="private_logger/price_log.csv"
+          BEFORE_ROWS="$(cat "${RUNNER_TEMP}/csv_rows_before.txt")"
+          AFTER_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
+          ADDED_ROWS="$((AFTER_ROWS - BEFORE_ROWS))"
+          echo "Rows before: $BEFORE_ROWS"
+          echo "Rows after:  $AFTER_ROWS"
+          echo "Rows added:  $ADDED_ROWS"
+          test "$ADDED_ROWS" -gt 0 || { echo "❌ Logger produced no new CSV rows"; exit 1; }
+          echo "✅ Logger added new CSV rows"
 
-          CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
-
-          echo "CSV rows found: $CSV_ROWS"
-
-          if [ "$CSV_ROWS" -lt 2 ]; then
-            echo "❌ CSV does not contain crypto data"
-            exit 1
-          fi
-
-          echo "✅ CSV contains crypto data"
-
-
-      # ======================================================
-      # CREATE CSV SAFETY BACKUP
-      # Copies the CSV outside Git before synchronisation.
-      # ======================================================
-
-      - name: Create CSV safety backup
+      - name: "37.2 Display latest CSV rows for staging review"
         run: |
           set -euo pipefail
+          tail -n 12 private_logger/price_log.csv
 
-          SOURCE_CSV="private_logger/price_log.csv"
-
-          BACKUP_CSV="${RUNNER_TEMP}/price_log.csv"
-
-          echo "Creating CSV safety backup..."
-
-          cp -- "$SOURCE_CSV" "$BACKUP_CSV"
-
-          if [ ! -s "$BACKUP_CSV" ]; then
-            echo "❌ CSV safety backup failed"
-            exit 1
-          fi
-
+      # ======================================================================
+      # SECTION 38 - CREATE A TEMPORARY CSV SAFETY BACKUP
+      # ======================================================================
+      - name: "38.1 Create CSV backup before Git operations"
+        run: |
+          set -euo pipefail
+          cp -- private_logger/price_log.csv "${RUNNER_TEMP}/price_log.csv"
+          test -s "${RUNNER_TEMP}/price_log.csv"
           echo "✅ CSV safety backup created"
 
-          ls -lh "$BACKUP_CSV"
-
-
-      # ======================================================
-      # SAVE CSV TO PRIVATE REPOSITORY
-      # Commits the CSV before fetching, rebasing and pushing.
-      # ======================================================
-
-      - name: Save CSV to private repository
-        env:
-          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-
+      # ======================================================================
+      # SECTION 39 - COMMIT THE CSV CHANGE LOCALLY
+      # ======================================================================
+      - name: "39.1 Create local staging CSV commit"
         run: |
           set -euo pipefail
-
-          echo "============================================================"
-          echo "💾 SAVING CSV TO PRIVATE REPOSITORY"
-          echo "============================================================"
-
-          if [ -z "$TOKEN" ]; then
-            echo "❌ PRIVATE_REPO_TOKEN missing"
-            exit 1
-          fi
-
           cd private_logger
-
-          CSV="price_log.csv"
-
-          BACKUP_CSV="${RUNNER_TEMP}/price_log.csv"
-
-          REMOTE_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
-
-          if [ ! -s "$CSV" ]; then
-            echo "❌ price_log.csv missing before commit"
-            exit 1
-          fi
-
-          if [ ! -s "$BACKUP_CSV" ]; then
-            echo "❌ CSV safety backup missing"
-            exit 1
-          fi
-
-          git config user.name "github-actions"
-
+          git config user.name "github-actions-staging"
           git config user.email "actions@github.com"
-
-          echo ""
-          echo "Repository status before staging:"
-
-          git status --short
-
-          echo ""
-          echo "Adding price_log.csv..."
-
           git add -- price_log.csv
 
-          echo ""
-          echo "Repository status after staging:"
-
-          git status --short
-
           if git diff --cached --quiet; then
-            echo ""
-            echo "No CSV changes detected"
-            echo "Nothing needs to be committed"
-            exit 0
+            echo "❌ No CSV change detected for commit"
+            exit 1
           fi
 
-          echo ""
-          echo "CSV changes:"
-
           git diff --cached --stat
-
-          COMMIT_MESSAGE="Update crypto price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-
-          echo ""
-          echo "Creating local CSV commit..."
-
-          git commit -m "$COMMIT_MESSAGE"
-
-          echo ""
-          echo "Local commit created:"
-
+          git commit -m "STAGING test price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git log -1 --oneline
+
+      # ======================================================================
+      # SECTION 40 - REBASE AND PUSH THE PRIVATE STAGING CSV COMMIT
+      # ======================================================================
+      - name: "40.1 Rebase against latest private staging and push"
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          TARGET_BRANCH="${GITHUB_REF_NAME}"
+          REMOTE_URL="https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
+          cd private_logger
 
           for attempt in 1 2 3
           do
-            echo ""
-            echo "------------------------------------------------------------"
             echo "Git synchronisation attempt ${attempt}/3"
-            echo "------------------------------------------------------------"
+            git fetch origin "$TARGET_BRANCH"
 
-            echo "Fetching latest origin/main..."
-
-            git fetch origin main
-
-            echo ""
-            echo "Rebasing local CSV commit..."
-
-            if ! git rebase origin/main; then
-              echo "❌ Rebase conflict detected"
-
+            if ! git rebase "origin/${TARGET_BRANCH}"; then
               git rebase --abort || true
-
-              cp -- "$BACKUP_CSV" "$CSV"
-
-              echo "CSV restored from safety backup"
-
+              cp -- "${RUNNER_TEMP}/price_log.csv" price_log.csv
+              echo "❌ Rebase conflict detected"
               exit 1
             fi
 
-            echo "✅ Rebase completed"
-
-            echo ""
-            echo "Pushing CSV update..."
-
-            if git push "$REMOTE_URL" HEAD:main; then
-              echo ""
-              echo "============================================================"
-              echo "✅ CSV PUSHED SUCCESSFULLY"
-              echo "============================================================"
-
+            if git push "$REMOTE_URL" "HEAD:${TARGET_BRANCH}"; then
+              echo "✅ Private staging push succeeded"
               exit 0
             fi
 
-            echo ""
-            echo "⚠ Push attempt ${attempt} failed"
-
-            if [ "$attempt" -lt 3 ]; then
-              echo "The remote branch may have changed"
-              echo "Waiting 5 seconds before retry..."
-
-              sleep 5
-            fi
+            [ "$attempt" -lt 3 ] && sleep 5
           done
 
-          echo ""
-          echo "❌ CSV push failed after 3 attempts"
-
+          echo "❌ Private staging push failed after 3 attempts"
           exit 1
 
-
-      # ======================================================
-      # CREATE WORKFLOW SUMMARY
-      # Adds a result summary to the GitHub Actions run page.
-      # ======================================================
-
-      - name: Create logger summary
+      # ======================================================================
+      # SECTION 41 - VERIFY THE REMOTE PRIVATE STAGING COMMIT SHA
+      # ======================================================================
+      - name: "41.1 Verify remote branch matches the pushed commit"
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
+          TARGET_BRANCH="${GITHUB_REF_NAME}"
+          REMOTE_URL="https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
+          cd private_logger
+          LOCAL_SHA="$(git rev-parse HEAD)"
+          REMOTE_SHA="$(git ls-remote "$REMOTE_URL" "refs/heads/${TARGET_BRANCH}" | awk '{print $1}')"
+          echo "Local SHA:  $LOCAL_SHA"
+          echo "Remote SHA: $REMOTE_SHA"
+          test -n "$REMOTE_SHA"
+          test "$LOCAL_SHA" = "$REMOTE_SHA"
+          echo "✅ Remote private staging SHA verified"
 
-          CSV="private_logger/price_log.csv"
-
-          CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
-
-          DATA_ROWS="$((CSV_ROWS - 1))"
-
-          LATEST_TIMESTAMP="$(tail -n 1 "$CSV" | cut -d',' -f1)"
-
-          {
-            echo "## 🚀 Crypto Price Logger"
-            echo ""
-            echo "- **Workflow:** Successful"
-            echo "- **CSV total rows:** ${CSV_ROWS}"
-            echo "- **CSV data rows:** ${DATA_ROWS}"
-            echo "- **Latest timestamp:** ${LATEST_TIMESTAMP}"
-            echo "- **VPN:** Connected"
-            echo "- **Python syntax:** Valid"
-            echo "- **Git update:** Successful or no changes required"
-            echo "- **Completed UTC:** $(date -u)"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "✅ Workflow summary created"
-
-
-      # ======================================================
-      # PREPARE FAILURE DEBUG FILES
-      # Copies safe files into a readable debug directory.
-      # ======================================================
-
-      - name: Prepare debug files if failed
-        if: failure()
-
+      # ======================================================================
+      # SECTION 42 - CLASSIFY WHETHER A PRIVATE RECOVERY EMAIL IS REQUIRED
+      # ======================================================================
+      - name: "42.1 Classify VPN auth recovery alert condition"
+        if: always()
         run: |
           set +e
+          rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
 
-          echo "Preparing failure debug files..."
+          if [ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ]; then
+            echo "VPN_AUTH_RECOVERY_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
+          elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
+            echo "VPN_SECRET_UPDATE_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
+          fi
 
+          if [ -f "${RUNNER_TEMP}/vpn-alert-type.txt" ]; then
+            echo "⚠ Private VPN recovery alert required"
+          else
+            echo "✅ No private VPN recovery alert required"
+          fi
+
+      # ======================================================================
+      # SECTION 43 - SEND HIGH-PRIORITY PRIVATE EMAIL THROUGH PYTHON HELPER
+      # ======================================================================
+      - name: "43.1 Send standout VPN recovery email alert"
+        if: always()
+        continue-on-error: true
+        env:
+          ALERT_SMTP_HOST: ${{ secrets.ALERT_SMTP_HOST }}
+          ALERT_SMTP_PORT: ${{ secrets.ALERT_SMTP_PORT }}
+          ALERT_SMTP_USERNAME: ${{ secrets.ALERT_SMTP_USERNAME }}
+          ALERT_SMTP_PASSWORD: ${{ secrets.ALERT_SMTP_PASSWORD }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+          ALERT_EMAIL_TO_PRIMARY: ${{ secrets.ALERT_EMAIL_TO_PRIMARY }}
+          ALERT_EMAIL_TO_SECONDARY: ${{ secrets.ALERT_EMAIL_TO_SECONDARY }}
+          CRYPTO_LOGGER_ENVIRONMENT: STAGING
+        run: |
+          set +e
+          ALERT_FILE="${RUNNER_TEMP}/vpn-alert-type.txt"
+          NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
+
+          [ -f "$ALERT_FILE" ] || { echo "No VPN recovery email required"; exit 0; }
+          [ -f "$NOTIFIER" ] || { echo "⚠ alert_email.py unavailable"; exit 0; }
+
+          if [ -z "$ALERT_SMTP_USERNAME" ] || \
+             [ -z "$ALERT_SMTP_PASSWORD" ] || \
+             [ -z "$ALERT_EMAIL_TO_PRIMARY" ]; then
+            echo "⚠ Private SMTP/email alert configuration incomplete"
+            exit 0
+          fi
+
+          ALERT_TYPE="$(cat "$ALERT_FILE")"
+          echo "Sending private alert type: ${ALERT_TYPE}"
+          python "$NOTIFIER" --alert-type "$ALERT_TYPE"
+
+      # ======================================================================
+      # SECTION 44 - CREATE A STRUCTURED SUCCESS SUMMARY
+      # ======================================================================
+      - name: "44.1 Create detailed staging success summary"
+        if: success()
+        run: |
+          set -euo pipefail
+          CSV="private_logger/price_log.csv"
+          CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
+          DATA_ROWS="$((CSV_ROWS - 1))"
+          LATEST_TIMESTAMP="$(tail -n 1 "$CSV" | cut -d',' -f1)"
+          AUTH_RECOVERY="Not needed"
+          SECRET_UPDATE="Not needed"
+
+          [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && AUTH_RECOVERY="Used successfully"
+          [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ] && SECRET_UPDATE="Updated successfully"
+          [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && SECRET_UPDATE="Failed - private alert requested"
+
+          {
+            echo "## 🧪 Crypto Price Logger - STAGING S1"
+            echo ""
+            echo "### VPN qualification"
+            echo "- Network Manager validation: **Passed**"
+            echo "- VPN1 live connection: **Passed**"
+            echo "- VPN2 live connection: **Passed**"
+            echo "- Different public IP requirement: **Passed**"
+            echo ""
+            echo "### VPNBook authentication recovery"
+            echo "- Live auth recovery: **${AUTH_RECOVERY}**"
+            echo "- GitHub secret update: **${SECRET_UPDATE}**"
+            echo ""
+            echo "### Provider probes"
+            echo "- CoinGecko through VPN1: **Passed**"
+            echo "- Binance through VPN1: **Passed**"
+            echo ""
+            echo "### Price logger"
+            echo "- Collection network: **VPN1**"
+            echo "- Provider-triggered VPN2 switching: **Not enabled in S1**"
+            echo "- Maximum future VPN switches per run: **1**"
+            echo "- CSV total rows: **${CSV_ROWS}**"
+            echo "- CSV data rows: **${DATA_ROWS}**"
+            echo "- Latest timestamp: **${LATEST_TIMESTAMP}**"
+            echo ""
+            echo "### Safety"
+            echo "- VPN disconnected before Git/GitHub traffic: **Yes**"
+            echo "- Production main modified: **No**"
+            echo "- Neon writes: **Disabled**"
+            echo "- Completed UTC: **$(date -u)**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ======================================================================
+      # SECTION 45 - COLLECT NON-SECRET FAILURE DIAGNOSTICS
+      # ======================================================================
+      - name: "45.1 Collect staging debug files after failure"
+        if: failure()
+        run: |
+          set +e
           mkdir -p debug
 
-          if [ -f vpn.log ]; then
-            sudo cp vpn.log debug/vpn.log
+          [ -f private_logger/price_log.csv ] && cp private_logger/price_log.csv debug/price_log.csv
+          [ -f "${RUNNER_TEMP}/coingecko-probe.txt" ] && cp "${RUNNER_TEMP}/coingecko-probe.txt" debug/
+          [ -f "${RUNNER_TEMP}/binance-probe.txt" ] && cp "${RUNNER_TEMP}/binance-probe.txt" debug/
+          [ -f "${RUNNER_TEMP}/network-manager-status.json" ] && cp "${RUNNER_TEMP}/network-manager-status.json" debug/
+          [ -f "${RUNNER_TEMP}/s1-self-test.json" ] && cp "${RUNNER_TEMP}/s1-self-test.json" debug/
+
+          if [ -d "${RUNNER_TEMP}/network-manager" ]; then
+            cp -R "${RUNNER_TEMP}/network-manager" debug/network-manager-state 2>/dev/null || true
           fi
 
-          if [ -f private_logger/price_log.csv ]; then
-            cp private_logger/price_log.csv debug/price_log.csv
-          fi
+          {
+            echo "UTC time: $(date -u)"
+            echo "Public branch: ${GITHUB_REF_NAME}"
+            echo "Run ID: ${GITHUB_RUN_ID}"
+            echo "Run attempt: ${GITHUB_RUN_ATTEMPT}"
+            echo ""
+            echo "Recovery markers:"
+            echo "vpn_auth_recovered=$([ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && echo yes || echo no)"
+            echo "vpn_auth_recovery_failed=$([ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo yes || echo no)"
+            echo "vpn_secret_update_success=$([ -f "${RUNNER_TEMP}/vpn-secret-update-success" ] && echo yes || echo no)"
+            echo "vpn_secret_update_failed=$([ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo yes || echo no)"
+            echo ""
+            echo "OpenVPN processes:"
+            sudo pgrep -a openvpn || true
+            echo ""
+            echo "Network interfaces:"
+            ip addr show || true
+            echo ""
+            echo "IPv4 routes:"
+            ip route show || true
+            echo ""
+            echo "DNS status:"
+            resolvectl status 2>/dev/null || cat /etc/resolv.conf || true
+          } > debug/network-diagnostics.txt
 
           sudo chown -R "$(id -u):$(id -g)" debug
-
           chmod -R u+rwX,go+rX debug
+          find debug -maxdepth 3 -type f -ls || true
 
-          echo ""
-          echo "Prepared debug files:"
-
-          find debug -maxdepth 2 -type f -ls || true
-
-
-      # ======================================================
-      # UPLOAD FAILURE DEBUG FILES
-      # Uploads readable troubleshooting files after failure.
-      # ======================================================
-
-      - name: Upload debug files if failed
+      # ======================================================================
+      # SECTION 46 - UPLOAD THE FAILURE DEBUG ARTIFACT
+      # ======================================================================
+      - name: "46.1 Upload staging failure diagnostics"
         if: failure()
-
-        uses: actions/upload-artifact@v4
-
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
         with:
-          name: crypto-price-logger-debug
-
+          name: staging-crypto-price-logger-debug-${{ github.run_id }}-${{ github.run_attempt }}
           path: debug/
-
           if-no-files-found: ignore
+          retention-days: 3
 
-          retention-days: 7
-
-
-      # ======================================================
-      # CLEANUP RUNNER
-      # Stops OpenVPN and removes all temporary private files.
-      # ======================================================
-
-      - name: Cleanup runner
+      # ======================================================================
+      # SECTION 47 - TERMINATE ANY REMAINING OPENVPN PROCESS
+      # ======================================================================
+      - name: "47.1 Terminate leftover OpenVPN process during final cleanup"
         if: always()
-
         run: |
-          echo "============================================================"
-          echo "🧹 CLEANING RUNNER"
-          echo "============================================================"
+          set +e
+          if sudo pgrep -x openvpn >/dev/null 2>&1; then
+            sudo pkill -x openvpn 2>/dev/null || true
+            sleep 2
+          fi
 
-          echo ""
-          echo "Stopping OpenVPN..."
-
-          sudo pkill openvpn 2>/dev/null || true
-
-          echo ""
-          echo "Removing private repository..."
-
+      # ======================================================================
+      # SECTION 48 - REMOVE ALL EPHEMERAL RUNNER DATA AND CREDENTIAL FILES
+      # ======================================================================
+      - name: "48.1 Remove temporary repositories, state, debug and credentials"
+        if: always()
+        run: |
+          set +e
           rm -rf private_logger
-
-          echo ""
-          echo "Removing debug directory..."
-
           sudo rm -rf debug
-
-          echo ""
-          echo "Removing VPN files..."
-
-          sudo rm -f vpnbook.ovpn
-          sudo rm -f auth.txt
-          sudo rm -f vpn.log
-
-          echo ""
-          echo "✅ Runner cleaned"
+          rm -rf "${RUNNER_TEMP}/network-manager"
+          rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
+          sudo rm -f vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
+          echo "✅ Ephemeral runner cleanup completed"
