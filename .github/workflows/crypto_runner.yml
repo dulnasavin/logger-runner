@@ -10,21 +10,32 @@ on:
 permissions:
   contents: read
 
-# ============================================================
-# STAGING S1 NETWORK QUALIFICATION + AUTH SELF-HEALING
-# - Public staging reads/writes private staging.
-# - network_manager.py owns VPN process lifecycle.
-# - S1 self-test proves VPN1 + VPN2 independently connect.
-# - Stored VPNBook credentials are tried first.
-# - AUTH_FAILED triggers one live credential refresh from the
-#   official VPNBook OpenVPN page, immediate masking and one retry.
-# - If live credentials work, the workflow can persist them back
-#   to GitHub Actions secrets using VPN_SECRET_UPDATE_TOKEN.
-# - Auth recovery failure triggers a high-priority custom email
-#   when SMTP alert secrets are configured.
-# - Provider-triggered automatic VPN switching is NOT wired yet.
+# ============================================================================
+# STAGING S1 NETWORK QUALIFICATION + VPN AUTH SELF-HEALING
+# ============================================================================
+# Architecture
+#
+# crypto_runner.yml
+#   -> network_manager.py
+#   -> vpn_auth_recovery/recovery_controller.py
+#        -> vpnbook_credentials.py
+#        -> github_secret_updater.py
+#        -> alert_email.py
+#   -> price_logger.py
+#
+# Rules
+# - Stored VPN credentials are always tried first.
+# - Only AUTH_FAILED triggers live VPNBook credential recovery.
+# - Live credentials are fetched only from the official VPNBook page.
+# - Recovered username/password are masked immediately.
+# - Recovered credentials must pass the complete VPN1/VPN2 self-test.
+# - GitHub secrets are refreshed only after successful VPN authentication.
+# - Secret-update failure does not kill a recovered logger run; it triggers alert.
+# - Recovery failure stops the workflow and triggers alert.
+# - Alert recipient addresses are GitHub secrets, not hard-coded in YAML.
+# - Provider-triggered VPN failover is still intentionally NOT wired in S1.
 # - Production main and Neon remain untouched.
-# ============================================================
+# ============================================================================
 
 concurrency:
   group: crypto-price-logger-${{ github.ref_name }}
@@ -36,39 +47,54 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # ======================================================================
+      # SECTION 01 - CHECKOUT + RUN INFORMATION
+      # ======================================================================
+
       - name: Checkout runner repository
         uses: actions/checkout@v6
 
       - name: Show runner information
         run: |
           set -euo pipefail
+
           echo "============================================================"
           echo "🧪 CRYPTO PRICE LOGGER - STAGING S1"
           echo "============================================================"
-          echo "UTC time: $(date -u)"
-          echo "Public branch: ${GITHUB_REF_NAME}"
-          echo "Public commit: ${GITHUB_SHA}"
+          echo "UTC time:       $(date -u)"
+          echo "Public branch:  ${GITHUB_REF_NAME}"
+          echo "Public commit:  ${GITHUB_SHA}"
+          echo "Workflow run:   ${GITHUB_RUN_NUMBER}"
+          echo "Workflow run ID:${GITHUB_RUN_ID}"
+          echo "============================================================"
           uname -a
           pwd
           df -h .
+
+      # ======================================================================
+      # SECTION 02 - PRIVATE REPOSITORY ACCESS
+      # ======================================================================
 
       - name: Check private repository token
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set -euo pipefail
+
           test -n "$TOKEN" || {
             echo "❌ PRIVATE_REPO_TOKEN missing"
             exit 1
           }
+
           echo "✅ PRIVATE_REPO_TOKEN exists"
 
-      - name: Clone private crypto logger
+      - name: Clone matching private staging branch
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
+
           TARGET_BRANCH="${GITHUB_REF_NAME}"
           REPOSITORY_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
 
@@ -99,24 +125,35 @@ jobs:
 
           if [ "$ACTUAL_BRANCH" != "$TARGET_BRANCH" ]; then
             echo "❌ Wrong private branch checked out"
+            echo "Expected: ${TARGET_BRANCH}"
+            echo "Actual:   ${ACTUAL_BRANCH}"
             exit 1
           fi
 
+          echo "✅ Matching private branch checked out"
           git log -1 --oneline
           git status --short
+
+      # ======================================================================
+      # SECTION 03 - PRIVATE FILE STRUCTURE
+      # ======================================================================
 
       - name: Validate private repository structure
         run: |
           set -euo pipefail
-          LOGGER_DIRECTORY="private_logger/Crypto Logger-Private Repo"
+
+          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
+          RECOVERY_DIR="${LOGGER_DIR}/vpn_auth_recovery"
 
           for required in \
-            "$LOGGER_DIRECTORY/price_logger.py" \
-            "$LOGGER_DIRECTORY/network_manager.py" \
-            "$LOGGER_DIRECTORY/vpnbook_credentials.py" \
-            "$LOGGER_DIRECTORY/github_secret_updater.py" \
-            "$LOGGER_DIRECTORY/alert_email.py" \
-            "$LOGGER_DIRECTORY/requirements.txt"
+            "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/network_manager.py" \
+            "$LOGGER_DIR/requirements.txt" \
+            "$RECOVERY_DIR/__init__.py" \
+            "$RECOVERY_DIR/recovery_controller.py" \
+            "$RECOVERY_DIR/vpnbook_credentials.py" \
+            "$RECOVERY_DIR/github_secret_updater.py" \
+            "$RECOVERY_DIR/alert_email.py"
           do
             test -s "$required" || {
               echo "❌ Missing or empty: $required"
@@ -130,21 +167,52 @@ jobs:
           }
 
           echo "✅ Private staging structure is valid"
-          find "$LOGGER_DIRECTORY" -maxdepth 1 -type f | sort
+          echo ""
+          echo "Logger files:"
+          find "$LOGGER_DIR" -maxdepth 1 -type f | sort
+          echo ""
+          echo "VPN auth recovery module:"
+          find "$RECOVERY_DIR" -maxdepth 1 -type f | sort
+
+      # ======================================================================
+      # SECTION 04 - PYTHON + DEPENDENCIES
+      # ======================================================================
 
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           set -euo pipefail
+
           cd private_logger/"Crypto Logger-Private Repo"
           python --version
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip check
+
+      - name: Validate Python syntax
+        run: |
+          set -euo pipefail
+
+          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
+          RECOVERY_DIR="${LOGGER_DIR}/vpn_auth_recovery"
+
+          python -m py_compile \
+            "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/network_manager.py" \
+            "$RECOVERY_DIR/recovery_controller.py" \
+            "$RECOVERY_DIR/vpnbook_credentials.py" \
+            "$RECOVERY_DIR/github_secret_updater.py" \
+            "$RECOVERY_DIR/alert_email.py"
+
+          echo "✅ All staging Python files compile successfully"
+
+      # ======================================================================
+      # SECTION 05 - CORE SECRETS
+      # ======================================================================
 
       - name: Check required core secrets
         env:
@@ -162,10 +230,12 @@ jobs:
           check_secret() {
             local name="$1"
             local value="$2"
+
             test -n "$value" || {
               echo "❌ ${name} missing"
               exit 1
             }
+
             echo "✅ ${name} exists"
           }
 
@@ -178,43 +248,65 @@ jobs:
           check_secret "VPN2_USERNAME" "$VPN2_USERNAME"
           check_secret "VPN2_PASSWORD" "$VPN2_PASSWORD"
 
-      - name: Check optional self-healing and alert secrets
+      # ======================================================================
+      # SECTION 06 - OPTIONAL SELF-HEALING + PRIVATE ALERT SECRETS
+      # ======================================================================
+
+      - name: Check self-healing and alert configuration
         env:
           SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
           SMTP_USERNAME: ${{ secrets.ALERT_SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.ALERT_SMTP_PASSWORD }}
-          SECOND_RECIPIENT: ${{ secrets.ALERT_EMAIL_TO_2 }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          ALERT_EMAIL_TO_2: ${{ secrets.ALERT_EMAIL_TO_2 }}
         run: |
           set -euo pipefail
 
           if [ -n "$SECRET_UPDATE_TOKEN" ]; then
-            echo "✅ VPN_SECRET_UPDATE_TOKEN configured"
+            echo "✅ VPN secret persistence token configured"
           else
-            echo "⚠ VPN_SECRET_UPDATE_TOKEN not configured; live credentials can be used for the run but cannot be persisted"
+            echo "⚠ VPN_SECRET_UPDATE_TOKEN missing"
+            echo "   Runtime auth recovery can still work, but refreshed credentials cannot be persisted."
           fi
 
           if [ -n "$SMTP_USERNAME" ] && [ -n "$SMTP_PASSWORD" ]; then
-            echo "✅ SMTP alert credentials configured"
+            echo "✅ SMTP alert authentication configured"
           else
-            echo "⚠ SMTP alert credentials are not fully configured; custom email alerts will be skipped"
+            echo "⚠ SMTP alert authentication incomplete"
           fi
 
-          if [ -n "$SECOND_RECIPIENT" ]; then
-            echo "✅ Second alert recipient configured"
+          if [ -n "$ALERT_EMAIL_TO" ]; then
+            echo "✅ Primary alert recipient configured as a secret"
           else
-            echo "ℹ Second alert recipient not configured; dulnasavin@outlook.com remains the default recipient"
+            echo "⚠ ALERT_EMAIL_TO missing"
           fi
+
+          if [ -n "$ALERT_EMAIL_TO_2" ]; then
+            echo "✅ Secondary alert recipient configured as a secret"
+          else
+            echo "⚠ ALERT_EMAIL_TO_2 missing"
+          fi
+
+      # ======================================================================
+      # SECTION 07 - OPENVPN INSTALLATION
+      # ======================================================================
 
       - name: Install OpenVPN
         run: |
           set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y openvpn
           openvpn --version | head -n 1
           sudo -n true
+
           echo "✅ OpenVPN and passwordless sudo available"
 
-      - name: Create VPN1 and VPN2 files
+      # ======================================================================
+      # SECTION 08 - SECURE VPN RUNTIME FILES
+      # ======================================================================
+
+      - name: Create VPN1 and VPN2 runtime files
         env:
           VPN1_CONFIG_SECRET: ${{ secrets.VPNBOOK_CONFIG }}
           VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
@@ -228,27 +320,22 @@ jobs:
 
           printf '%s\n' "$VPN1_CONFIG_SECRET" > vpn1.ovpn
           printf '%s\n%s\n' "$VPN1_USERNAME" "$VPN1_PASSWORD" > vpn1-auth.txt
+
           printf '%s\n' "$VPN2_CONFIG_SECRET" > vpn2.ovpn
           printf '%s\n%s\n' "$VPN2_USERNAME" "$VPN2_PASSWORD" > vpn2-auth.txt
 
           chmod 600 vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
+
           test -s vpn1.ovpn
           test -s vpn1-auth.txt
           test -s vpn2.ovpn
           test -s vpn2-auth.txt
-          echo "✅ VPN1 and VPN2 files created securely"
 
-      - name: Validate Python syntax
-        run: |
-          set -euo pipefail
-          cd private_logger/"Crypto Logger-Private Repo"
-          python -m py_compile \
-            price_logger.py \
-            network_manager.py \
-            vpnbook_credentials.py \
-            github_secret_updater.py \
-            alert_email.py
-          echo "✅ Python syntax valid"
+          echo "✅ Protected VPN runtime files created"
+
+      # ======================================================================
+      # SECTION 09 - NETWORK MANAGER STATIC VALIDATION
+      # ======================================================================
 
       - name: Reset S1 network state
         env:
@@ -259,8 +346,10 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set -euo pipefail
+
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
           python "$MANAGER" reset
+
           echo "✅ Network state reset"
 
       - name: Validate complete S1 network configuration
@@ -272,6 +361,7 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set -euo pipefail
+
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
 
           python "$MANAGER" validate-all
@@ -282,103 +372,53 @@ jobs:
 
           echo "✅ S1 configuration and policy map validated"
 
-      - name: Self-test VPN1 and VPN2 with live auth recovery
+      # ======================================================================
+      # SECTION 10 - VPN AUTH RECOVERY CONTROLLER
+      # ======================================================================
+      # The controller performs:
+      # 1. Stored credential S1 self-test.
+      # 2. AUTH_FAILED detection only.
+      # 3. Official VPNBook credential fetch.
+      # 4. Immediate log masking.
+      # 5. One complete S1 retry.
+      # 6. Secret persistence only after successful authentication.
+      # ======================================================================
+
+      - name: Run VPN1/VPN2 self-test with auth self-healing
         id: vpn_auth
-        env:
-          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
-          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
-          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
-          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
-          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
-        run: |
-          set -euo pipefail
-
-          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
-          CREDENTIAL_HELPER="private_logger/Crypto Logger-Private Repo/vpnbook_credentials.py"
-          SELF_TEST="${RUNNER_TEMP}/s1-self-test.json"
-
-          rm -f \
-            "${RUNNER_TEMP}/vpn-auth-recovered" \
-            "${RUNNER_TEMP}/vpn-auth-recovery-failed"
-
-          echo "Trying stored VPN credentials first..."
-
-          set +e
-          python "$MANAGER" self-test | tee "$SELF_TEST"
-          FIRST_RESULT=${PIPESTATUS[0]}
-          set -e
-
-          if [ "$FIRST_RESULT" -eq 0 ]; then
-            echo "recovered=false" >> "$GITHUB_OUTPUT"
-            echo "✅ Stored VPN credentials accepted"
-            exit 0
-          fi
-
-          if [ "$FIRST_RESULT" -ne 20 ]; then
-            echo "❌ S1 failed for a non-authentication reason; live credential recovery will not run"
-            exit "$FIRST_RESULT"
-          fi
-
-          echo "⚠ Stored VPN credentials were rejected with AUTH_FAILED"
-          echo "Fetching current credentials from the official VPNBook OpenVPN page..."
-
-          python "$CREDENTIAL_HELPER" \
-            --auth-file "${GITHUB_WORKSPACE}/vpn1-auth.txt" \
-            --auth-file "${GITHUB_WORKSPACE}/vpn2-auth.txt"
-
-          touch "${RUNNER_TEMP}/vpn-auth-recovered"
-
-          echo "Retrying complete VPN1/VPN2 self-test once with masked live credentials..."
-
-          set +e
-          python "$MANAGER" self-test | tee "$SELF_TEST"
-          RETRY_RESULT=${PIPESTATUS[0]}
-          set -e
-
-          if [ "$RETRY_RESULT" -ne 0 ]; then
-            touch "${RUNNER_TEMP}/vpn-auth-recovery-failed"
-            echo "❌ Live VPNBook credentials also failed the S1 self-test"
-            exit "$RETRY_RESULT"
-          fi
-
-          grep -q '"passed": true' "$SELF_TEST"
-          grep -q '"different_public_ips": true' "$SELF_TEST"
-
-          echo "recovered=true" >> "$GITHUB_OUTPUT"
-          echo "✅ Live VPNBook credential recovery succeeded"
-          echo "✅ VPN1 and VPN2 independently connected with different exit IPs"
-
-      - name: Persist recovered VPN credentials to GitHub secrets
-        id: persist_vpn_auth
-        if: steps.vpn_auth.outputs.recovered == 'true'
-        continue-on-error: true
         env:
           VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
         run: |
           set -euo pipefail
 
-          UPDATER="private_logger/Crypto Logger-Private Repo/github_secret_updater.py"
+          CONTROLLER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
 
-          if [ -z "$VPN_SECRET_UPDATE_TOKEN" ]; then
-            echo "⚠ VPN_SECRET_UPDATE_TOKEN missing"
-            touch "${RUNNER_TEMP}/vpn-secret-update-failed"
-            exit 0
-          fi
-
-          if python "$UPDATER" \
+          python "$CONTROLLER" \
+            --state-dir "${RUNNER_TEMP}/network-manager" \
+            --vpn1-config "${GITHUB_WORKSPACE}/vpn1.ovpn" \
+            --vpn1-auth "${GITHUB_WORKSPACE}/vpn1-auth.txt" \
+            --vpn2-config "${GITHUB_WORKSPACE}/vpn2.ovpn" \
+            --vpn2-auth "${GITHUB_WORKSPACE}/vpn2-auth.txt" \
+            --self-test-output "${RUNNER_TEMP}/s1-self-test.json" \
+            --recovered-marker "${RUNNER_TEMP}/vpn-auth-recovered" \
+            --recovery-failed-marker "${RUNNER_TEMP}/vpn-auth-recovery-failed" \
+            --secret-update-success-marker "${RUNNER_TEMP}/vpn-secret-update-success" \
+            --secret-update-failed-marker "${RUNNER_TEMP}/vpn-secret-update-failed" \
             --repository "$GITHUB_REPOSITORY" \
-            --auth-file "${GITHUB_WORKSPACE}/vpn1-auth.txt" \
-            --update-vpn2
-          then
-            touch "${RUNNER_TEMP}/vpn-secret-update-success"
-            echo "✅ GitHub VPN secrets refreshed after successful live authentication"
-          else
-            touch "${RUNNER_TEMP}/vpn-secret-update-failed"
-            echo "⚠ Live credentials worked, but GitHub secret persistence failed"
-            exit 1
-          fi
+            --persist-secrets \
+            --update-vpn2-secrets
 
-      - name: Reconnect VPN1 for logger collection
+          test -s "${RUNNER_TEMP}/s1-self-test.json"
+          grep -q '"passed": true' "${RUNNER_TEMP}/s1-self-test.json"
+          grep -q '"different_public_ips": true' "${RUNNER_TEMP}/s1-self-test.json"
+
+          echo "✅ Complete S1 VPN qualification passed"
+
+      # ======================================================================
+      # SECTION 11 - CLEAN VPN1 SESSION FOR LOGGER
+      # ======================================================================
+
+      - name: Reconnect clean VPN1 for collection
         env:
           NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
           VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
@@ -387,6 +427,7 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set -euo pipefail
+
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
           STATUS_FILE="${RUNNER_TEMP}/network-manager-status.json"
 
@@ -400,9 +441,14 @@ jobs:
 
           echo "✅ Clean VPN1 session ready for logger"
 
+      # ======================================================================
+      # SECTION 12 - PROVIDER CONNECTIVITY PROBES
+      # ======================================================================
+
       - name: Test CoinGecko connectivity on VPN1
         run: |
           set -euo pipefail
+
           HTTP_CODE="$(
             curl \
               --fail-with-body \
@@ -414,12 +460,15 @@ jobs:
               --write-out "%{http_code}" \
               https://api.coingecko.com/api/v3/ping
           )"
+
           echo "CoinGecko HTTP ${HTTP_CODE}"
           test "$HTTP_CODE" = "200"
+          echo "✅ CoinGecko probe passed"
 
       - name: Test Binance connectivity on VPN1
         run: |
           set -euo pipefail
+
           HTTP_CODE="$(
             curl \
               --fail-with-body \
@@ -431,33 +480,50 @@ jobs:
               --write-out "%{http_code}" \
               https://api.binance.com/api/v3/time
           )"
+
           echo "Binance HTTP ${HTTP_CODE}"
           test "$HTTP_CODE" = "200"
+          echo "✅ Binance probe passed"
 
-      - name: Show logger file information
+      # ======================================================================
+      # SECTION 13 - LOGGER FILE INFORMATION
+      # ======================================================================
+
+      - name: Show logger module information
         run: |
           set -euo pipefail
+
           LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
-          ls -lh \
-            "$LOGGER_DIR/price_logger.py" \
-            "$LOGGER_DIR/network_manager.py" \
-            "$LOGGER_DIR/vpnbook_credentials.py" \
-            "$LOGGER_DIR/github_secret_updater.py" \
-            "$LOGGER_DIR/alert_email.py"
-          wc -l \
-            "$LOGGER_DIR/price_logger.py" \
-            "$LOGGER_DIR/network_manager.py" \
-            "$LOGGER_DIR/vpnbook_credentials.py" \
-            "$LOGGER_DIR/github_secret_updater.py" \
-            "$LOGGER_DIR/alert_email.py"
+          RECOVERY_DIR="${LOGGER_DIR}/vpn_auth_recovery"
+
+          echo "Core logger files:"
+          ls -lh "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+          wc -l "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+          sha256sum "$LOGGER_DIR/price_logger.py" "$LOGGER_DIR/network_manager.py"
+
+          echo ""
+          echo "VPN auth recovery files:"
+          ls -lh "$RECOVERY_DIR"/*.py
+          wc -l "$RECOVERY_DIR"/*.py
+          sha256sum "$RECOVERY_DIR"/*.py
+
+      # ======================================================================
+      # SECTION 14 - CSV STATE BEFORE LOGGER
+      # ======================================================================
 
       - name: Record CSV state before logger
         run: |
           set -euo pipefail
+
           CSV="private_logger/price_log.csv"
           BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
+
           echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
           echo "CSV rows before logger: $BEFORE_ROWS"
+
+      # ======================================================================
+      # SECTION 15 - RUN PRICE LOGGER
+      # ======================================================================
 
       - name: Run crypto price logger
         env:
@@ -466,13 +532,24 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
+
           cd private_logger/"Crypto Logger-Private Repo"
+
           echo "============================================================"
           echo "🧪 STARTING STAGING CRYPTO PRICE LOGGER"
           echo "UTC time: $(date -u)"
           echo "============================================================"
+
           python price_logger.py
+
+          echo "============================================================"
           echo "✅ STAGING CRYPTO PRICE LOGGER COMPLETED"
+          echo "UTC time: $(date -u)"
+          echo "============================================================"
+
+      # ======================================================================
+      # SECTION 16 - DISCONNECT VPN BEFORE GITHUB/GIT
+      # ======================================================================
 
       - name: Disconnect VPN before GitHub operations
         if: always()
@@ -484,6 +561,7 @@ jobs:
           VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
         run: |
           set +e
+
           MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
 
           if [ -f "$MANAGER" ]; then
@@ -504,14 +582,21 @@ jobs:
 
           echo "✅ VPN disconnected before Git/GitHub traffic"
 
+      # ======================================================================
+      # SECTION 17 - CSV VALIDATION
+      # ======================================================================
+
       - name: Check generated CSV
         run: |
           set -euo pipefail
+
           CSV="private_logger/price_log.csv"
+
           test -s "$CSV" || {
             echo "❌ price_log.csv missing or empty"
             exit 1
           }
+
           ls -lh "$CSV"
           wc -l "$CSV"
           head -n 1 "$CSV"
@@ -520,6 +605,7 @@ jobs:
       - name: Validate CSV header
         run: |
           set -euo pipefail
+
           CSV="private_logger/price_log.csv"
           EXPECTED_HEADER="timestamp_nz,symbol,price_usd,price_nzd,status,usd_nzd_rate"
           ACTUAL_HEADER="$(head -n 1 "$CSV" | tr -d '\r')"
@@ -536,6 +622,7 @@ jobs:
       - name: Validate CSV row count
         run: |
           set -euo pipefail
+
           CSV="private_logger/price_log.csv"
           BEFORE_ROWS="$(cat "${RUNNER_TEMP}/csv_rows_before.txt")"
           AFTER_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
@@ -555,16 +642,23 @@ jobs:
       - name: Create CSV safety backup
         run: |
           set -euo pipefail
+
           cp -- private_logger/price_log.csv "${RUNNER_TEMP}/price_log.csv"
           test -s "${RUNNER_TEMP}/price_log.csv"
+
           echo "✅ CSV safety backup created"
 
-      - name: Save CSV to private repository
+      # ======================================================================
+      # SECTION 18 - SAVE CSV TO PRIVATE STAGING
+      # ======================================================================
+
+      - name: Save CSV to private staging branch
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
+
           TARGET_BRANCH="${GITHUB_REF_NAME}"
           cd private_logger
 
@@ -609,14 +703,16 @@ jobs:
           echo "❌ CSV push failed after 3 attempts"
           exit 1
 
-      - name: Verify private branch push
+      - name: Verify private staging push
         env:
           TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
+
           TARGET_BRANCH="${GITHUB_REF_NAME}"
           REMOTE_URL="https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
+
           cd private_logger
 
           LOCAL_SHA="$(git rev-parse HEAD)"
@@ -624,9 +720,19 @@ jobs:
 
           echo "Local SHA:  $LOCAL_SHA"
           echo "Remote SHA: $REMOTE_SHA"
+
           test -n "$REMOTE_SHA"
           test "$LOCAL_SHA" = "$REMOTE_SHA"
+
           echo "✅ Remote staging push verified"
+
+      # ======================================================================
+      # SECTION 19 - HIGH-PRIORITY PRIVATE EMAIL ALERT
+      # ======================================================================
+      # Recipients are deliberately stored as GitHub secrets:
+      # ALERT_EMAIL_TO
+      # ALERT_EMAIL_TO_2
+      # ======================================================================
 
       - name: Send standout VPN auth recovery alert
         if: always()
@@ -637,13 +743,12 @@ jobs:
           ALERT_SMTP_USERNAME: ${{ secrets.ALERT_SMTP_USERNAME }}
           ALERT_SMTP_PASSWORD: ${{ secrets.ALERT_SMTP_PASSWORD }}
           ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
-          ALERT_EMAIL_TO: dulnasavin@outlook.com
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           ALERT_EMAIL_TO_2: ${{ secrets.ALERT_EMAIL_TO_2 }}
         run: |
           set +e
 
-          ALERT="private_logger/Crypto Logger-Private Repo/alert_email.py"
-
+          ALERT="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
           [ -f "$ALERT" ] || exit 0
 
           NEED_ALERT="false"
@@ -654,7 +759,7 @@ jobs:
             ALERT_TYPE="VPN AUTH RECOVERY FAILED"
           elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
             NEED_ALERT="true"
-            ALERT_TYPE="VPN CREDENTIALS USED BUT SECRET UPDATE FAILED"
+            ALERT_TYPE="VPN CREDENTIALS RECOVERED BUT SECRET REFRESH FAILED"
           fi
 
           if [ "$NEED_ALERT" != "true" ]; then
@@ -662,8 +767,10 @@ jobs:
             exit 0
           fi
 
-          if [ -z "$ALERT_SMTP_USERNAME" ] || [ -z "$ALERT_SMTP_PASSWORD" ]; then
-            echo "⚠ SMTP alert credentials missing; custom email could not be sent"
+          if [ -z "$ALERT_SMTP_USERNAME" ] || \
+             [ -z "$ALERT_SMTP_PASSWORD" ] || \
+             [ -z "$ALERT_EMAIL_TO" ]; then
+            echo "⚠ Private alert configuration incomplete; custom email not sent"
             exit 0
           fi
 
@@ -678,34 +785,37 @@ Workflow run: #${GITHUB_RUN_NUMBER}
 Run ID: ${GITHUB_RUN_ID}
 UTC time: $(date -u)
 
-What happened:
-Stored VPNBook credentials were rejected or the recovered credentials could not be persisted safely.
+WHAT HAPPENED
+The stored VPNBook credentials were rejected, or proven recovered credentials could not be persisted safely.
 
-Automatic recovery attempted:
-1. Detected VPN authentication failure.
-2. Contacted the official VPNBook OpenVPN page.
-3. Retrieved current public VPNBook credentials.
-4. Masked username/password in GitHub logs.
-5. Retried the complete VPN1/VPN2 network qualification once.
-6. Attempted GitHub secret refresh only after successful live authentication.
+AUTOMATIC RECOVERY PATH
+1. Stored VPN credentials were attempted first.
+2. AUTH_FAILED was classified separately from network/server failures.
+3. Current credentials were requested from the official VPNBook OpenVPN page.
+4. Retrieved username/password were masked in GitHub logs.
+5. VPN1 and VPN2 were re-tested exactly once.
+6. GitHub secret refresh was attempted only after successful authentication.
 
-Security:
-The VPN password is NOT included in this email, workflow summary, or debug output.
+SECURITY
+No VPN password or email recipient address is included in this message body, workflow summary, or debug diagnostics.
 
-Action:
-Open GitHub Actions and review the staging workflow run and debug artifact.
-Run URL: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+ACTION
+Review this staging run and its debug artifact:
+https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
-This alert is intentionally more specific than GitHub's generic workflow-failed notification."
+This is a dedicated Crypto Logger recovery alert and is separate from generic GitHub workflow-failure notifications."
 
-          python "$ALERT" \
-            --subject "$SUBJECT" \
-            --body "$BODY"
+          python "$ALERT" --subject "$SUBJECT" --body "$BODY"
+
+      # ======================================================================
+      # SECTION 20 - SUCCESS SUMMARY
+      # ======================================================================
 
       - name: Create logger summary
         if: success()
         run: |
           set -euo pipefail
+
           CSV="private_logger/price_log.csv"
           CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
           DATA_ROWS="$((CSV_ROWS - 1))"
@@ -721,35 +831,48 @@ This alert is intentionally more specific than GitHub's generic workflow-failed 
           if [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ]; then
             SECRET_REFRESH="Updated successfully"
           elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
-            SECRET_REFRESH="Failed - alert requested"
+            SECRET_REFRESH="Failed - private alert requested"
           fi
 
           {
             echo "## 🧪 Crypto Price Logger - STAGING S1"
             echo ""
-            echo "- **Workflow:** Successful"
+            echo "### Network qualification"
             echo "- **S1 network manager:** Passed"
             echo "- **VPN1 live connection:** Passed"
             echo "- **VPN2 live connection:** Passed"
-            echo "- **VPN1/VPN2 different public IPs:** Passed"
+            echo "- **Different VPN public IPs:** Passed"
+            echo ""
+            echo "### Authentication recovery"
             echo "- **VPNBook auth recovery:** ${AUTH_RECOVERY}"
             echo "- **GitHub VPN secret refresh:** ${SECRET_REFRESH}"
-            echo "- **Normal logger collection network:** VPN1"
-            echo "- **Automatic provider-triggered VPN2 switching:** Not enabled yet"
+            echo ""
+            echo "### Logger"
+            echo "- **Collection network:** VPN1"
+            echo "- **Provider-triggered VPN2 switching:** Not enabled yet"
             echo "- **Maximum future VPN switches per run:** 1"
             echo "- **CSV total rows:** ${CSV_ROWS}"
             echo "- **CSV data rows:** ${DATA_ROWS}"
             echo "- **Latest timestamp:** ${LATEST_TIMESTAMP}"
-            echo "- **Git/GitHub traffic after VPN:** Yes"
+            echo ""
+            echo "### Safety"
+            echo "- **VPN disconnected before Git/GitHub traffic:** Yes"
             echo "- **Production main:** Untouched"
             echo "- **Neon writes:** Disabled"
             echo "- **Completed UTC:** $(date -u)"
           } >> "$GITHUB_STEP_SUMMARY"
 
+          echo "✅ Detailed staging summary created"
+
+      # ======================================================================
+      # SECTION 21 - FAILURE DIAGNOSTICS
+      # ======================================================================
+
       - name: Prepare debug files if failed
         if: failure()
         run: |
           set +e
+
           mkdir -p debug
 
           [ -f private_logger/price_log.csv ] && cp private_logger/price_log.csv debug/price_log.csv
@@ -765,21 +888,29 @@ This alert is intentionally more specific than GitHub's generic workflow-failed 
           {
             echo "UTC time: $(date -u)"
             echo "Public branch: ${GITHUB_REF_NAME}"
-            echo "Auth recovery marker: $([ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && echo yes || echo no)"
-            echo "Auth recovery failure marker: $([ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo yes || echo no)"
-            echo "Secret update failure marker: $([ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo yes || echo no)"
+            echo ""
+            echo "Recovery markers:"
+            echo "auth_recovered=$([ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && echo yes || echo no)"
+            echo "auth_recovery_failed=$([ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo yes || echo no)"
+            echo "secret_update_success=$([ -f "${RUNNER_TEMP}/vpn-secret-update-success" ] && echo yes || echo no)"
+            echo "secret_update_failed=$([ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo yes || echo no)"
+            echo ""
             echo "OpenVPN processes:"
             sudo pgrep -a openvpn || true
+            echo ""
             echo "Network interfaces:"
             ip addr show || true
+            echo ""
             echo "IPv4 routes:"
             ip route show || true
+            echo ""
             echo "DNS status:"
             resolvectl status 2>/dev/null || cat /etc/resolv.conf || true
           } > debug/network-diagnostics.txt
 
           sudo chown -R "$(id -u):$(id -g)" debug
           chmod -R u+rwX,go+rX debug
+
           find debug -maxdepth 3 -type f -ls || true
 
       - name: Upload debug files if failed
@@ -791,6 +922,10 @@ This alert is intentionally more specific than GitHub's generic workflow-failed 
           path: debug/
           if-no-files-found: ignore
           retention-days: 3
+
+      # ======================================================================
+      # SECTION 22 - FINAL RUNNER CLEANUP
+      # ======================================================================
 
       - name: Cleanup runner
         if: always()
@@ -807,4 +942,5 @@ This alert is intentionally more specific than GitHub's generic workflow-failed 
           rm -rf "${RUNNER_TEMP}/network-manager"
 
           sudo rm -f vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
+
           echo "✅ Runner cleaned"
