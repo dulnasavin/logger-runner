@@ -225,9 +225,11 @@ jobs:
           VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
         run: |
           set -euo pipefail
-          [ -n "$VPN_SECRET_UPDATE_TOKEN" ] \
-            && echo "✅ Automatic GitHub VPN secret update enabled" \
-            || echo "⚠ VPN_SECRET_UPDATE_TOKEN missing; runtime recovery can work but cannot persist refreshed credentials"
+          if [ -n "$VPN_SECRET_UPDATE_TOKEN" ]; then
+            echo "✅ Automatic GitHub VPN secret update enabled"
+          else
+            echo "⚠ VPN_SECRET_UPDATE_TOKEN missing; runtime recovery can work but cannot persist refreshed credentials"
+          fi
 
       # ======================================================================
       # SECTION 13 - CHECK PRIVATE EMAIL ALERT SECRETS
@@ -240,15 +242,21 @@ jobs:
           ALERT_EMAIL_TO_SECONDARY: ${{ secrets.ALERT_EMAIL_TO_SECONDARY }}
         run: |
           set -euo pipefail
-          [ -n "$ALERT_SMTP_USERNAME" ] && [ -n "$ALERT_SMTP_PASSWORD" ] \
-            && echo "✅ SMTP alert credentials configured" \
-            || echo "⚠ SMTP alert credentials incomplete"
-          [ -n "$ALERT_EMAIL_TO_PRIMARY" ] \
-            && echo "✅ Primary private alert recipient configured" \
-            || echo "⚠ ALERT_EMAIL_TO_PRIMARY missing"
-          [ -n "$ALERT_EMAIL_TO_SECONDARY" ] \
-            && echo "✅ Secondary private alert recipient configured" \
-            || echo "⚠ ALERT_EMAIL_TO_SECONDARY missing"
+          if [ -n "$ALERT_SMTP_USERNAME" ] && [ -n "$ALERT_SMTP_PASSWORD" ]; then
+            echo "✅ SMTP alert credentials configured"
+          else
+            echo "⚠ SMTP alert credentials incomplete"
+          fi
+          if [ -n "$ALERT_EMAIL_TO_PRIMARY" ]; then
+            echo "✅ Primary private alert recipient configured"
+          else
+            echo "⚠ ALERT_EMAIL_TO_PRIMARY missing"
+          fi
+          if [ -n "$ALERT_EMAIL_TO_SECONDARY" ]; then
+            echo "✅ Secondary private alert recipient configured"
+          else
+            echo "⚠ ALERT_EMAIL_TO_SECONDARY missing"
+          fi
 
       # ======================================================================
       # SECTION 14 - INSTALL OPENVPN
@@ -361,11 +369,19 @@ jobs:
       - name: "20.1 Report VPN credential recovery state"
         run: |
           set -euo pipefail
-          [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] \
-            && echo "⚠ Stored credentials expired; live VPNBook recovery succeeded" \
-            || echo "✅ Stored VPN credentials remained valid"
-          [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ] && echo "✅ GitHub VPN secrets updated"
-          [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo "⚠ GitHub VPN secret update failed; current run may continue"
+          if [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ]; then
+            echo "⚠ Stored credentials expired; live VPNBook recovery succeeded"
+          else
+            echo "✅ Stored VPN credentials remained valid"
+          fi
+
+          if [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ]; then
+            echo "✅ GitHub VPN secrets updated"
+          elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
+            echo "⚠ GitHub VPN secret update failed; current run may continue"
+          else
+            echo "ℹ GitHub VPN secret update was not required"
+          fi
 
       # ======================================================================
       # SECTION 21 - ESTABLISH FRESH VPN1 PRODUCTION COLLECTION SESSION
@@ -601,9 +617,17 @@ jobs:
           CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
           AUTH_RECOVERY="Not needed"
           SECRET_UPDATE="Not needed"
-          [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && AUTH_RECOVERY="Used successfully"
-          [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ] && SECRET_UPDATE="Updated successfully"
-          [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && SECRET_UPDATE="Failed - private alert requested"
+
+          if [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ]; then
+            AUTH_RECOVERY="Used successfully"
+          fi
+
+          if [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ]; then
+            SECRET_UPDATE="Updated successfully"
+          elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
+            SECRET_UPDATE="Failed - private alert requested"
+          fi
+
           {
             echo "## 🚀 Crypto Price Logger - PRODUCTION S1"
             echo ""
