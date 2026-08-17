@@ -32,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for secret_name in             ALERT_MS_CLIENT_ID             ALERT_MS_REFRESH_TOKEN             ALERT_EMAIL_FROM             ALERT_EMAIL_TO_PRIMARY             ALERT_EMAIL_TO_SECONDARY; do
+          for secret_name in ALERT_MS_CLIENT_ID ALERT_MS_REFRESH_TOKEN ALERT_EMAIL_FROM ALERT_EMAIL_TO_PRIMARY ALERT_EMAIL_TO_SECONDARY; do
             if [ -z "${!secret_name:-}" ]; then
               echo "❌ ${secret_name} is missing"
               missing=1
@@ -48,7 +48,7 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch main             "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"             private_logger
+          git clone --depth 1 --branch main "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
           echo "✅ Private alert code cloned"
 
       - name: "04 Setup Python 3.13"
@@ -76,16 +76,7 @@ jobs:
           set -euo pipefail
           NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
           SUBJECT="Crypto Tracker GitHub Actions Graph Alert Test | Run #${GITHUB_RUN_NUMBER}"
-          BODY="Microsoft Graph OAuth2 delivery from GitHub Actions is working.
-
-Repository: ${GITHUB_REPOSITORY}
-Workflow: ${GITHUB_WORKFLOW}
-Run ID: ${GITHUB_RUN_ID}
-Run attempt: ${GITHUB_RUN_ATTEMPT}
-UTC time: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-
-This test validates all five Graph/email secrets and delivery to both configured recipients.
-No crypto failure occurred."
+          BODY="$(printf '%s\n' "Microsoft Graph OAuth2 delivery from GitHub Actions is working." "" "Repository: ${GITHUB_REPOSITORY}" "Workflow: ${GITHUB_WORKFLOW}" "Run ID: ${GITHUB_RUN_ID}" "Run attempt: ${GITHUB_RUN_ATTEMPT}" "UTC time: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" "" "This test validates all five Graph/email secrets and delivery to both configured recipients." "No crypto failure occurred.")"
           python "$NOTIFIER" --subject "$SUBJECT" --body "$BODY"
 
       - name: "07 Publish test summary"
