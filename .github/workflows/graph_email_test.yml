@@ -41,6 +41,9 @@ jobs:
             fi
           done
           test "$missing" -eq 0
+          normalized_client_id="$(printf '%s' "$ALERT_MS_CLIENT_ID" | tr -d '[:space:]')"
+          test "$normalized_client_id" = "32752538-0b8b-4e8f-a396-158f59ee3475" || { echo "❌ ALERT_MS_CLIENT_ID does not match the Entra Application (client) ID used by the successful local test"; exit 1; }
+          echo "✅ ALERT_MS_CLIENT_ID exactly matches the authorized Entra application"
 
       - name: "03 Clone private main"
         env:
