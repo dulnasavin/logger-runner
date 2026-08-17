@@ -1,0 +1,41 @@
+name: Make Webhook Capture Test
+run-name: "🧪 MAKE WEBHOOK CAPTURE | ${{ github.actor }} | ${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/make_webhook_test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  capture-webhook-schema:
+    name: Send authenticated harmless sample to Make
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: "01 Confirm Make webhook secrets"
+        env:
+          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
+          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$ALERT_MAKE_WEBHOOK_URL" || { echo "❌ ALERT_MAKE_WEBHOOK_URL missing"; exit 1; }
+          test -n "$ALERT_MAKE_API_KEY" || { echo "❌ ALERT_MAKE_API_KEY missing"; exit 1; }
+          echo "✅ Make webhook URL and API key are configured"
+
+      - name: "02 Send schema-capture payload"
+        env:
+          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
+          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -n             --arg schema_version "1"             --arg event_id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"             --arg source "github-actions"             --arg environment "PRODUCTION-TEST"             --arg alert_type "MAKE_WEBHOOK_SCHEMA_TEST"             --arg severity "TEST"             --arg subject "Crypto Logger Make Webhook Schema Test"             --arg body "This is a harmless structure-capture test. No crypto failure occurred and no email should be sent yet."             --arg repository "${GITHUB_REPOSITORY}"             --arg workflow "${GITHUB_WORKFLOW}"             --arg run_id "${GITHUB_RUN_ID}"             --arg run_url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"             '{schema_version:$schema_version,event_id:$event_id,source:$source,environment:$environment,alert_type:$alert_type,severity:$severity,subject:$subject,body:$body,repository:$repository,workflow:$workflow,run_id:$run_id,run_url:$run_url}')"
+          curl --fail-with-body --silent --show-error             --max-time 30             --retry 2             --retry-all-errors             --request POST             --header "Content-Type: application/json"             --header "x-make-apikey: $ALERT_MAKE_API_KEY"             --data "$payload"             "$ALERT_MAKE_WEBHOOK_URL"
+          echo
+          echo "✅ Make accepted the authenticated schema-capture payload"
