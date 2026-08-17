@@ -3,11 +3,6 @@ run-name: "🧪 GRAPH EMAIL TEST | ${{ github.actor }} | ${{ github.run_number }
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/graph_email_test.yml"
 
 permissions:
   contents: read
