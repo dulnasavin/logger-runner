@@ -3,11 +3,6 @@ run-name: "🧪 MAKE WEBHOOK CAPTURE | ${{ github.actor }} | ${{ github.run_numb
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/make_webhook_test.yml"
 
 permissions:
   contents: read
