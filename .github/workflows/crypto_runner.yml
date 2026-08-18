@@ -554,18 +554,21 @@ jobs:
           echo "✅ Private main push verified"
 
       # ======================================================================
-      # SECTION 30 - CLASSIFY PRIVATE VPN RECOVERY ALERT CONDITION
+      # SECTION 30 - CLASSIFY PRODUCTION ALERT CONDITION
       # ======================================================================
       - name: "30.1 Determine whether human attention is required"
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
           set +e
           rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
           [ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo "VPN_AUTH_RECOVERY_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
           [ ! -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] && [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo "VPN_SECRET_UPDATE_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
+          [ ! -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] && [ "$JOB_STATUS" = "failure" ] && echo "PRODUCTION_WORKFLOW_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
           [ -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] \
-            && echo "⚠ Production VPN recovery alert required" \
-            || echo "✅ No production VPN recovery alert required"
+            && echo "⚠ Production alert required: $(cat "${RUNNER_TEMP}/vpn-alert-type.txt")" \
+            || echo "✅ No production alert required"
 
       # ======================================================================
       # SECTION 31 - SEND PRIVATE HIGH-PRIORITY ALERT THROUGH MAKE/OUTLOOK
