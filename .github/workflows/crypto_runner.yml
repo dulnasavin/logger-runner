@@ -580,6 +580,7 @@ jobs:
         env:
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+          ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
         run: |
           set -euo pipefail
