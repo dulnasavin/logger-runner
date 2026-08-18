@@ -1,5 +1,5 @@
-name: Crypto Price Logger
-run-name: "🚀 PRODUCTION S1 | ${{ github.event_name }} | ${{ github.sha }}"
+name: "Crypto Logger | Main"
+run-name: "Crypto Logger | Main | #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -409,19 +409,31 @@ jobs:
       # ======================================================================
       # SECTION 22 - PROVIDER CONNECTIVITY PROBES
       # ======================================================================
-      - name: "22.1 Test CoinGecko through VPN1"
+      - name: "22.1 Probe CoinGecko through VPN1 (diagnostic)"
         run: |
-          set -euo pipefail
-          HTTP_CODE="$(curl --fail-with-body --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/coingecko-probe.txt" --write-out "%{http_code}" https://api.coingecko.com/api/v3/ping)"
-          echo "CoinGecko HTTP ${HTTP_CODE}"
-          test "$HTTP_CODE" = "200"
+          set +e
+          HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/coingecko-probe.txt" --write-out "%{http_code}" https://api.coingecko.com/api/v3/ping)"
+          CURL_EXIT=$?
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::warning::CoinGecko diagnostic transport failure (curl exit ${CURL_EXIT}, HTTP ${HTTP_CODE:-000}); the multi-provider logger will decide whether fallback data is sufficient"
+          elif [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ CoinGecko diagnostic HTTP 200"
+          else
+            echo "::warning::CoinGecko diagnostic HTTP ${HTTP_CODE}; continuing because price_logger.py supports Binance and cached fallback paths"
+          fi
 
-      - name: "22.2 Test Binance through VPN1"
+      - name: "22.2 Probe Binance through VPN1 (diagnostic)"
         run: |
-          set -euo pipefail
-          HTTP_CODE="$(curl --fail-with-body --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/binance-probe.txt" --write-out "%{http_code}" https://api.binance.com/api/v3/time)"
-          echo "Binance HTTP ${HTTP_CODE}"
-          test "$HTTP_CODE" = "200"
+          set +e
+          HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/binance-probe.txt" --write-out "%{http_code}" https://api.binance.com/api/v3/time)"
+          CURL_EXIT=$?
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::warning::Binance diagnostic transport failure (curl exit ${CURL_EXIT}, HTTP ${HTTP_CODE:-000}); the multi-provider logger will perform its own classified retries and fallbacks"
+          elif [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Binance diagnostic HTTP 200"
+          else
+            echo "::warning::Binance diagnostic HTTP ${HTTP_CODE}; continuing because price_logger.py will classify the provider result and use available fallbacks"
+          fi
 
       # ======================================================================
       # SECTION 23 - RECORD PRODUCTION CSV STATE BEFORE LOGGER
