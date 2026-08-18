@@ -3,9 +3,6 @@ run-name: "🧪 MAKE OUTLOOK DELIVERY | ${{ github.actor }} | ${{ github.run_num
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/make_webhook_test.yml"
 
 permissions:
   contents: read
