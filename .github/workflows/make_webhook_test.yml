@@ -19,12 +19,14 @@ jobs:
           PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$PRIVATE_REPO_TOKEN" || { echo "❌ PRIVATE_REPO_TOKEN missing"; exit 1; }
           test -n "$ALERT_MAKE_WEBHOOK_URL" || { echo "❌ ALERT_MAKE_WEBHOOK_URL missing"; exit 1; }
           test -n "$ALERT_MAKE_API_KEY" || { echo "❌ ALERT_MAKE_API_KEY missing"; exit 1; }
-          echo "✅ Private repository and authenticated Make secrets configured"
+          test "${#ALERT_LOCAL_HELPER_TOKEN}" -ge 32 || { echo "❌ ALERT_LOCAL_HELPER_TOKEN missing or too short"; exit 1; }
+          echo "✅ Private repository, Make, and local-helper signing secrets configured"
 
       - name: "02 Clone private production main"
         env:
@@ -54,6 +56,7 @@ jobs:
         env:
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION-TEST
         run: |
           set -euo pipefail
@@ -80,5 +83,6 @@ jobs:
             echo "- The private production sender compiled."
             echo "- The authenticated Make webhook accepted the event."
             echo "- Outlook processed one high-priority HTML email for both configured recipients."
+            echo "- The email includes a signed, expiring localhost desktop-debug link."
             echo "- Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } >> "$GITHUB_STEP_SUMMARY"

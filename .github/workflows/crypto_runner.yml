@@ -239,12 +239,20 @@ jobs:
         env:
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
         run: |
           set -euo pipefail
           if [ -n "$ALERT_MAKE_WEBHOOK_URL" ] && [ -n "$ALERT_MAKE_API_KEY" ]; then
             echo "✅ Authenticated Make/Outlook alert delivery configured"
           else
             echo "⚠ Make/Outlook alert secrets incomplete; GitHub Issue fallback will protect required alerts"
+          fi
+          if [ -n "$ALERT_LOCAL_HELPER_TOKEN" ] && [ "${#ALERT_LOCAL_HELPER_TOKEN}" -ge 32 ]; then
+            echo "✅ Signed Windows localhost debug links enabled"
+          elif [ -n "$ALERT_LOCAL_HELPER_TOKEN" ]; then
+            echo "⚠ ALERT_LOCAL_HELPER_TOKEN is too short; alert delivery will reject it"
+          else
+            echo "ℹ Windows localhost debug links are not enabled"
           fi
 
       # ======================================================================
@@ -581,6 +589,7 @@ jobs:
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
           ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
+          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
         run: |
           set -euo pipefail
