@@ -117,11 +117,12 @@ jobs:
           LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
           for required in \
             "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
-            "$LOGGER_DIR/requirements.txt"; do
+            "$LOGGER_DIR/requirements.txt" \
+            "$LOGGER_DIR/tests/test_csv_integrity.py"; do
             test -s "$required" || { echo "❌ Missing or empty: $required"; exit 1; }
           done
-          test -s private_logger/price_log.csv || { echo "❌ Production price_log.csv missing or empty"; exit 1; }
           echo "✅ Core production files validated"
 
       - name: "05.2 Validate VPN auth recovery helper files"
@@ -168,12 +169,23 @@ jobs:
           RECOVERY_DIR="$LOGGER_DIR/vpn_auth_recovery"
           python -m py_compile \
             "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
             "$RECOVERY_DIR/recovery_controller.py" \
             "$RECOVERY_DIR/vpnbook_credentials.py" \
             "$RECOVERY_DIR/github_secret_updater.py" \
             "$RECOVERY_DIR/alert_email.py"
           echo "✅ All production Python modules compile"
+
+      - name: "08.2 Run CSV integrity regression tests"
+        run: |
+          set -euo pipefail
+          cd private_logger/"Crypto Logger-Private Repo"
+          python -m unittest discover \
+            -s tests \
+            -p 'test_csv_integrity.py' \
+            -v
+          echo "✅ CSV creation, repair, quarantine, and fail-closed tests passed"
 
       # ======================================================================
       # SECTION 09 - VALIDATE BINANCE SECRETS
@@ -438,10 +450,18 @@ jobs:
       # ======================================================================
       # SECTION 23 - RECORD PRODUCTION CSV STATE BEFORE LOGGER
       # ======================================================================
-      - name: "23.1 Record production CSV row count"
+      - name: "23.1 Preflight and record production CSV state"
         run: |
           set -euo pipefail
-          BEFORE_ROWS="$(wc -l < private_logger/price_log.csv | tr -d ' ')"
+          CSV="private_logger/price_log.csv"
+          INTEGRITY="private_logger/Crypto Logger-Private Repo/csv_integrity.py"
+          RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
+          mkdir -p "$RECOVERY_DIR"
+          python "$INTEGRITY" \
+            --path "$CSV" \
+            --recovery-dir "$RECOVERY_DIR" \
+            | tee "${RUNNER_TEMP}/csv-integrity-preflight.log"
+          BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
           echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
           echo "Production CSV rows before logger: ${BEFORE_ROWS}"
 
@@ -452,6 +472,7 @@ jobs:
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+          CSV_RECOVERY_DIR: ${{ runner.temp }}/csv-recovery
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
@@ -492,7 +513,13 @@ jobs:
         run: |
           set -euo pipefail
           CSV="private_logger/price_log.csv"
+          INTEGRITY="private_logger/Crypto Logger-Private Repo/csv_integrity.py"
           EXPECTED_HEADER="timestamp_nz,symbol,price_usd,price_nzd,status,usd_nzd_rate"
+          python "$INTEGRITY" \
+            --path "$CSV" \
+            --recovery-dir "${RUNNER_TEMP}/csv-recovery" \
+            --validate-only \
+            | tee "${RUNNER_TEMP}/csv-integrity-postflight.log"
           test -s "$CSV"
           ACTUAL_HEADER="$(head -n 1 "$CSV" | tr -d '\r')"
           test "$ACTUAL_HEADER" = "$EXPECTED_HEADER" || { echo "❌ CSV header mismatch"; exit 1; }
@@ -503,7 +530,6 @@ jobs:
           echo "Rows after:  ${AFTER_ROWS}"
           echo "Rows added:  ${ADDED_ROWS}"
           test "$ADDED_ROWS" -gt 0 || { echo "❌ Logger produced no new production CSV rows"; exit 1; }
-          tail -n 12 "$CSV"
           echo "✅ Production CSV validated"
 
       # ======================================================================
@@ -716,7 +742,8 @@ jobs:
         run: |
           set +e
           mkdir -p debug
-          [ -f private_logger/price_log.csv ] && cp private_logger/price_log.csv debug/price_log.csv
+          [ -f "${RUNNER_TEMP}/csv-integrity-preflight.log" ] && cp "${RUNNER_TEMP}/csv-integrity-preflight.log" debug/
+          [ -f "${RUNNER_TEMP}/csv-integrity-postflight.log" ] && cp "${RUNNER_TEMP}/csv-integrity-postflight.log" debug/
           [ -f "${RUNNER_TEMP}/coingecko-probe.txt" ] && cp "${RUNNER_TEMP}/coingecko-probe.txt" debug/
           [ -f "${RUNNER_TEMP}/binance-probe.txt" ] && cp "${RUNNER_TEMP}/binance-probe.txt" debug/
           [ -f "${RUNNER_TEMP}/network-manager-status.json" ] && cp "${RUNNER_TEMP}/network-manager-status.json" debug/
@@ -757,6 +784,7 @@ jobs:
           rm -rf private_logger
           sudo rm -rf debug
           rm -rf "${RUNNER_TEMP}/network-manager"
+          rm -rf "${RUNNER_TEMP}/csv-recovery"
           rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
           sudo rm -f vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
           echo "✅ Production runner cleanup completed"
