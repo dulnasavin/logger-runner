@@ -3,9 +3,12 @@ run-name: "🚀 PRODUCTION S1 | ${{ github.event_name }} | ${{ github.sha }}"
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: read
+  issues: write
 
 # ============================================================================
 # CRYPTO PRICE LOGGER - PRODUCTION S1
@@ -232,30 +235,18 @@ jobs:
           fi
 
       # ======================================================================
-      # SECTION 13 - CHECK PRIVATE EMAIL ALERT SECRETS
+      # SECTION 13 - CHECK AUTHENTICATED MAKE/OUTLOOK ALERT SECRETS
       # ======================================================================
-      - name: "13.1 Check SMTP and private recipient secrets"
+      - name: "13.1 Check Make webhook alert secrets"
         env:
-          ALERT_SMTP_USERNAME: ${{ secrets.ALERT_SMTP_USERNAME }}
-          ALERT_SMTP_PASSWORD: ${{ secrets.ALERT_SMTP_PASSWORD }}
-          ALERT_EMAIL_TO_PRIMARY: ${{ secrets.ALERT_EMAIL_TO_PRIMARY }}
-          ALERT_EMAIL_TO_SECONDARY: ${{ secrets.ALERT_EMAIL_TO_SECONDARY }}
+          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
+          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -n "$ALERT_SMTP_USERNAME" ] && [ -n "$ALERT_SMTP_PASSWORD" ]; then
-            echo "✅ SMTP alert credentials configured"
+          if [ -n "$ALERT_MAKE_WEBHOOK_URL" ] && [ -n "$ALERT_MAKE_API_KEY" ]; then
+            echo "✅ Authenticated Make/Outlook alert delivery configured"
           else
-            echo "⚠ SMTP alert credentials incomplete"
-          fi
-          if [ -n "$ALERT_EMAIL_TO_PRIMARY" ]; then
-            echo "✅ Primary private alert recipient configured"
-          else
-            echo "⚠ ALERT_EMAIL_TO_PRIMARY missing"
-          fi
-          if [ -n "$ALERT_EMAIL_TO_SECONDARY" ]; then
-            echo "✅ Secondary private alert recipient configured"
-          else
-            echo "⚠ ALERT_EMAIL_TO_SECONDARY missing"
+            echo "⚠ Make/Outlook alert secrets incomplete; GitHub Issue fallback will protect required alerts"
           fi
 
       # ======================================================================
@@ -579,32 +570,81 @@ jobs:
             || echo "✅ No production VPN recovery alert required"
 
       # ======================================================================
-      # SECTION 31 - SEND PRIVATE HIGH-PRIORITY EMAIL ALERT
+      # SECTION 31 - SEND PRIVATE HIGH-PRIORITY ALERT THROUGH MAKE/OUTLOOK
       # ======================================================================
       - name: "31.1 Send production VPN recovery alert"
+        id: send_make_alert
         if: always()
         continue-on-error: true
         env:
-          ALERT_SMTP_HOST: ${{ secrets.ALERT_SMTP_HOST }}
-          ALERT_SMTP_PORT: ${{ secrets.ALERT_SMTP_PORT }}
-          ALERT_SMTP_USERNAME: ${{ secrets.ALERT_SMTP_USERNAME }}
-          ALERT_SMTP_PASSWORD: ${{ secrets.ALERT_SMTP_PASSWORD }}
-          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
-          ALERT_EMAIL_TO_PRIMARY: ${{ secrets.ALERT_EMAIL_TO_PRIMARY }}
-          ALERT_EMAIL_TO_SECONDARY: ${{ secrets.ALERT_EMAIL_TO_SECONDARY }}
+          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
+          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
         run: |
-          set +e
+          set -euo pipefail
           ALERT_FILE="${RUNNER_TEMP}/vpn-alert-type.txt"
           NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
-          [ -f "$ALERT_FILE" ] || { echo "No production VPN recovery email required"; exit 0; }
-          [ -f "$NOTIFIER" ] || { echo "⚠ alert_email.py unavailable"; exit 0; }
-          if [ -z "$ALERT_SMTP_USERNAME" ] || [ -z "$ALERT_SMTP_PASSWORD" ] || [ -z "$ALERT_EMAIL_TO_PRIMARY" ]; then
-            echo "⚠ Production SMTP/email alert configuration incomplete"
+          if [ ! -f "$ALERT_FILE" ]; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "No production VPN recovery alert required"
             exit 0
           fi
+          echo "required=true" >> "$GITHUB_OUTPUT"
+          test -s "$NOTIFIER" || { echo "❌ alert_email.py unavailable"; exit 1; }
+          test -n "$ALERT_MAKE_WEBHOOK_URL" || { echo "❌ ALERT_MAKE_WEBHOOK_URL missing"; exit 1; }
+          test -n "$ALERT_MAKE_API_KEY" || { echo "❌ ALERT_MAKE_API_KEY missing"; exit 1; }
           ALERT_TYPE="$(cat "$ALERT_FILE")"
+          echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
           python "$NOTIFIER" --alert-type "$ALERT_TYPE"
+
+      - name: "31.2 Create deduplicated GitHub Issue if alert delivery fails"
+        if: always() && steps.send_make_alert.outputs.required == 'true' && steps.send_make_alert.outcome == 'failure'
+        uses: actions/github-script@v8
+        env:
+          ALERT_TYPE: ${{ steps.send_make_alert.outputs.alert_type }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const marker = "<!-- crypto-logger-alert-delivery-failure -->";
+            const title = "🚨 Crypto Logger alert delivery failed";
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100
+            });
+            const existing = issues.find(issue =>
+              !issue.pull_request &&
+              (issue.title === title || (issue.body || "").includes(marker))
+            );
+            if (existing) {
+              core.warning(`Alert-delivery issue already open: #${existing.number}`);
+              return;
+            }
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              "## Crypto Logger alert delivery failure",
+              "",
+              "The production workflow required a private recovery alert, but the authenticated Make/Outlook delivery step failed.",
+              "",
+              `- **Alert type:** ${process.env.ALERT_TYPE || "unknown"}`,
+              `- **Workflow:** ${context.workflow}`,
+              `- **Run ID:** ${context.runId}`,
+              `- **Run attempt:** ${process.env.GITHUB_RUN_ATTEMPT || "unknown"}`,
+              `- **Run:** ${runUrl}`,
+              "",
+              "### Required checks",
+              "1. Confirm the Make scenario is active.",
+              "2. Reauthorize the Outlook connection if Microsoft revoked or expired it.",
+              "3. Confirm `ALERT_MAKE_WEBHOOK_URL` and `ALERT_MAKE_API_KEY` still match Make.",
+              "4. Close this issue only after a manual Make webhook test succeeds.",
+              "",
+              "_This issue is deduplicated: while it remains open, later failures will not create additional issues._"
+            ].join("\n");
+            const created = await github.rest.issues.create({ owner, repo, title, body });
+            core.warning(`Created fallback issue #${created.data.number}`);
 
       # ======================================================================
       # SECTION 32 - CREATE PRODUCTION SUCCESS SUMMARY
