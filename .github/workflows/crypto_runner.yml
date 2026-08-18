@@ -3,8 +3,6 @@ run-name: "🚀 PRODUCTION S1 | ${{ github.event_name }} | ${{ github.sha }}"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/10 * * * *"
 
 permissions:
   contents: read
