@@ -1,551 +1,103 @@
-name: Neon Database Sync
-
+name: "Neon Sync | After Main"
+run-name: "Neon Sync | ${{ github.event_name == 'workflow_run' && format('Main #{0}', github.event.workflow_run.run_number) || 'Manual' }}"
 
 on:
-
   workflow_run:
-
     workflows:
-
-      - "Crypto Price Logger"
-
+      - "Crypto Logger | Main"
     types:
-
       - completed
-
-
   workflow_dispatch:
 
-
-
 permissions:
-
   contents: read
 
-  actions: read
-
-
-
-# ============================================================
-# PREVENT DATABASE JOB COLLISIONS
-# ============================================================
-
 concurrency:
-
   group: neon-database-operations
-
   cancel-in-progress: false
 
-
-
-
-
-
 jobs:
-
-
   sync-to-neon:
-
-
-    if: >
-
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-
-      ||
-
-      github.event_name == 'workflow_dispatch'
-
-
-
     runs-on: ubuntu-latest
-
-
-    timeout-minutes: 5
-
-
-
-
-
-
+    timeout-minutes: 10
     steps:
-
-
-
-
-      # ======================================================
-      # CHECKOUT PUBLIC RUNNER
-      # ======================================================
-
-      - name: Checkout runner
-
-        uses: actions/checkout@v4
-
-
-
-
-
-
-
-      # ======================================================
-      # CHECK PRIVATE TOKEN
-      # ======================================================
-
-      - name: Check private repo token
-
-
-        run: |
-
-
-          set -e
-
-
-          echo "🔐 Checking private repo token..."
-
-
-          if [ -z "${{ secrets.PRIVATE_REPO_TOKEN }}" ]
-
-          then
-
-            echo "❌ PRIVATE_REPO_TOKEN missing"
-
-            exit 1
-
-          fi
-
-
-          echo "✅ PRIVATE_REPO_TOKEN available"
-
-
-
-
-
-
-
-      # ======================================================
-      # CLONE PRIVATE LOGGER REPO
-      # ======================================================
-
-      - name: Clone private crypto logger
-
-
+      - name: Validate required secrets
         env:
-
-          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-
-
-        run: |
-
-
-          set -e
-
-
-          echo "📦 Downloading private repository..."
-
-
-          git clone "https://x-access-token:${TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" private_logger
-
-
-          echo "✅ Private repository downloaded"
-
-
-          echo ""
-
-          echo "Repository contents:"
-
-          ls -la private_logger
-
-
-
-
-
-
-
-      # ======================================================
-      # CHECK REQUIRED FILES
-      # ======================================================
-
-      - name: Verify required files
-
-
-        run: |
-
-
-          set -e
-
-
-          echo "🔎 Checking required files..."
-
-
-
-          if [ -f "private_logger/Neon Sync/sync_to_neon.py" ]
-
-          then
-
-            echo "✅ sync_to_neon.py found"
-
-          else
-
-            echo "❌ sync_to_neon.py missing"
-
-            exit 1
-
-          fi
-
-
-
-
-          if [ -f "private_logger/price_log.csv" ]
-
-          then
-
-            echo "✅ price_log.csv found"
-
-          else
-
-            echo "❌ price_log.csv missing"
-
-            exit 1
-
-          fi
-                # ======================================================
-      # SHOW CSV INFORMATION
-      # ======================================================
-
-      - name: Check CSV information
-
-
-        run: |
-
-
-          set -e
-
-
-          echo "📊 CSV information"
-
-
-          echo ""
-
-          wc -l private_logger/price_log.csv
-
-
-
-          echo ""
-
-          echo "CSV header:"
-
-
-          head -n 1 private_logger/price_log.csv
-
-
-
-          echo ""
-
-          echo "Latest CSV rows:"
-
-
-          tail -5 private_logger/price_log.csv
-
-
-
-
-
-
-
-      # ======================================================
-      # PYTHON SETUP
-      # ======================================================
-
-      - name: Setup Python
-
-
-        uses: actions/setup-python@v5
-
-
-        with:
-
-
-          python-version: "3.13"
-
-
-
-
-
-
-
-
-      # ======================================================
-      # INSTALL DEPENDENCIES
-      # ======================================================
-
-      - name: Install dependencies
-
-
-        run: |
-
-
-          set -e
-
-
-          cd private_logger
-
-
-
-          python -m pip install --upgrade pip
-
-
-
-          if [ -f "Crypto Logger-Private Repo/requirements.txt" ]
-
-          then
-
-            echo "Installing requirements.txt"
-
-
-            pip install -r "Crypto Logger-Private Repo/requirements.txt"
-
-
-          else
-
-
-            echo "requirements.txt not found"
-
-
-            echo "Installing psycopg2 manually"
-
-
-            pip install psycopg2-binary
-
-
-          fi
-
-
-
-          echo ""
-
-          echo "Installed packages:"
-
-
-          pip list
-
-
-
-
-
-
-
-      # ======================================================
-      # PYTHON SYNTAX CHECK
-      # ======================================================
-
-      - name: Validate sync syntax
-
-
-        run: |
-
-
-          set -e
-
-
-          cd private_logger
-
-
-
-          echo "🐍 Checking Python syntax..."
-
-
-
-          python -m py_compile "Neon Sync/sync_to_neon.py"
-
-
-
-          echo "✅ Syntax OK"
-
-
-
-
-
-
-
-      # ======================================================
-      # CHECK NEON SECRET
-      # ======================================================
-
-      - name: Check Neon secret
-
-
-        run: |
-
-
-          set -e
-
-
-
-          if [ -z "${{ secrets.NEON_DATABASE_URL }}" ]
-
-          then
-
-
-            echo "❌ NEON_DATABASE_URL missing"
-
-
-            exit 1
-
-
-          fi
-
-
-
-          echo "✅ Neon secret exists"
-
-
-
-
-
-
-
-
-      # ======================================================
-      # TEST NEON CONNECTION
-      # ======================================================
-
-      - name: Test Neon database connection
-
-
-        env:
-
-
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-
-
-
         run: |
+          set -euo pipefail
+          test -n "$PRIVATE_REPO_TOKEN" || { echo "PRIVATE_REPO_TOKEN is missing"; exit 1; }
+          test -n "$NEON_DATABASE_URL" || { echo "NEON_DATABASE_URL is missing"; exit 1; }
 
+      - name: Clone private logger
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 50 \
+            "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
+            private_logger
 
-          python - <<EOF
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: private_logger/Crypto Logger-Private Repo/requirements.txt
 
+      - name: Install and validate
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check psycopg2-binary
+          test -f "private_logger/price_log.csv"
+          test -f "private_logger/csv_state.json"
+          test -f "private_logger/Crypto Logger-Private Repo/csv_integrity.py"
+          test -f "private_logger/Neon Sync/db_schema.sql"
+          test -f "private_logger/Neon Sync/sync_to_neon.py"
+          python -m py_compile \
+            "private_logger/Crypto Logger-Private Repo/csv_integrity.py" \
+            "private_logger/Neon Sync/sync_to_neon.py"
 
+      - name: Apply idempotent Neon schema migration
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
           import os
-
+          from pathlib import Path
           import psycopg2
 
+          sql = Path("private_logger/Neon Sync/db_schema.sql").read_text(encoding="utf-8")
+          with psycopg2.connect(os.environ["NEON_DATABASE_URL"]) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute(sql)
+          print("Neon schema is current")
+          PY
 
-
-          url = os.getenv(
-              "NEON_DATABASE_URL"
-          )
-
-
-
-          conn = psycopg2.connect(url)
-
-
-          cur = conn.cursor()
-
-
-
-          cur.execute(
-              "SELECT NOW();"
-          )
-
-
-
-          print(
-              "Neon database time:",
-              cur.fetchone()[0]
-          )
-
-
-
-          cur.close()
-
-          conn.close()
-
-
-
-          print(
-              "✅ Neon connection OK"
-          )
-
-
-          EOF
-
-
-
-
-
-
-
-      # ======================================================
-      # RUN SYNC
-      # ======================================================
-
-      - name: Run Neon sync
-
-
+      - name: Run one-way Neon sync
         env:
-
-
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-
-
-
         run: |
-
-
-          set -e
-
-
-
+          set -euo pipefail
           cd private_logger
+          python "Neon Sync/sync_to_neon.py" | tee "$RUNNER_TEMP/neon-sync.log"
 
-
-
-          echo "=============================="
-
-          echo "🚀 STARTING NEON SYNC"
-
-          echo "UTC Time: $(date -u)"
-
-          echo "=============================="
-
-
-
-          python "Neon Sync/sync_to_neon.py"
-
-
-
-          echo ""
-
-          echo "=============================="
-
-          echo "✅ NEON SYNC COMPLETED"
-
-          echo "UTC Time: $(date -u)"
-
-          echo "=============================="
-
-
-
-
-
-
-
-
-      # ======================================================
-      # CLEAN RUNNER
-      # ======================================================
-
-      - name: Cleanup
-
-
+      - name: Add workflow summary
         if: always()
-
-
-
         run: |
+          {
+            echo "## Neon Sync"
+            echo "- Trigger: ${{ github.event_name }}"
+            echo "- Source workflow: ${{ github.event.workflow_run.name || 'manual' }}"
+            echo "- Source conclusion: ${{ github.event.workflow_run.conclusion || 'manual' }}"
+            echo "- Private row contents were not printed or uploaded."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-
-          rm -rf private_logger
-
-
-          echo "🧹 Runner cleaned"
+      - name: Cleanup private checkout
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/private_logger"
