@@ -3,14 +3,17 @@ run-name: "Crypto Logger | Main | #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
+  schedule:
+    # Hourly at minute 7 UTC.  The offset avoids the busiest top-of-hour window.
+    - cron: "7 * * * *"
 
 permissions:
   contents: read
   issues: write
 
 # ============================================================================
-# CRYPTO PRICE LOGGER - PRODUCTION S1
-# NETWORK QUALIFICATION + VPNBOOK AUTHENTICATION SELF-HEALING
+# CRYPTO PRICE LOGGER - PRODUCTION S1.5
+# NETWORK SELF-HEALING + THREE-SOURCE PRICE CONSENSUS
 # ============================================================================
 # Production rules:
 # - Public main reads/writes private main.
@@ -27,6 +30,9 @@ permissions:
 # - Secret-update failure does not kill an already recovered price-logger run.
 # - Recovery failure stops the workflow and may send a private email alert.
 # - Provider-triggered VPN switching is NOT wired yet in S1.
+# - Coinbase and Binance are authenticated primaries; CoinGecko validates.
+# - Cached estimates are labelled and automatically disable trading eligibility.
+# - Provider alerts send only on incident start, severity change, and recovery.
 # - Neon writes remain disabled at this stage.
 # ============================================================================
 
@@ -117,10 +123,13 @@ jobs:
           LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
           for required in \
             "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/provider_consensus.py" \
             "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
             "$LOGGER_DIR/requirements.txt" \
-            "$LOGGER_DIR/tests/test_csv_integrity.py"; do
+            "$LOGGER_DIR/tests/test_csv_integrity.py" \
+            "$LOGGER_DIR/tests/test_provider_consensus.py" \
+            "$LOGGER_DIR/tests/test_provider_alert_email.py"; do
             test -s "$required" || { echo "❌ Missing or empty: $required"; exit 1; }
           done
           echo "✅ Core production files validated"
@@ -157,6 +166,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip check
+          python -c "from coinbase.rest import RESTClient; print('Coinbase SDK import verified')"
           echo "✅ Python dependencies installed and verified"
 
       # ======================================================================
@@ -169,6 +179,7 @@ jobs:
           RECOVERY_DIR="$LOGGER_DIR/vpn_auth_recovery"
           python -m py_compile \
             "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/provider_consensus.py" \
             "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
             "$RECOVERY_DIR/recovery_controller.py" \
@@ -177,15 +188,15 @@ jobs:
             "$RECOVERY_DIR/alert_email.py"
           echo "✅ All production Python modules compile"
 
-      - name: "08.2 Run CSV integrity regression tests"
+      - name: "08.2 Run production regression tests"
         run: |
           set -euo pipefail
           cd private_logger/"Crypto Logger-Private Repo"
           python -m unittest discover \
             -s tests \
-            -p 'test_csv_integrity.py' \
+            -p 'test_*.py' \
             -v
-          echo "✅ CSV creation, repair, quarantine, and fail-closed tests passed"
+          echo "✅ CSV, consensus, incident-alert, and recovery tests passed"
 
       # ======================================================================
       # SECTION 09 - VALIDATE BINANCE SECRETS
@@ -199,6 +210,20 @@ jobs:
           test -n "$BINANCE_API_KEY" || { echo "❌ BINANCE_API_KEY missing"; exit 1; }
           test -n "$BINANCE_SECRET_KEY" || { echo "❌ BINANCE_SECRET_KEY missing"; exit 1; }
           echo "✅ Binance API secrets configured"
+
+      - name: "09.2 Validate Coinbase read-only API secrets"
+        env:
+          COINBASE_API_KEY_NAME: ${{ secrets.COINBASE_API_KEY_NAME }}
+          COINBASE_API_PRIVATE_KEY: ${{ secrets.COINBASE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$COINBASE_API_KEY_NAME" || { echo "❌ COINBASE_API_KEY_NAME missing"; exit 1; }
+          test -n "$COINBASE_API_PRIVATE_KEY" || { echo "❌ COINBASE_API_PRIVATE_KEY missing"; exit 1; }
+          case "$COINBASE_API_KEY_NAME" in
+            organizations/*/apiKeys/*) ;;
+            *) echo "❌ COINBASE_API_KEY_NAME has an unexpected format"; exit 1 ;;
+          esac
+          echo "✅ Coinbase key name/private key are configured (values not printed)"
 
       # ======================================================================
       # SECTION 10 - VALIDATE VPN1 SECRETS
@@ -421,7 +446,20 @@ jobs:
       # ======================================================================
       # SECTION 22 - PROVIDER CONNECTIVITY PROBES
       # ======================================================================
-      - name: "22.1 Probe CoinGecko through VPN1 (diagnostic)"
+      - name: "22.1 Probe Coinbase through VPN1 (diagnostic)"
+        run: |
+          set +e
+          HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/coinbase-probe.txt" --write-out "%{http_code}" https://api.coinbase.com/api/v3/brokerage/time)"
+          CURL_EXIT=$?
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::warning::Coinbase diagnostic transport failure (curl exit ${CURL_EXIT}, HTTP ${HTTP_CODE:-000}); authenticated and public Coinbase calls will classify the failure"
+          elif [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Coinbase diagnostic HTTP 200"
+          else
+            echo "::warning::Coinbase diagnostic HTTP ${HTTP_CODE}; the logger will use bounded retries and its provider hierarchy"
+          fi
+
+      - name: "22.2 Probe CoinGecko through VPN1 (diagnostic)"
         run: |
           set +e
           HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/coingecko-probe.txt" --write-out "%{http_code}" https://api.coingecko.com/api/v3/ping)"
@@ -434,7 +472,7 @@ jobs:
             echo "::warning::CoinGecko diagnostic HTTP ${HTTP_CODE}; continuing because price_logger.py supports Binance and cached fallback paths"
           fi
 
-      - name: "22.2 Probe Binance through VPN1 (diagnostic)"
+      - name: "22.3 Probe Binance through VPN1 (diagnostic)"
         run: |
           set +e
           HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/binance-probe.txt" --write-out "%{http_code}" https://api.binance.com/api/v3/time)"
@@ -472,7 +510,11 @@ jobs:
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+          COINBASE_API_KEY_NAME: ${{ secrets.COINBASE_API_KEY_NAME }}
+          COINBASE_API_PRIVATE_KEY: ${{ secrets.COINBASE_API_PRIVATE_KEY }}
           CSV_RECOVERY_DIR: ${{ runner.temp }}/csv-recovery
+          PROVIDER_REPORT_FILE: ${{ runner.temp }}/provider-report.json
+          PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
@@ -483,6 +525,22 @@ jobs:
           echo "============================================================"
           python price_logger.py
           echo "✅ PRODUCTION CRYPTO PRICE LOGGER COMPLETED"
+
+      - name: "24.2 Validate sanitized provider decision report"
+        run: |
+          set -euo pipefail
+          REPORT="${RUNNER_TEMP}/provider-report.json"
+          test -s "$REPORT" || { echo "❌ Provider report missing"; exit 1; }
+          jq -e '
+            .version == 1 and
+            (.overall_severity | IN("HEALTHY", "WARNING", "CRITICAL")) and
+            (.trading_allowed | type == "boolean") and
+            (.decisions | type == "object" and length == 11)
+          ' "$REPORT" >/dev/null
+          echo "Provider severity: $(jq -r '.overall_severity' "$REPORT")"
+          echo "Trading allowed:   $(jq -r '.trading_allowed' "$REPORT")"
+          echo "Affected symbols:  $(jq -r '.affected_symbols | join(", ") | if length == 0 then "none" else . end' "$REPORT")"
+          echo "✅ Provider report schema validated"
 
       # ======================================================================
       # SECTION 25 - DISCONNECT VPN BEFORE GIT/GITHUB TRAFFIC
@@ -529,29 +587,31 @@ jobs:
           echo "Rows before: ${BEFORE_ROWS}"
           echo "Rows after:  ${AFTER_ROWS}"
           echo "Rows added:  ${ADDED_ROWS}"
-          test "$ADDED_ROWS" -gt 0 || { echo "❌ Logger produced no new production CSV rows"; exit 1; }
+          test "$ADDED_ROWS" -eq 11 || { echo "❌ Expected exactly 11 new symbol rows, got ${ADDED_ROWS}"; exit 1; }
           echo "✅ Production CSV validated"
 
       # ======================================================================
-      # SECTION 27 - CREATE CSV SAFETY BACKUP
+      # SECTION 27 - BACK UP PRICE + NON-SECRET INCIDENT STATE
       # ======================================================================
-      - name: "27.1 Backup production CSV before Git operations"
+      - name: "27.1 Backup production state before Git operations"
         run: |
           set -euo pipefail
           cp -- private_logger/price_log.csv "${RUNNER_TEMP}/price_log.csv"
+          cp -- private_logger/provider_incident_state.json "${RUNNER_TEMP}/provider_incident_state.json"
           test -s "${RUNNER_TEMP}/price_log.csv"
+          test -s "${RUNNER_TEMP}/provider_incident_state.json"
 
       # ======================================================================
-      # SECTION 28 - COMMIT AND PUSH ONLY THE PRODUCTION CSV CHANGE
+      # SECTION 28 - COMMIT ONLY PRICE + NON-SECRET INCIDENT STATE
       # ======================================================================
-      - name: "28.1 Commit production CSV locally"
+      - name: "28.1 Commit production logger state locally"
         run: |
           set -euo pipefail
           cd private_logger
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add -- price_log.csv
-          git diff --cached --quiet && { echo "❌ No production CSV change detected"; exit 1; }
+          git add -- price_log.csv provider_incident_state.json
+          git diff --cached --quiet && { echo "❌ No production logger state change detected"; exit 1; }
           git commit -m "Update crypto price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
       - name: "28.2 Rebase and push private main"
@@ -568,16 +628,17 @@ jobs:
             if ! git rebase origin/main; then
               git rebase --abort || true
               cp -- "${RUNNER_TEMP}/price_log.csv" price_log.csv
+              cp -- "${RUNNER_TEMP}/provider_incident_state.json" provider_incident_state.json
               echo "❌ Production rebase conflict"
               exit 1
             fi
             if git push "$REMOTE_URL" HEAD:main; then
-              echo "✅ Production CSV pushed to private main"
+              echo "✅ Production CSV and incident state pushed to private main"
               exit 0
             fi
             [ "$attempt" -lt 3 ] && sleep 5
           done
-          echo "❌ Production CSV push failed"
+          echo "❌ Production state push failed"
           exit 1
 
       # ======================================================================
@@ -695,6 +756,75 @@ jobs:
             const created = await github.rest.issues.create({ owner, repo, title, body });
             core.warning(`Created fallback issue #${created.data.number}`);
 
+      - name: "31.3 Send deduplicated price-source event alert"
+        id: send_provider_alert
+        if: always()
+        continue-on-error: true
+        env:
+          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
+          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+          ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
+          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
+          CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
+          PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
+        run: |
+          set -euo pipefail
+          NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
+          if [ ! -s "$PROVIDER_EVENT_FILE" ]; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "No new provider incident/severity/recovery email required"
+            exit 0
+          fi
+          echo "required=true" >> "$GITHUB_OUTPUT"
+          EVENT_TYPE="$(jq -r '.event_type' "$PROVIDER_EVENT_FILE")"
+          EVENT_SEVERITY="$(jq -r '.severity' "$PROVIDER_EVENT_FILE")"
+          case "$EVENT_TYPE" in
+            PRICE_SOURCE_INCIDENT|PRICE_SOURCE_SEVERITY_CHANGED|PRICE_SOURCE_RECOVERED) ;;
+            *) echo "❌ Unsupported provider event type: ${EVENT_TYPE}"; exit 1 ;;
+          esac
+          echo "alert_type=$EVENT_TYPE" >> "$GITHUB_OUTPUT"
+          echo "alert_severity=$EVENT_SEVERITY" >> "$GITHUB_OUTPUT"
+          python "$NOTIFIER" --alert-type "$EVENT_TYPE"
+
+      - name: "31.4 Create deduplicated Issue if provider email delivery fails"
+        if: always() && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'failure'
+        uses: actions/github-script@v8
+        env:
+          ALERT_TYPE: ${{ steps.send_provider_alert.outputs.alert_type }}
+          ALERT_SEVERITY: ${{ steps.send_provider_alert.outputs.alert_severity }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const marker = "<!-- crypto-logger-provider-alert-delivery-failure -->";
+            const title = "🚨 Crypto Logger provider alert delivery failed";
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100
+            });
+            const existing = issues.find(issue =>
+              !issue.pull_request &&
+              (issue.title === title || (issue.body || "").includes(marker))
+            );
+            if (existing) {
+              core.warning(`Provider alert-delivery issue already open: #${existing.number}`);
+              return;
+            }
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              "## Provider alert delivery failure",
+              "",
+              "A deduplicated price-source incident, severity-change, or recovery email was required, but Make/Outlook delivery failed.",
+              "",
+              `- **Event:** ${process.env.ALERT_TYPE || "unknown"}`,
+              `- **Severity:** ${process.env.ALERT_SEVERITY || "unknown"}`,
+              `- **Run:** ${runUrl}`,
+              "",
+              "Check the Make scenario, Outlook OAuth connection, and the two Make GitHub secrets. No provider API secret is included in this issue."
+            ].join("\n");
+            const created = await github.rest.issues.create({ owner, repo, title, body });
+            core.warning(`Created provider alert fallback issue #${created.data.number}`);
+
       # ======================================================================
       # SECTION 32 - CREATE PRODUCTION SUCCESS SUMMARY
       # ======================================================================
@@ -703,6 +833,7 @@ jobs:
         run: |
           set -euo pipefail
           CSV="private_logger/price_log.csv"
+          REPORT="${RUNNER_TEMP}/provider-report.json"
           CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
           AUTH_RECOVERY="Not needed"
           SECRET_UPDATE="Not needed"
@@ -718,20 +849,55 @@ jobs:
           fi
 
           {
-            echo "## 🚀 Crypto Price Logger - PRODUCTION S1"
+            echo "## 🚀 Crypto Logger | Main | Production S1.5"
+            echo ""
+            echo "### 1. Run identity"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Run | #${GITHUB_RUN_NUMBER} (attempt ${GITHUB_RUN_ATTEMPT}) |"
+            echo "| Public commit | \`${GITHUB_SHA}\` |"
+            echo "| Completed UTC | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |"
+            echo "| Trigger | ${GITHUB_EVENT_NAME} |"
+            echo ""
+            echo "### 2. Network and recovery"
             echo ""
             echo "- **VPN1 qualification:** Passed"
             echo "- **VPN2 qualification:** Passed"
             echo "- **Different public IPs:** Passed"
             echo "- **VPNBook auth recovery:** ${AUTH_RECOVERY}"
             echo "- **GitHub VPN secret update:** ${SECRET_UPDATE}"
-            echo "- **CoinGecko VPN1 probe:** Passed"
-            echo "- **Binance VPN1 probe:** Passed"
-            echo "- **Production CSV rows:** ${CSV_ROWS}"
             echo "- **Collection network:** VPN1"
             echo "- **Provider-triggered VPN2 switching:** Not enabled yet"
+            echo ""
+            echo "### 3. Provider health"
+            echo ""
+            echo "| Provider path | Result |"
+            echo "|---|---|"
+            jq -r '.provider_statuses | to_entries | sort_by(.key)[] | "| \(.key) | \(.value) |"' "$REPORT"
+            echo ""
+            echo "- **Overall source severity:** $(jq -r '.overall_severity' "$REPORT")"
+            echo "- **Trading allowed:** $(jq -r '.trading_allowed' "$REPORT")"
+            echo "- **FX selection:** $(jq -r '.fx_status' "$REPORT")"
+            echo "- **Affected symbols:** $(jq -r '.affected_symbols | join(", ") | if length == 0 then "None" else . end' "$REPORT")"
+            echo ""
+            echo "### 4. Per-symbol consensus"
+            echo ""
+            echo "| Symbol | Decision | Confidence | Severity | Sources used |"
+            echo "|---|---|---|---|---|"
+            jq -r '.decisions | to_entries | sort_by(.key)[] | "| \(.key) | \(.value.status) | \(.value.confidence) | \(.value.severity) | \(.value.used_sources | join(" + ")) |"' "$REPORT"
+            echo ""
+            echo "### 5. Persistence and downstream state"
+            echo ""
+            echo "- **Rows appended this run:** 11"
+            echo "- **Production CSV rows:** ${CSV_ROWS}"
+            echo "- **Incident state persisted:** Yes"
             echo "- **Neon writes:** Disabled"
-            echo "- **Completed UTC:** $(date -u)"
+            echo ""
+            echo "### 6. Next production phase"
+            echo ""
+            echo "- S2 will wire classified provider failures into VPN2 switching and extended retries."
+            echo "- Full time-aware Smart Cache remains deliberately separate from this interim trusted-history guard."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ======================================================================
@@ -745,7 +911,11 @@ jobs:
           [ -f "${RUNNER_TEMP}/csv-integrity-preflight.log" ] && cp "${RUNNER_TEMP}/csv-integrity-preflight.log" debug/
           [ -f "${RUNNER_TEMP}/csv-integrity-postflight.log" ] && cp "${RUNNER_TEMP}/csv-integrity-postflight.log" debug/
           [ -f "${RUNNER_TEMP}/coingecko-probe.txt" ] && cp "${RUNNER_TEMP}/coingecko-probe.txt" debug/
+          [ -f "${RUNNER_TEMP}/coinbase-probe.txt" ] && cp "${RUNNER_TEMP}/coinbase-probe.txt" debug/
           [ -f "${RUNNER_TEMP}/binance-probe.txt" ] && cp "${RUNNER_TEMP}/binance-probe.txt" debug/
+          [ -f "${RUNNER_TEMP}/provider-report.json" ] && cp "${RUNNER_TEMP}/provider-report.json" debug/
+          [ -f "${RUNNER_TEMP}/provider-event.json" ] && cp "${RUNNER_TEMP}/provider-event.json" debug/
+          [ -f "private_logger/provider_incident_state.json" ] && cp "private_logger/provider_incident_state.json" debug/
           [ -f "${RUNNER_TEMP}/network-manager-status.json" ] && cp "${RUNNER_TEMP}/network-manager-status.json" debug/
           [ -f "${RUNNER_TEMP}/s1-self-test.json" ] && cp "${RUNNER_TEMP}/s1-self-test.json" debug/
           [ -d "${RUNNER_TEMP}/network-manager" ] && cp -R "${RUNNER_TEMP}/network-manager" debug/network-manager-state 2>/dev/null || true
@@ -786,5 +956,10 @@ jobs:
           rm -rf "${RUNNER_TEMP}/network-manager"
           rm -rf "${RUNNER_TEMP}/csv-recovery"
           rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
+          rm -f "${RUNNER_TEMP}/provider-report.json"
+          rm -f "${RUNNER_TEMP}/provider-event.json"
+          rm -f "${RUNNER_TEMP}/coinbase-probe.txt"
+          rm -f "${RUNNER_TEMP}/coingecko-probe.txt"
+          rm -f "${RUNNER_TEMP}/binance-probe.txt"
           sudo rm -f vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
           echo "✅ Production runner cleanup completed"
