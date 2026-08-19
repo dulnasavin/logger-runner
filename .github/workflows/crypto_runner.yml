@@ -219,11 +219,12 @@ jobs:
           set -euo pipefail
           test -n "$COINBASE_API_KEY_NAME" || { echo "❌ COINBASE_API_KEY_NAME missing"; exit 1; }
           test -n "$COINBASE_API_PRIVATE_KEY" || { echo "❌ COINBASE_API_PRIVATE_KEY missing"; exit 1; }
-          case "$COINBASE_API_KEY_NAME" in
-            organizations/*/apiKeys/*) ;;
-            *) echo "❌ COINBASE_API_KEY_NAME has an unexpected format"; exit 1 ;;
-          esac
-          echo "✅ Coinbase key name/private key are configured (values not printed)"
+          # Coinbase currently issues either a full resource name such as
+          # organizations/.../apiKeys/... or a standalone key ID.  The official
+          # SDK accepts both, so do not reject a valid modern key format here.
+          test "${#COINBASE_API_KEY_NAME}" -ge 16 || { echo "❌ COINBASE_API_KEY_NAME is unexpectedly short"; exit 1; }
+          test "${#COINBASE_API_PRIVATE_KEY}" -ge 32 || { echo "❌ COINBASE_API_PRIVATE_KEY is unexpectedly short"; exit 1; }
+          echo "✅ Coinbase key ID/name and private key are configured (values not printed)"
 
       # ======================================================================
       # SECTION 10 - VALIDATE VPN1 SECRETS
