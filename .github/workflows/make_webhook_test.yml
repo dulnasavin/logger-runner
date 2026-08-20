@@ -7,8 +7,17 @@ on:
 permissions:
   contents: read
 
+env:
+  PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
+
+concurrency:
+  group: make-outlook-alert-test
+  cancel-in-progress: false
+
 jobs:
   test-make-outlook:
+    if: github.ref == 'refs/heads/main'
     name: Test the private production alert helper end to end
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -16,31 +25,46 @@ jobs:
     steps:
       - name: "01 Validate required secrets"
         env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
           ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$PRIVATE_REPO_TOKEN" || { echo "❌ PRIVATE_REPO_TOKEN missing"; exit 1; }
+          test -n "$PRIVATE_CODE_TOKEN" || { echo "❌ PRIVATE_CODE_READ_TOKEN/PRIVATE_REPO_TOKEN missing"; exit 1; }
           test -n "$ALERT_MAKE_WEBHOOK_URL" || { echo "❌ ALERT_MAKE_WEBHOOK_URL missing"; exit 1; }
           test -n "$ALERT_MAKE_API_KEY" || { echo "❌ ALERT_MAKE_API_KEY missing"; exit 1; }
           test "${#ALERT_LOCAL_HELPER_TOKEN}" -ge 32 || { echo "❌ ALERT_LOCAL_HELPER_TOKEN missing or too short"; exit 1; }
           echo "✅ Private repository, Make, and local-helper signing secrets configured"
 
-      - name: "02 Clone private production main"
-        env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
+      - name: "02.1 Validate pinned private source commit"
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch main \
-            "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git" \
-            private_logger
-          echo "✅ Private production code cloned"
+          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+            echo "PRIVATE_CODE_SHA repository variable must be one full 40-character commit SHA"
+            exit 1
+          }
+
+      - name: "02.2 Checkout pinned private production source"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_CODE_SHA }}
+          path: private_logger
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: "02.3 Verify and detach private source"
+        run: |
+          set -euo pipefail
+          cd private_logger
+          test "$(git rev-parse HEAD)" = "${PRIVATE_CODE_SHA,,}"
+          git remote remove origin
+          echo "✅ Exact pinned private source verified"
 
       - name: "03 Setup Python 3.13"
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
 

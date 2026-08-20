@@ -3,22 +3,26 @@ run-name: "Crypto Logger | Main | #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
-  schedule:
-    # Hourly at minute 7 UTC.  The offset avoids the busiest top-of-hour window.
-    - cron: "7 * * * *"
+  # The existing external five-minute dispatcher is authoritative. Do not add a
+  # second GitHub cron here: duplicate schedulers can queue overlapping runs.
 
 permissions:
   contents: read
-  issues: write
+
+env:
+  PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
+  PRIVATE_DATA_BRANCH: runtime-data
 
 # ============================================================================
 # CRYPTO PRICE LOGGER - PRODUCTION S1.5
 # NETWORK SELF-HEALING + THREE-SOURCE PRICE CONSENSUS
 # ============================================================================
 # Production rules:
-# - Public main reads/writes private main.
-# - Production price_log.csv stays on private main and is never replaced by
-#   staging CSV history.
+# - Public main executes one explicitly pinned private source commit.
+# - Runtime CSV/state lives on the dedicated private runtime-data branch.
+# - Only price_log.csv, csv_state.json, provider_incident_state.json, and the
+#   non-secret runtime manifest may be written by this workflow.
 # - Stored VPN credentials are attempted first.
 # - Only AUTH_FAILED triggers live VPNBook credential recovery.
 # - Live credentials are fetched only from the official VPNBook OpenVPN page.
@@ -33,24 +37,62 @@ permissions:
 # - Coinbase and Binance are authenticated primaries; CoinGecko validates.
 # - Cached estimates are labelled and automatically disable trading eligibility.
 # - Provider alerts send only on incident start, severity change, and recovery.
-# - Neon writes remain disabled at this stage.
+# - Neon sync is a dependent job and consumes the exact verified data/source
+#   commits after core persistence succeeds; the standalone workflow is manual.
 # ============================================================================
 
 concurrency:
-  group: crypto-price-logger-production
+  group: crypto-runtime-data
   cancel-in-progress: false
 
 jobs:
+  validate-invocation:
+    name: Validate production invocation
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Require the protected public main ref
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "Production may run only from refs/heads/main; received ${GITHUB_REF}"
+            exit 1
+          }
+          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+            echo "PRIVATE_CODE_SHA repository variable must be one full 40-character commit SHA"
+            exit 1
+          }
+
   run-logger:
+    name: Run, persist, and notify exact logger batch
+    needs: validate-invocation
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      core_commit_sha: ${{ steps.verify_core.outputs.core_commit_sha }}
+      source_code_sha: ${{ steps.verify_core.outputs.source_code_sha }}
+      alert_required: ${{ steps.send_make_alert.outputs.required }}
+      alert_type: ${{ steps.send_make_alert.outputs.alert_type }}
+      alert_delivery_failed: ${{ steps.send_make_alert.outcome == 'failure' }}
+      provider_alert_required: ${{ steps.send_provider_alert.outputs.required }}
+      provider_alert_type: ${{ steps.send_provider_alert.outputs.alert_type }}
+      provider_alert_severity: ${{ steps.send_provider_alert.outputs.alert_severity }}
+      provider_alert_event_id: ${{ steps.send_provider_alert.outputs.event_id }}
+      provider_alert_fingerprint: ${{ steps.send_provider_alert.outputs.fingerprint }}
+      provider_alert_delivery_failed: ${{ steps.send_provider_alert.outcome == 'failure' }}
 
     steps:
       # ======================================================================
       # SECTION 01 - CHECK OUT THE PUBLIC PRODUCTION RUNNER
       # ======================================================================
       - name: "01.1 Checkout public production runner"
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       # ======================================================================
       # SECTION 02 - IDENTIFY THIS EXACT PRODUCTION RUN
@@ -75,44 +117,69 @@ jobs:
       # ======================================================================
       # SECTION 03 - VALIDATE PRIVATE REPOSITORY ACCESS
       # ======================================================================
-      - name: "03.1 Validate PRIVATE_REPO_TOKEN"
+      - name: "03.1 Validate effective private repository tokens"
         env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$PRIVATE_REPO_TOKEN" || { echo "❌ PRIVATE_REPO_TOKEN missing"; exit 1; }
-          echo "✅ PRIVATE_REPO_TOKEN configured"
+          test -n "$PRIVATE_CODE_TOKEN" || { echo "❌ PRIVATE_CODE_READ_TOKEN/PRIVATE_REPO_TOKEN missing"; exit 1; }
+          test -n "$PRIVATE_DATA_TOKEN" || { echo "❌ PRIVATE_DATA_WRITE_TOKEN/PRIVATE_REPO_TOKEN missing"; exit 1; }
+          echo "✅ Effective private code-read and runtime-data tokens configured"
 
       # ======================================================================
-      # SECTION 04 - CLONE PRIVATE MAIN
+      # SECTION 04 - CHECK OUT PINNED CODE + ISOLATED RUNTIME DATA
       # ======================================================================
-      - name: "04.1 Clone private production main branch"
-        env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          TARGET_BRANCH="main"
-          REPOSITORY_URL="https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
-          for attempt in 1 2 3; do
-            echo "Private clone attempt ${attempt}/3"
-            rm -rf private_logger
-            if git clone --branch "$TARGET_BRANCH" --single-branch "$REPOSITORY_URL" private_logger; then
-              echo "✅ Private production repository cloned"
-              break
-            fi
-            [ "$attempt" -eq 3 ] && { echo "❌ Private repository clone failed"; exit 1; }
-            sleep 5
-          done
+      - name: "04.1 Checkout exact private production source"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_CODE_SHA }}
+          path: private_logger
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: "04.2 Verify private main branch alignment"
+      - name: "04.2 Verify and detach immutable private source"
         run: |
           set -euo pipefail
           cd private_logger
-          ACTUAL_BRANCH="$(git branch --show-current)"
-          test "$ACTUAL_BRANCH" = "main" || { echo "❌ Expected private main, got ${ACTUAL_BRANCH}"; exit 1; }
-          git log -1 --oneline
-          echo "✅ Private production branch is main"
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "${PRIVATE_CODE_SHA,,}" || {
+            echo "❌ Private source does not match PRIVATE_CODE_SHA"
+            exit 1
+          }
+          git remote remove origin
+          echo "SOURCE_CODE_SHA=$ACTUAL_SHA" >> "$GITHUB_ENV"
+          echo "✅ Exact private production source verified and detached"
+
+      - name: "04.3 Checkout isolated private runtime-data branch"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_DATA_BRANCH }}
+          path: private_data
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: "04.4 Verify runtime-data branch and copy named state"
+        run: |
+          set -euo pipefail
+          test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
+          for state_file in csv_state.json provider_incident_state.json; do
+            test -f "private_data/$state_file" || {
+              echo "❌ runtime-data is missing $state_file; seed the branch using CSV Maintenance"
+              exit 1
+            }
+            cp -- "private_data/$state_file" "private_logger/$state_file"
+          done
+          if [ -f private_data/price_log.csv ]; then
+            cp -- private_data/price_log.csv private_logger/price_log.csv
+          else
+            echo "⚠ price_log.csv is absent; generation-aware preflight recovery will inspect Git history"
+          fi
+          echo "✅ Runtime state copied into the immutable source workspace"
 
       # ======================================================================
       # SECTION 05 - VERIFY PRODUCTION LOGGER FILE STRUCTURE
@@ -126,7 +193,7 @@ jobs:
             "$LOGGER_DIR/provider_consensus.py" \
             "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
-            "$LOGGER_DIR/requirements.txt" \
+            "$LOGGER_DIR/requirements.lock" \
             "$LOGGER_DIR/tests/test_csv_integrity.py" \
             "$LOGGER_DIR/tests/test_provider_consensus.py" \
             "$LOGGER_DIR/tests/test_provider_alert_email.py"; do
@@ -152,7 +219,7 @@ jobs:
       # SECTION 06 - SET UP PYTHON
       # ======================================================================
       - name: "06.1 Setup Python 3.13"
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
 
@@ -163,8 +230,9 @@ jobs:
         run: |
           set -euo pipefail
           cd private_logger/"Crypto Logger-Private Repo"
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install --disable-pip-version-check \
+            --require-hashes --only-binary=:all: \
+            -r requirements.lock
           python -m pip check
           python -c "from coinbase.rest import RESTClient; print('Coinbase SDK import verified')"
           echo "✅ Python dependencies installed and verified"
@@ -318,13 +386,30 @@ jobs:
           VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
         run: |
           set -euo pipefail
-          umask 077
-          printf '%s\n' "$VPN1_CONFIG_SECRET" > vpn1.ovpn
-          printf '%s\n%s\n' "$VPN1_USERNAME" "$VPN1_PASSWORD" > vpn1-auth.txt
-          printf '%s\n' "$VPN2_CONFIG_SECRET" > vpn2.ovpn
-          printf '%s\n%s\n' "$VPN2_USERNAME" "$VPN2_PASSWORD" > vpn2-auth.txt
-          chmod 600 vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
-          test -s vpn1.ovpn && test -s vpn1-auth.txt && test -s vpn2.ovpn && test -s vpn2-auth.txt
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "vpn-runtime"
+          root.mkdir(mode=0o700)
+          payloads = {
+              "vpn1.ovpn": os.environ["VPN1_CONFIG_SECRET"] + "\n",
+              "vpn1-auth.txt": os.environ["VPN1_USERNAME"] + "\n" + os.environ["VPN1_PASSWORD"] + "\n",
+              "vpn2.ovpn": os.environ["VPN2_CONFIG_SECRET"] + "\n",
+              "vpn2-auth.txt": os.environ["VPN2_USERNAME"] + "\n" + os.environ["VPN2_PASSWORD"] + "\n",
+          }
+          flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+          for name, payload in payloads.items():
+              descriptor = os.open(root / name, flags, 0o600)
+              with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                  file.write(payload)
+                  file.flush()
+                  os.fsync(file.fileno())
+          PY
+          test -s "${RUNNER_TEMP}/vpn-runtime/vpn1.ovpn"
+          test -s "${RUNNER_TEMP}/vpn-runtime/vpn1-auth.txt"
+          test -s "${RUNNER_TEMP}/vpn-runtime/vpn2.ovpn"
+          test -s "${RUNNER_TEMP}/vpn-runtime/vpn2-auth.txt"
           echo "✅ Protected VPN runtime files created"
 
       # ======================================================================
@@ -333,10 +418,11 @@ jobs:
       - name: "16.1 Reset network manager state"
         env: &network_env
           NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
-          VPN1_CONFIG: ${{ github.workspace }}/vpn1.ovpn
-          VPN1_AUTH_FILE: ${{ github.workspace }}/vpn1-auth.txt
-          VPN2_CONFIG_FILE: ${{ github.workspace }}/vpn2.ovpn
-          VPN2_AUTH_FILE: ${{ github.workspace }}/vpn2-auth.txt
+          NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
+          VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
         run: |
           set -euo pipefail
           python "private_logger/Crypto Logger-Private Repo/network_manager.py" reset
@@ -373,10 +459,10 @@ jobs:
           CONTROLLER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
           python "$CONTROLLER" \
             --state-dir "${RUNNER_TEMP}/network-manager" \
-            --vpn1-config "${GITHUB_WORKSPACE}/vpn1.ovpn" \
-            --vpn1-auth "${GITHUB_WORKSPACE}/vpn1-auth.txt" \
-            --vpn2-config "${GITHUB_WORKSPACE}/vpn2.ovpn" \
-            --vpn2-auth "${GITHUB_WORKSPACE}/vpn2-auth.txt" \
+            --vpn1-config "${RUNNER_TEMP}/vpn-runtime/vpn1.ovpn" \
+            --vpn1-auth "${RUNNER_TEMP}/vpn-runtime/vpn1-auth.txt" \
+            --vpn2-config "${RUNNER_TEMP}/vpn-runtime/vpn2.ovpn" \
+            --vpn2-auth "${RUNNER_TEMP}/vpn-runtime/vpn2-auth.txt" \
             --self-test-output "${RUNNER_TEMP}/s1-self-test.json" \
             --recovered-marker "${RUNNER_TEMP}/vpn-auth-recovered" \
             --recovery-failed-marker "${RUNNER_TEMP}/vpn-auth-recovery-failed" \
@@ -492,14 +578,19 @@ jobs:
       - name: "23.1 Preflight and record production CSV state"
         run: |
           set -euo pipefail
-          CSV="private_logger/price_log.csv"
+          CSV="private_data/price_log.csv"
           INTEGRITY="private_logger/Crypto Logger-Private Repo/csv_integrity.py"
           RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
           mkdir -p "$RECOVERY_DIR"
           python "$INTEGRITY" \
             --path "$CSV" \
             --recovery-dir "$RECOVERY_DIR" \
+            --missing-policy restore-from-git \
+            --git-repository private_data \
             | tee "${RUNNER_TEMP}/csv-integrity-preflight.log"
+          cp -- private_data/price_log.csv private_logger/price_log.csv
+          cp -- private_data/csv_state.json private_logger/csv_state.json
+          cp -- private_data/provider_incident_state.json private_logger/provider_incident_state.json
           BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
           echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
           echo "Production CSV rows before logger: ${BEFORE_ROWS}"
@@ -524,7 +615,9 @@ jobs:
           echo "🚀 STARTING PRODUCTION CRYPTO PRICE LOGGER"
           echo "UTC time: $(date -u)"
           echo "============================================================"
-          python price_logger.py
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            -u http_proxy -u https_proxy -u all_proxy \
+            python price_logger.py
           echo "✅ PRODUCTION CRYPTO PRICE LOGGER COMPLETED"
 
       - name: "24.2 Validate sanitized provider decision report"
@@ -557,13 +650,12 @@ jobs:
       - name: "25.2 Verify OpenVPN fully stopped"
         if: always()
         run: |
-          set +e
-          if sudo pgrep -x openvpn >/dev/null 2>&1; then
-            sudo pkill -x openvpn 2>/dev/null || true
-            sleep 2
-          fi
-          sudo pgrep -x openvpn >/dev/null 2>&1 && { echo "❌ OpenVPN still running"; exit 1; }
-          echo "✅ VPN disconnected before Git/GitHub traffic"
+          set -euo pipefail
+          STATE="${RUNNER_TEMP}/network-manager/state.json"
+          test -s "$STATE"
+          test "$(jq -r '.active_network' "$STATE")" = "null"
+          test "$(jq -r '.pid_file' "$STATE")" = "null"
+          echo "✅ Managed VPN disconnected before Git/GitHub traffic"
 
       # ======================================================================
       # SECTION 26 - VALIDATE PRODUCTION CSV OUTPUT
@@ -598,43 +690,70 @@ jobs:
         run: |
           set -euo pipefail
           cp -- private_logger/price_log.csv "${RUNNER_TEMP}/price_log.csv"
+          cp -- private_logger/csv_state.json "${RUNNER_TEMP}/csv_state.json"
           cp -- private_logger/provider_incident_state.json "${RUNNER_TEMP}/provider_incident_state.json"
           test -s "${RUNNER_TEMP}/price_log.csv"
           test -s "${RUNNER_TEMP}/provider_incident_state.json"
 
       # ======================================================================
-      # SECTION 28 - COMMIT ONLY PRICE + NON-SECRET INCIDENT STATE
+      # SECTION 28 - COMMIT ONLY ALLOWLISTED RUNTIME STATE
       # ======================================================================
       - name: "28.1 Commit production logger state locally"
         run: |
           set -euo pipefail
-          cd private_logger
+          cp -- private_logger/price_log.csv private_data/price_log.csv
+          cp -- private_logger/csv_state.json private_data/csv_state.json
+          cp -- private_logger/provider_incident_state.json private_data/provider_incident_state.json
+          jq -n \
+            --arg source_code_sha "$SOURCE_CODE_SHA" \
+            --arg producer_repository "$GITHUB_REPOSITORY" \
+            --arg producer_workflow "$GITHUB_WORKFLOW" \
+            --arg producer_run_id "$GITHUB_RUN_ID" \
+            --arg producer_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg generated_at_utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{version: 1, source_code_sha: $source_code_sha,
+              producer_repository: $producer_repository,
+              producer_workflow: $producer_workflow,
+              producer_run_id: $producer_run_id,
+              producer_run_attempt: $producer_run_attempt,
+              generated_at_utc: $generated_at_utc}' \
+            > private_data/runtime_manifest.json
+          cd private_data
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add -- price_log.csv provider_incident_state.json
+          git add -- price_log.csv csv_state.json provider_incident_state.json runtime_manifest.json
+          UNEXPECTED="$(git diff --name-only | grep -Ev '^(price_log\.csv|csv_state\.json|provider_incident_state\.json|runtime_manifest\.json)$' || true)"
+          test -z "$UNEXPECTED" || { echo "❌ Unexpected runtime-data changes detected"; exit 1; }
           git diff --cached --quiet && { echo "❌ No production logger state change detected"; exit 1; }
-          git commit -m "Update crypto price log $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "Update runtime data for logger run ${GITHUB_RUN_ID}"
 
-      - name: "28.2 Rebase and push private main"
+      - name: "28.2 Rebase and push private runtime-data"
         env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-          REMOTE_URL="https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
-          cd private_logger
+          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          cd private_data
           for attempt in 1 2 3; do
             echo "Production Git sync attempt ${attempt}/3"
-            git fetch origin main
-            if ! git rebase origin/main; then
+            git fetch origin "$PRIVATE_DATA_BRANCH"
+            if ! git rebase "origin/$PRIVATE_DATA_BRANCH"; then
               git rebase --abort || true
-              cp -- "${RUNNER_TEMP}/price_log.csv" price_log.csv
-              cp -- "${RUNNER_TEMP}/provider_incident_state.json" provider_incident_state.json
-              echo "❌ Production rebase conflict"
+              echo "❌ Runtime-data changed concurrently; no overwrite attempted"
               exit 1
             fi
-            if git push "$REMOTE_URL" HEAD:main; then
-              echo "✅ Production CSV and incident state pushed to private main"
+            if git push origin "HEAD:$PRIVATE_DATA_BRANCH"; then
+              rm -f "$ASKPASS"
+              echo "✅ Allowlisted state pushed to private runtime-data"
               exit 0
             fi
             [ "$attempt" -lt 3 ] && sleep 5
@@ -645,21 +764,31 @@ jobs:
       # ======================================================================
       # SECTION 29 - VERIFY PRIVATE MAIN PUSH
       # ======================================================================
-      - name: "29.1 Verify remote private main SHA"
+      - name: "29.1 Verify remote private runtime-data SHA"
+        id: verify_core
         env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-          REMOTE_URL="https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/dulnasavin/Repository-name-crypto-tracker-Private-Yes.git"
-          cd private_logger
+          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          cd private_data
           LOCAL_SHA="$(git rev-parse HEAD)"
-          REMOTE_SHA="$(git ls-remote "$REMOTE_URL" refs/heads/main | awk '{print $1}')"
-          echo "Local SHA:  ${LOCAL_SHA}"
-          echo "Remote SHA: ${REMOTE_SHA}"
+          REMOTE_SHA="$(git ls-remote origin "refs/heads/$PRIVATE_DATA_BRANCH" | awk '{print $1}')"
           test -n "$REMOTE_SHA"
           test "$LOCAL_SHA" = "$REMOTE_SHA"
-          echo "✅ Private main push verified"
+          echo "core_commit_sha=$LOCAL_SHA" >> "$GITHUB_OUTPUT"
+          echo "source_code_sha=$SOURCE_CODE_SHA" >> "$GITHUB_OUTPUT"
+          rm -f "$ASKPASS"
+          echo "✅ Exact private runtime-data commit verified"
 
       # ======================================================================
       # SECTION 30 - CLASSIFY PRODUCTION ALERT CONDITION
@@ -708,55 +837,6 @@ jobs:
           echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
           python "$NOTIFIER" --alert-type "$ALERT_TYPE"
 
-      - name: "31.2 Create deduplicated GitHub Issue if alert delivery fails"
-        if: always() && steps.send_make_alert.outputs.required == 'true' && steps.send_make_alert.outcome == 'failure'
-        uses: actions/github-script@v8
-        env:
-          ALERT_TYPE: ${{ steps.send_make_alert.outputs.alert_type }}
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const marker = "<!-- crypto-logger-alert-delivery-failure -->";
-            const title = "🚨 Crypto Logger alert delivery failed";
-            const { owner, repo } = context.repo;
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner,
-              repo,
-              state: "open",
-              per_page: 100
-            });
-            const existing = issues.find(issue =>
-              !issue.pull_request &&
-              (issue.title === title || (issue.body || "").includes(marker))
-            );
-            if (existing) {
-              core.warning(`Alert-delivery issue already open: #${existing.number}`);
-              return;
-            }
-            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
-              marker,
-              "## Crypto Logger alert delivery failure",
-              "",
-              "The production workflow required a private recovery alert, but the authenticated Make/Outlook delivery step failed.",
-              "",
-              `- **Alert type:** ${process.env.ALERT_TYPE || "unknown"}`,
-              `- **Workflow:** ${context.workflow}`,
-              `- **Run ID:** ${context.runId}`,
-              `- **Run attempt:** ${process.env.GITHUB_RUN_ATTEMPT || "unknown"}`,
-              `- **Run:** ${runUrl}`,
-              "",
-              "### Required checks",
-              "1. Confirm the Make scenario is active.",
-              "2. Reauthorize the Outlook connection if Microsoft revoked or expired it.",
-              "3. Confirm `ALERT_MAKE_WEBHOOK_URL` and `ALERT_MAKE_API_KEY` still match Make.",
-              "4. Close this issue only after a manual Make webhook test succeeds.",
-              "",
-              "_This issue is deduplicated: while it remains open, later failures will not create additional issues._"
-            ].join("\n");
-            const created = await github.rest.issues.create({ owner, repo, title, body });
-            core.warning(`Created fallback issue #${created.data.number}`);
-
       - name: "31.3 Send deduplicated price-source event alert"
         id: send_provider_alert
         if: always()
@@ -779,52 +859,56 @@ jobs:
           echo "required=true" >> "$GITHUB_OUTPUT"
           EVENT_TYPE="$(jq -r '.event_type' "$PROVIDER_EVENT_FILE")"
           EVENT_SEVERITY="$(jq -r '.severity' "$PROVIDER_EVENT_FILE")"
+          EVENT_ID="$(jq -r '.event_id // empty' "$PROVIDER_EVENT_FILE")"
+          EVENT_FINGERPRINT="$(jq -r '.fingerprint // empty' "$PROVIDER_EVENT_FILE")"
           case "$EVENT_TYPE" in
             PRICE_SOURCE_INCIDENT|PRICE_SOURCE_SEVERITY_CHANGED|PRICE_SOURCE_RECOVERED) ;;
             *) echo "❌ Unsupported provider event type: ${EVENT_TYPE}"; exit 1 ;;
           esac
+          case "$EVENT_SEVERITY" in
+            HEALTHY|WARNING|CRITICAL) ;;
+            *) echo "❌ Unsupported provider event severity"; exit 1 ;;
+          esac
+          [[ "$EVENT_ID" =~ ^[0-9a-f]{32}$ ]] || { echo "❌ Invalid provider event ID"; exit 1; }
+          [[ "$EVENT_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { echo "❌ Invalid provider fingerprint"; exit 1; }
           echo "alert_type=$EVENT_TYPE" >> "$GITHUB_OUTPUT"
           echo "alert_severity=$EVENT_SEVERITY" >> "$GITHUB_OUTPUT"
+          echo "event_id=$EVENT_ID" >> "$GITHUB_OUTPUT"
+          echo "fingerprint=$EVENT_FINGERPRINT" >> "$GITHUB_OUTPUT"
           python "$NOTIFIER" --alert-type "$EVENT_TYPE"
 
-      - name: "31.4 Create deduplicated Issue if provider email delivery fails"
-        if: always() && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'failure'
-        uses: actions/github-script@v8
+      - name: "31.5 Acknowledge and persist delivered provider event"
+        if: always() && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success'
+        continue-on-error: true
         env:
-          ALERT_TYPE: ${{ steps.send_provider_alert.outputs.alert_type }}
-          ALERT_SEVERITY: ${{ steps.send_provider_alert.outputs.alert_severity }}
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const marker = "<!-- crypto-logger-provider-alert-delivery-failure -->";
-            const title = "🚨 Crypto Logger provider alert delivery failed";
-            const { owner, repo } = context.repo;
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner, repo, state: "open", per_page: 100
-            });
-            const existing = issues.find(issue =>
-              !issue.pull_request &&
-              (issue.title === title || (issue.body || "").includes(marker))
-            );
-            if (existing) {
-              core.warning(`Provider alert-delivery issue already open: #${existing.number}`);
-              return;
-            }
-            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const body = [
-              marker,
-              "## Provider alert delivery failure",
-              "",
-              "A deduplicated price-source incident, severity-change, or recovery email was required, but Make/Outlook delivery failed.",
-              "",
-              `- **Event:** ${process.env.ALERT_TYPE || "unknown"}`,
-              `- **Severity:** ${process.env.ALERT_SEVERITY || "unknown"}`,
-              `- **Run:** ${runUrl}`,
-              "",
-              "Check the Make scenario, Outlook OAuth connection, and the two Make GitHub secrets. No provider API secret is included in this issue."
-            ].join("\n");
-            const created = await github.rest.issues.create({ owner, repo, title, body });
-            core.warning(`Created provider alert fallback issue #${created.data.number}`);
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          CONSENSUS="private_logger/Crypto Logger-Private Repo/provider_consensus.py"
+          python "$CONSENSUS" acknowledge-delivery \
+            --state-file private_logger/provider_incident_state.json \
+            --event-file "$PROVIDER_EVENT_FILE"
+          cp -- private_logger/provider_incident_state.json private_data/provider_incident_state.json
+          cd private_data
+          git add -- provider_incident_state.json
+          git diff --cached --quiet && { echo "Provider event was already acknowledged"; exit 0; }
+          git commit -m "Acknowledge provider alert ${GITHUB_RUN_ID}"
+          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          git fetch origin "$PRIVATE_DATA_BRANCH"
+          git rebase "origin/$PRIVATE_DATA_BRANCH"
+          git push origin "HEAD:$PRIVATE_DATA_BRANCH"
+          rm -f "$ASKPASS"
+          echo "✅ Provider delivery acknowledged after Make accepted the event"
 
       # ======================================================================
       # SECTION 32 - CREATE PRODUCTION SUCCESS SUMMARY
@@ -893,7 +977,7 @@ jobs:
             echo "- **Rows appended this run:** 11"
             echo "- **Production CSV rows:** ${CSV_ROWS}"
             echo "- **Incident state persisted:** Yes"
-            echo "- **Neon writes:** Disabled"
+            echo "- **Neon handoff:** Runs only after the exact runtime-data commit is verified"
             echo ""
             echo "### 6. Next production phase"
             echo ""
@@ -909,35 +993,28 @@ jobs:
         run: |
           set +e
           mkdir -p debug
-          [ -f "${RUNNER_TEMP}/csv-integrity-preflight.log" ] && cp "${RUNNER_TEMP}/csv-integrity-preflight.log" debug/
-          [ -f "${RUNNER_TEMP}/csv-integrity-postflight.log" ] && cp "${RUNNER_TEMP}/csv-integrity-postflight.log" debug/
-          [ -f "${RUNNER_TEMP}/coingecko-probe.txt" ] && cp "${RUNNER_TEMP}/coingecko-probe.txt" debug/
-          [ -f "${RUNNER_TEMP}/coinbase-probe.txt" ] && cp "${RUNNER_TEMP}/coinbase-probe.txt" debug/
-          [ -f "${RUNNER_TEMP}/binance-probe.txt" ] && cp "${RUNNER_TEMP}/binance-probe.txt" debug/
-          [ -f "${RUNNER_TEMP}/provider-report.json" ] && cp "${RUNNER_TEMP}/provider-report.json" debug/
-          [ -f "${RUNNER_TEMP}/provider-event.json" ] && cp "${RUNNER_TEMP}/provider-event.json" debug/
-          [ -f "private_logger/provider_incident_state.json" ] && cp "private_logger/provider_incident_state.json" debug/
-          [ -f "${RUNNER_TEMP}/network-manager-status.json" ] && cp "${RUNNER_TEMP}/network-manager-status.json" debug/
-          [ -f "${RUNNER_TEMP}/s1-self-test.json" ] && cp "${RUNNER_TEMP}/s1-self-test.json" debug/
-          [ -d "${RUNNER_TEMP}/network-manager" ] && cp -R "${RUNNER_TEMP}/network-manager" debug/network-manager-state 2>/dev/null || true
           {
-            echo "UTC time: $(date -u)"
-            echo "Branch: ${GITHUB_REF_NAME}"
-            echo "Run ID: ${GITHUB_RUN_ID}"
-            echo "vpn_auth_recovered=$([ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && echo yes || echo no)"
-            echo "vpn_auth_recovery_failed=$([ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo yes || echo no)"
-            echo "vpn_secret_update_success=$([ -f "${RUNNER_TEMP}/vpn-secret-update-success" ] && echo yes || echo no)"
-            echo "vpn_secret_update_failed=$([ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo yes || echo no)"
-            sudo pgrep -a openvpn || true
-            ip route show || true
-          } > debug/network-diagnostics.txt
-          sudo chown -R "$(id -u):$(id -g)" debug
-          chmod -R u+rwX,go+rX debug
+            echo '{'
+            printf '  "run_id": "%s",\n' "$GITHUB_RUN_ID"
+            printf '  "run_attempt": "%s",\n' "$GITHUB_RUN_ATTEMPT"
+            printf '  "source_code_sha": "%s",\n' "${SOURCE_CODE_SHA:-unavailable}"
+            printf '  "vpn_auth_recovered": %s,\n' "$([ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && echo true || echo false)"
+            printf '  "vpn_auth_recovery_failed": %s,\n' "$([ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo true || echo false)"
+            printf '  "vpn_secret_update_failed": %s\n' "$([ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo true || echo false)"
+            echo '}'
+          } > debug/diagnostic-summary.json
+          if [ -s "${RUNNER_TEMP}/provider-report.json" ]; then
+            jq '{version, overall_severity, trading_allowed,
+                 affected_symbol_count: (.affected_symbols | length),
+                 provider_statuses}' "${RUNNER_TEMP}/provider-report.json" \
+              > debug/provider-summary.json || true
+          fi
+          chmod -R u+rwX,go-rwx debug
 
       - name: "33.2 Upload production failure diagnostics"
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-crypto-price-logger-debug-${{ github.run_id }}-${{ github.run_attempt }}
           path: debug/
@@ -949,12 +1026,15 @@ jobs:
       # ======================================================================
       - name: "34.1 Cleanup temporary production runner data"
         if: always()
+        env: *network_env
         run: |
           set +e
-          sudo pkill -x openvpn 2>/dev/null || true
-          rm -rf private_logger
+          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
+          [ -f "$MANAGER" ] && python "$MANAGER" reset >/dev/null 2>&1 || true
+          rm -rf private_logger private_data
           sudo rm -rf debug
           rm -rf "${RUNNER_TEMP}/network-manager"
+          rm -rf "${RUNNER_TEMP}/vpn-runtime"
           rm -rf "${RUNNER_TEMP}/csv-recovery"
           rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
           rm -f "${RUNNER_TEMP}/provider-report.json"
@@ -962,5 +1042,256 @@ jobs:
           rm -f "${RUNNER_TEMP}/coinbase-probe.txt"
           rm -f "${RUNNER_TEMP}/coingecko-probe.txt"
           rm -f "${RUNNER_TEMP}/binance-probe.txt"
-          sudo rm -f vpn1.ovpn vpn1-auth.txt vpn2.ovpn vpn2-auth.txt
+          rm -f "${RUNNER_TEMP}/crypto-git-askpass"
           echo "✅ Production runner cleanup completed"
+
+  sync-neon:
+    name: Sync exact committed batch to Neon
+    needs: run-logger
+    if: >-
+      always() &&
+      needs.run-logger.outputs.core_commit_sha != '' &&
+      needs.run-logger.outputs.source_code_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Validate exact handoff and database secret
+        env:
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
+          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_CODE_TOKEN"
+          test -n "$PRIVATE_DATA_TOKEN"
+          test -n "$NEON_DATABASE_URL"
+          [[ "$DATA_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout exact committed runtime data
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ needs.run-logger.outputs.core_commit_sha }}
+          path: private_data
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact source used by the logger
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ needs.run-logger.outputs.source_code_sha }}
+          path: private_source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify manifest and assemble exact sync workspace
+        env:
+          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
+          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C private_data rev-parse HEAD)" = "$DATA_SHA"
+          test "$(git -C private_source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(jq -r '.source_code_sha' private_data/runtime_manifest.json)" = "$SOURCE_SHA"
+          test "$(jq -r '.producer_run_id' private_data/runtime_manifest.json)" = "$GITHUB_RUN_ID"
+          cp -- private_data/price_log.csv private_source/price_log.csv
+          cp -- private_data/csv_state.json private_source/csv_state.json
+          echo "✅ Logger source and committed data handoff match exactly"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: private_source/Crypto Logger-Private Repo/requirements.lock
+
+      - name: Install locked private dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check \
+            --require-hashes --only-binary=:all: \
+            -r "private_source/Crypto Logger-Private Repo/requirements.lock"
+          python -m pip check
+
+      - name: Run exact one-way Neon sync
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          cd private_source
+          python "Neon Sync/sync_to_neon.py"
+
+      - name: Publish sanitized Neon handoff summary
+        if: always()
+        env:
+          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
+          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
+        run: |
+          {
+            echo "## Neon exact handoff"
+            echo "- Runtime-data commit: \`$DATA_SHA\`"
+            echo "- Private source commit: \`$SOURCE_SHA\`"
+            echo "- No CSV rows, database URL, or provider credentials were printed or uploaded."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup private handoff workspaces
+        if: always()
+        run: rm -rf private_data private_source
+
+  fallback-issues:
+    name: Trusted GitHub Issue fallback
+    needs:
+      - run-logger
+      - sync-neon
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # retain the workflow-wide read-only source permission
+      issues: write # create or update sanitized alert-delivery fallback issues
+    steps:
+      - name: "31.2 Create or update trusted Issue if workflow alert delivery fails"
+        if: >-
+          needs.run-logger.result == 'failure' ||
+          needs.sync-neon.result == 'failure' ||
+          needs.run-logger.outputs.alert_delivery_failed == 'true'
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          LOGGER_ALERT_TYPE: ${{ needs.run-logger.outputs.alert_type }}
+          LOGGER_RESULT: ${{ needs.run-logger.result }}
+          SYNC_RESULT: ${{ needs.sync-neon.result }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const crypto = require("crypto");
+            const { owner, repo } = context.repo;
+            const label = "crypto-alert-fallback";
+            const alertType = process.env.SYNC_RESULT === "failure"
+              ? "NEON_SYNC_FAILED"
+              : (process.env.LOGGER_ALERT_TYPE || "PRODUCTION_WORKFLOW_FAILED");
+            const fingerprint = crypto.createHash("sha256")
+              .update(`workflow:${alertType}`)
+              .digest("hex").slice(0, 24);
+            const marker = `<!-- crypto-alert-fallback:${fingerprint} -->`;
+            const title = "🚨 Crypto Logger alert delivery failed";
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({
+                owner, repo, name: label, color: "b60205",
+                description: "Trusted fallback created by the production alert workflow"
+              });
+            }
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", labels: label, per_page: 100
+            });
+            const trustedAuthors = new Set(["github-actions[bot]", owner.toLowerCase()]);
+            const existing = issues.find(issue =>
+              !issue.pull_request &&
+              trustedAuthors.has((issue.user?.login || "").toLowerCase()) &&
+              issue.labels.some(item => (item.name || item) === label) &&
+              (issue.body || "").includes(marker)
+            );
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const reminder = [
+              `Delivery failed again for **${alertType}**.`,
+              `Run: ${runUrl}`,
+              `Attempt: ${process.env.GITHUB_RUN_ATTEMPT || "unknown"}`
+            ].join("\n");
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number, body: reminder
+              });
+              core.warning(`Updated trusted fallback issue #${existing.number}`);
+              return;
+            }
+            const body = [
+              marker,
+              "## Crypto Logger alert delivery failure",
+              "",
+              `- **Alert type:** ${alertType}`,
+              `- **Run:** ${runUrl}`,
+              "",
+              "Check the Make scenario, Outlook OAuth connection, and Make repository secrets. No provider or credential value is included here."
+            ].join("\n");
+            const created = await github.rest.issues.create({
+              owner, repo, title, body, labels: [label]
+            });
+            core.warning(`Created trusted fallback issue #${created.data.number}`);
+
+      - name: "31.4 Create or update trusted Issue if provider delivery fails"
+        if: needs.run-logger.outputs.provider_alert_delivery_failed == 'true'
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          ALERT_TYPE: ${{ needs.run-logger.outputs.provider_alert_type }}
+          ALERT_SEVERITY: ${{ needs.run-logger.outputs.provider_alert_severity }}
+          ALERT_EVENT_ID: ${{ needs.run-logger.outputs.provider_alert_event_id }}
+          ALERT_FINGERPRINT: ${{ needs.run-logger.outputs.provider_alert_fingerprint }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const crypto = require("crypto");
+            const { owner, repo } = context.repo;
+            const label = "crypto-alert-fallback";
+            const eventType = process.env.ALERT_TYPE || "unknown";
+            const severity = process.env.ALERT_SEVERITY || "unknown";
+            const eventId = process.env.ALERT_EVENT_ID || "missing-event-id";
+            const eventFingerprint = process.env.ALERT_FINGERPRINT || eventId;
+            const fingerprint = crypto.createHash("sha256")
+              .update(`provider:${eventFingerprint}`)
+              .digest("hex").slice(0, 24);
+            const marker = `<!-- crypto-alert-fallback:${fingerprint} -->`;
+            const title = "🚨 Crypto Logger provider alert delivery failed";
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({
+                owner, repo, name: label, color: "b60205",
+                description: "Trusted fallback created by the production alert workflow"
+              });
+            }
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", labels: label, per_page: 100
+            });
+            const trustedAuthors = new Set(["github-actions[bot]", owner.toLowerCase()]);
+            const existing = issues.find(issue =>
+              !issue.pull_request &&
+              trustedAuthors.has((issue.user?.login || "").toLowerCase()) &&
+              issue.labels.some(item => (item.name || item) === label) &&
+              (issue.body || "").includes(marker)
+            );
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const reminder = `Provider alert delivery failed again. Event: **${eventType}**; severity: **${severity}**; run: ${runUrl}`;
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number, body: reminder
+              });
+              core.warning(`Updated trusted provider fallback issue #${existing.number}`);
+              return;
+            }
+            const body = [
+              marker,
+              "## Provider alert delivery failure",
+              "",
+              `- **Event:** ${eventType}`,
+              `- **Severity:** ${severity}`,
+              `- **Run:** ${runUrl}`,
+              "",
+              "The event remains pending in private runtime state and will be retried. No provider API secret is included."
+            ].join("\n");
+            const created = await github.rest.issues.create({
+              owner, repo, title, body, labels: [label]
+            });
+            core.warning(`Created trusted provider fallback issue #${created.data.number}`);

@@ -1,0 +1,240 @@
+name: "CSV Maintenance | Controlled"
+run-name: "CSV Maintenance | ${{ inputs.operation }} | #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Controlled data operation"
+        required: true
+        type: choice
+        options:
+          - validate
+          - restore-accidental-deletion
+          - intentional-reset
+          - seed-runtime-data
+      confirmation:
+        description: "For reset type RESET_PRICE_LOG; for seed type CREATE_RUNTIME_DATA"
+        required: false
+        type: string
+      reason:
+        description: "Required reason for an intentional reset"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
+  PRIVATE_DATA_BRANCH: runtime-data
+
+concurrency:
+  group: crypto-runtime-data
+  cancel-in-progress: false
+
+jobs:
+  validate-request:
+    name: Validate controlled maintenance request
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validate protected request
+        env:
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+          REQUEST_CONFIRMATION: ${{ inputs.confirmation }}
+          REQUEST_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          test -n "$PRIVATE_CODE_TOKEN" || { echo "No effective private code-read token is configured"; exit 1; }
+          test -n "$PRIVATE_DATA_TOKEN" || { echo "No effective private data token is configured"; exit 1; }
+          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+            echo "PRIVATE_CODE_SHA must be a full private source commit SHA"
+            exit 1
+          }
+          case "$REQUESTED_OPERATION" in
+            intentional-reset)
+              test "$REQUEST_CONFIRMATION" = "RESET_PRICE_LOG"
+              test -n "$REQUEST_REASON"
+              ;;
+            seed-runtime-data)
+              test "$REQUEST_CONFIRMATION" = "CREATE_RUNTIME_DATA"
+              ;;
+            validate|restore-accidental-deletion) ;;
+            *) echo "Unsupported maintenance operation"; exit 1 ;;
+          esac
+
+  seed-runtime-data:
+    name: Seed isolated private runtime-data branch
+    needs: validate-request
+    if: inputs.operation == 'seed-runtime-data'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout current private main only as initial data source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: main
+          path: private_seed
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create runtime-data branch without executable source
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          for required in price_log.csv csv_state.json provider_incident_state.json; do
+            test -f "private_seed/$required" || { echo "Private main is missing $required"; exit 1; }
+            cp -- "private_seed/$required" "${RUNNER_TEMP}/$required"
+          done
+          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          cd private_seed
+          if git ls-remote --exit-code origin "refs/heads/$PRIVATE_DATA_BRANCH" >/dev/null 2>&1; then
+            echo "runtime-data already exists; refusing to replace it"
+            exit 1
+          fi
+          git switch --orphan "$PRIVATE_DATA_BRANCH"
+          git rm -rf --ignore-unmatch -- .
+          cp -- "${RUNNER_TEMP}/price_log.csv" price_log.csv
+          cp -- "${RUNNER_TEMP}/csv_state.json" csv_state.json
+          cp -- "${RUNNER_TEMP}/provider_incident_state.json" provider_incident_state.json
+          jq -n \
+            --arg source_code_sha "${PRIVATE_CODE_SHA,,}" \
+            --arg generated_at_utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{version: 1, source_code_sha: $source_code_sha,
+              producer_repository: "controlled-seed",
+              producer_workflow: "CSV Maintenance | Controlled",
+              producer_run_id: env.GITHUB_RUN_ID,
+              producer_run_attempt: env.GITHUB_RUN_ATTEMPT,
+              generated_at_utc: $generated_at_utc}' > runtime_manifest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- price_log.csv csv_state.json provider_incident_state.json runtime_manifest.json
+          git commit -m "Seed isolated crypto logger runtime data"
+          git push origin "HEAD:refs/heads/$PRIVATE_DATA_BRANCH"
+          rm -f "$ASKPASS"
+
+      - name: Cleanup seed workspace
+        if: always()
+        run: |
+          rm -rf private_seed
+          rm -f "${RUNNER_TEMP}/crypto-git-askpass"
+          rm -f "${RUNNER_TEMP}/price_log.csv" "${RUNNER_TEMP}/csv_state.json" \
+            "${RUNNER_TEMP}/provider_incident_state.json"
+
+  maintain-runtime-data:
+    name: Maintain isolated private runtime data
+    needs: validate-request
+    if: inputs.operation != 'seed-runtime-data'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout pinned CSV integrity source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_CODE_SHA }}
+          path: private_source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout private runtime data
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_DATA_BRANCH }}
+          path: private_data
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Execute the selected controlled operation
+        env:
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+          RESET_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          INTEGRITY="private_source/Crypto Logger-Private Repo/csv_integrity.py"
+          RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
+          mkdir -p "$RECOVERY_DIR"
+          case "$REQUESTED_OPERATION" in
+            validate)
+              python "$INTEGRITY" --path private_data/price_log.csv \
+                --recovery-dir "$RECOVERY_DIR" --validate-only \
+                --missing-policy fail
+              ;;
+            restore-accidental-deletion)
+              python "$INTEGRITY" --path private_data/price_log.csv \
+                --recovery-dir "$RECOVERY_DIR" \
+                --missing-policy restore-from-git --git-repository private_data
+              ;;
+            intentional-reset)
+              python "$INTEGRITY" --path private_data/price_log.csv \
+                --state-path private_data/csv_state.json \
+                --intentional-reset --confirm-reset RESET_PRICE_LOG \
+                --reset-reason "$RESET_REASON"
+              ;;
+          esac
+
+      - name: Commit only intentional maintenance state
+        if: inputs.operation != 'validate'
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          cd private_data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- price_log.csv csv_state.json
+          if git diff --cached --quiet; then
+            echo "No runtime-data change was required"
+            exit 0
+          fi
+          git commit -m "CSV maintenance: $REQUESTED_OPERATION"
+          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          git fetch origin "$PRIVATE_DATA_BRANCH"
+          git rebase "origin/$PRIVATE_DATA_BRANCH" || {
+            git rebase --abort || true
+            echo "Runtime data changed concurrently; no overwrite attempted"
+            exit 1
+          }
+          git push origin "HEAD:$PRIVATE_DATA_BRANCH"
+          rm -f "$ASKPASS"
+
+      - name: Cleanup maintenance workspaces
+        if: always()
+        run: |
+          rm -rf private_source private_data "${RUNNER_TEMP}/csv-recovery"
+          rm -f "${RUNNER_TEMP}/crypto-git-askpass"

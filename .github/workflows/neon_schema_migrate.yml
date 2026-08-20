@@ -1,0 +1,97 @@
+name: "Neon Schema | Controlled Migration"
+run-name: "Neon Schema | ${{ vars.PRIVATE_CODE_SHA }} | #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type APPLY_NEON_SCHEMA"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
+
+concurrency:
+  group: crypto-runtime-data
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply controlled Neon schema migration
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'APPLY_NEON_SCHEMA'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate pinned source and secrets
+        env:
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          test -n "$PRIVATE_CODE_TOKEN"
+          test -n "$NEON_DATABASE_URL"
+
+      - name: Checkout exact private schema source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_CODE_SHA }}
+          path: private_source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install locked database driver
+        run: |
+          set -euo pipefail
+          test -s "private_source/Crypto Logger-Private Repo/requirements.lock"
+          python -m pip install --disable-pip-version-check \
+            --require-hashes --only-binary=:all: \
+            -r "private_source/Crypto Logger-Private Repo/requirements.lock"
+          python -m pip check
+
+      - name: Apply idempotent schema in one transaction
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          import psycopg2
+
+          sql = Path("private_source/Neon Sync/db_schema.sql").read_text(encoding="utf-8")
+          with psycopg2.connect(os.environ["NEON_DATABASE_URL"], connect_timeout=10) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("SET LOCAL statement_timeout = '120s'")
+                  cursor.execute("SET LOCAL lock_timeout = '10s'")
+                  cursor.execute(sql)
+          print("Neon schema migration committed")
+          PY
+
+      - name: Publish migration summary
+        if: success()
+        run: |
+          {
+            echo "## Neon schema migration"
+            echo "- Source commit: \`${PRIVATE_CODE_SHA,,}\`"
+            echo "- Migration completed in one transaction with statement and lock timeouts."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup private source
+        if: always()
+        run: rm -rf private_source
