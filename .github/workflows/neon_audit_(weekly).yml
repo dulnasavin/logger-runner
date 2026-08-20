@@ -115,13 +115,13 @@ jobs:
             "private_source/Crypto Logger-Private Repo/csv_integrity.py" \
             "private_source/Neon Weekly Audit/neon_audit.py"
 
-      - name: Run generation-aware, non-destructive audit
+      - name: Run generation-aware controlled reconciliation
         env:
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
           set -euo pipefail
           cd private_source
-          python "Neon Weekly Audit/neon_audit.py"
+          python "Neon Weekly Audit/neon_audit.py" | tee "${RUNNER_TEMP}/neon-audit-summary.txt"
 
       - name: Commit only CSV rows restored from Neon
         env:
@@ -168,6 +168,12 @@ jobs:
             echo "- Source commit: \`$SOURCE_SHA\`"
             echo "- Starting data commit: \`$DATA_SHA\`"
             echo "- Same-key conflicts are never auto-overwritten."
+            echo "- Neon deletes require an exact CSV-state tombstone created by controlled maintenance."
+            if test -s "${RUNNER_TEMP}/neon-audit-summary.txt"; then
+              echo "### Sanitized counters"
+              grep -E '^(Dataset generation|Missing in Neon before repair|Inserted into Neon|Missing in CSV before repair|Restored into CSV from Neon|Intentional deletion tombstones|Deleted from Neon|Conflicts|Status):' \
+                "${RUNNER_TEMP}/neon-audit-summary.txt" || true
+            fi
             echo "- Private row contents and raw audit logs were not uploaded."
           } >> "$GITHUB_STEP_SUMMARY"
 
