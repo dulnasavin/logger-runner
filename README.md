@@ -30,6 +30,31 @@ Mutable CSV and incident state is isolated on the private `runtime-data` branch.
 The established external five-minute dispatcher is the only production
 scheduler. The main workflow intentionally has no second GitHub cron.
 
+## Controlled CSV deletion
+
+Never delete `price_log.csv` or its rows by hand. Missing or damaged files are
+treated as accidental and restored from the active Git generation.
+
+- For a complete clean start, run **CSV Maintenance | Controlled**, choose
+  `intentional-reset`, enter `RESET_PRICE_LOG`, and supply a non-sensitive
+  reason. This starts a new generation; older Neon generations are archived
+  and cannot repopulate the new CSV.
+- For wrong historical data, first choose `preview-selected-batches`, then
+  choose `delete-selected-batches`, enter one or more exact `timestamp_nz`
+  values, supply a reason, and confirm with `DELETE_PRICE_BATCHES`.
+- For batches already removed manually, first choose
+  `preview-existing-deletions`, then choose `register-existing-deletions`, enter
+  the exact missing `timestamp_nz` values, supply a reason, and confirm with
+  `REGISTER_DELETED_BATCHES`. This records tombstones without changing the
+  current CSV, allowing the weekly audit to remove the matching Neon rows.
+
+Selected deletion always removes the complete eleven-symbol run. It records an
+atomic tombstone in `csv_state.json`; Git restoration will continue excluding
+that run, normal Neon Sync remains insert-only, and the controlled weekly audit
+deletes only exact tombstoned rows from the active Neon generation. Arbitrary
+single-symbol deletion is intentionally rejected because it would create an
+incomplete trading-data batch.
+
 ## Repository secrets and variables
 
 Existing `PRIVATE_REPO_TOKEN` remains supported. For least privilege, replace it
