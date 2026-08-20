@@ -12,13 +12,21 @@ on:
           - validate
           - restore-accidental-deletion
           - intentional-reset
+          - preview-selected-batches
+          - delete-selected-batches
+          - preview-existing-deletions
+          - register-existing-deletions
           - seed-runtime-data
       confirmation:
-        description: "For reset type RESET_PRICE_LOG; for seed type CREATE_RUNTIME_DATA"
+        description: "RESET_PRICE_LOG, DELETE_PRICE_BATCHES, REGISTER_DELETED_BATCHES, or CREATE_RUNTIME_DATA"
         required: false
         type: string
       reason:
-        description: "Required reason for an intentional reset"
+        description: "Required non-sensitive reason for reset or selected deletion"
+        required: false
+        type: string
+      batch_timestamps_nz:
+        description: "Exact timestamp_nz run(s), comma separated; each removes all 11 symbol rows"
         required: false
         type: string
 
@@ -47,6 +55,7 @@ jobs:
           REQUESTED_OPERATION: ${{ inputs.operation }}
           REQUEST_CONFIRMATION: ${{ inputs.confirmation }}
           REQUEST_REASON: ${{ inputs.reason }}
+          REQUEST_BATCH_TIMESTAMPS: ${{ inputs.batch_timestamps_nz }}
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
@@ -60,6 +69,24 @@ jobs:
             intentional-reset)
               test "$REQUEST_CONFIRMATION" = "RESET_PRICE_LOG"
               test -n "$REQUEST_REASON"
+              ;;
+            delete-selected-batches)
+              test "$REQUEST_CONFIRMATION" = "DELETE_PRICE_BATCHES"
+              test -n "$REQUEST_REASON"
+              test -n "$REQUEST_BATCH_TIMESTAMPS"
+              ;;
+            preview-selected-batches)
+              test -n "$REQUEST_REASON"
+              test -n "$REQUEST_BATCH_TIMESTAMPS"
+              ;;
+            register-existing-deletions)
+              test "$REQUEST_CONFIRMATION" = "REGISTER_DELETED_BATCHES"
+              test -n "$REQUEST_REASON"
+              test -n "$REQUEST_BATCH_TIMESTAMPS"
+              ;;
+            preview-existing-deletions)
+              test -n "$REQUEST_REASON"
+              test -n "$REQUEST_BATCH_TIMESTAMPS"
               ;;
             seed-runtime-data)
               test "$REQUEST_CONFIRMATION" = "CREATE_RUNTIME_DATA"
@@ -174,6 +201,7 @@ jobs:
         env:
           REQUESTED_OPERATION: ${{ inputs.operation }}
           RESET_REASON: ${{ inputs.reason }}
+          BATCH_TIMESTAMPS_NZ: ${{ inputs.batch_timestamps_nz }}
         run: |
           set -euo pipefail
           INTEGRITY="private_source/Crypto Logger-Private Repo/csv_integrity.py"
@@ -196,10 +224,42 @@ jobs:
                 --intentional-reset --confirm-reset RESET_PRICE_LOG \
                 --reset-reason "$RESET_REASON"
               ;;
+            preview-selected-batches)
+              python "$INTEGRITY" --path private_data/price_log.csv \
+                --state-path private_data/csv_state.json \
+                --delete-batches "$BATCH_TIMESTAMPS_NZ" \
+                --delete-reason "$RESET_REASON" --preview-delete
+              ;;
+            delete-selected-batches)
+              python "$INTEGRITY" --path private_data/price_log.csv \
+                --state-path private_data/csv_state.json \
+                --delete-batches "$BATCH_TIMESTAMPS_NZ" \
+                --confirm-delete DELETE_PRICE_BATCHES \
+                --delete-reason "$RESET_REASON"
+              ;;
+            preview-existing-deletions)
+              python "$INTEGRITY" --path private_data/price_log.csv \
+                --state-path private_data/csv_state.json \
+                --delete-batches "$BATCH_TIMESTAMPS_NZ" \
+                --delete-reason "$RESET_REASON" \
+                --register-missing-deletions --preview-delete
+              ;;
+            register-existing-deletions)
+              python "$INTEGRITY" --path private_data/price_log.csv \
+                --state-path private_data/csv_state.json \
+                --delete-batches "$BATCH_TIMESTAMPS_NZ" \
+                --register-missing-deletions \
+                --confirm-registration REGISTER_DELETED_BATCHES \
+                --delete-reason "$RESET_REASON"
+              ;;
           esac
 
       - name: Commit only intentional maintenance state
-        if: inputs.operation != 'validate'
+        if: >-
+          inputs.operation == 'restore-accidental-deletion' ||
+          inputs.operation == 'intentional-reset' ||
+          inputs.operation == 'delete-selected-batches' ||
+          inputs.operation == 'register-existing-deletions'
         env:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           REQUESTED_OPERATION: ${{ inputs.operation }}
