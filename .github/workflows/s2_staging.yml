@@ -1,0 +1,130 @@
+name: "Crypto Logger | S2 Staging"
+run-name: "S2 Staging Safety Tests | #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-logger-s2-staging
+  cancel-in-progress: false
+
+jobs:
+  s2-staging-tests:
+    name: Offline S2 policy and regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: "01 Require public staging ref"
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/staging" || {
+            echo "This workflow may run only from refs/heads/staging"
+            exit 1
+          }
+
+      - name: "02 Checkout public staging"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: staging
+          persist-credentials: false
+
+      - name: "03 Checkout private staging read-only"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN }}
+          ref: staging
+          path: private_logger
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: "04 Prove the staging isolation boundary"
+        run: |
+          set -euo pipefail
+          test "$(git -C private_logger branch --show-current)" = "staging"
+          test -s "private_logger/Crypto Logger-Private Repo/provider_network_recovery.py"
+          test -s "private_logger/Crypto Logger-Private Repo/s2_staging_probe.py"
+          echo "Public branch: staging"
+          echo "Private branch: staging"
+          echo "Provider calls: disabled"
+          echo "VPN credentials: not loaded"
+          echo "Remote writes: disabled"
+          echo "Neon writes: disabled"
+
+      - name: "05 Setup Python 3.13"
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: private_logger/Crypto Logger-Private Repo/requirements-dev.lock
+
+      - name: "06 Install hash-locked development dependencies"
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: >-
+          python -m pip install
+          --require-hashes
+          --only-binary=:all:
+          --requirement "private_logger/Crypto Logger-Private Repo/requirements-dev.lock"
+
+      - name: "07 Compile all private Python"
+        run: >-
+          python -m compileall -q
+          "private_logger/Crypto Logger-Private Repo"
+          "private_logger/Neon Sync"
+          "private_logger/Neon Weekly Audit"
+
+      - name: "08 Run complete private regression suite"
+        working-directory: private_logger
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}/private_logger/Crypto Logger-Private Repo:${GITHUB_WORKSPACE}/private_logger/Crypto Logger-Private Repo/windows_debug_helper:${GITHUB_WORKSPACE}/private_logger/Crypto Logger-Private Repo/vpn_auth_recovery:${GITHUB_WORKSPACE}/private_logger/Neon Sync:${GITHUB_WORKSPACE}/private_logger/Neon Weekly Audit"
+          while IFS= read -r -d '' test_file; do
+            python "$test_file"
+          done < <(
+            find \
+              "Crypto Logger-Private Repo" \
+              "Neon Sync" \
+              "Neon Weekly Audit" \
+              -type f -name 'test_*.py' -print0 | sort -z
+          )
+
+      - name: "09 Run focused S2 fault simulations"
+        working-directory: private_logger/Crypto Logger-Private Repo
+        run: |
+          set -euo pipefail
+          python -m unittest -v \
+            tests.test_provider_network_recovery \
+            tests.test_provider_error_classification.RuntimeBudgetTests \
+            tests.test_network_security.NetworkManagerSecurityTests.test_reconnect_tears_down_managed_tunnel_before_connecting_again
+
+      - name: "10 Run critical static and security checks"
+        run: |
+          set -euo pipefail
+          python -m ruff check --select E9,F63,F7,F82 \
+            "private_logger/Crypto Logger-Private Repo"
+          python -m bandit --quiet --recursive \
+            --severity-level medium --confidence-level medium \
+            --exclude "private_logger/Crypto Logger-Private Repo/tests,private_logger/Crypto Logger-Private Repo/windows_debug_helper/test_crypto_debug_helper.py" \
+            "private_logger/Crypto Logger-Private Repo"
+
+      - name: "11 Publish staging-only summary"
+        if: always()
+        run: |
+          {
+            echo "## Crypto Logger | S2 Staging"
+            echo ""
+            echo "- Public branch: staging"
+            echo "- Private branch: staging"
+            echo "- RATE_LIMIT → one VPN2 switch: simulated"
+            echo "- NETWORK_ERROR → reconnect, then VPN2: simulated"
+            echo "- SERVER_ERROR/AUTH_ERROR → no switch: simulated"
+            echo "- Provider/VPN secrets: not loaded"
+            echo "- Remote CSV/state writes: disabled"
+            echo "- Neon writes: disabled"
+            echo "- Production main: untouched"
+          } >> "$GITHUB_STEP_SUMMARY"
