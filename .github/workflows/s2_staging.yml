@@ -1,5 +1,5 @@
 name: "Crypto Logger | S2 Staging"
-run-name: "S2 Staging Safety Tests | #${{ github.run_number }}"
+run-name: "S2 Staging | Safety & Regression Tests"
 
 on:
   push:
@@ -34,13 +34,13 @@ jobs:
           ref: staging
           persist-credentials: false
 
-      - name: "03 Require private read-only token"
+      - name: "03 Require effective private read-only token"
         env:
-          PRIVATE_CODE_READ_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN }}
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$PRIVATE_CODE_READ_TOKEN" || {
-            echo "PRIVATE_CODE_READ_TOKEN is missing. Add a fine-grained read-only token for the private repository."
+          test -n "$PRIVATE_CODE_TOKEN" || {
+            echo "PRIVATE_CODE_READ_TOKEN/PRIVATE_REPO_TOKEN is missing."
             exit 1
           }
 
@@ -48,7 +48,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ref: staging
           path: private_logger
           fetch-depth: 1
