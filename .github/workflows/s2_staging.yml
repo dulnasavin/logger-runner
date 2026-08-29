@@ -2,6 +2,9 @@ name: "Crypto Logger | S2 Staging"
 run-name: "S2 Staging Safety Tests | #${{ github.run_number }}"
 
 on:
+  push:
+    branches:
+      - staging
   workflow_dispatch:
 
 permissions:
