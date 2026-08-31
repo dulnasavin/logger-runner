@@ -40,17 +40,15 @@ replace_once(
     "compile S2 files",
 )
 
-start_marker = """      # ======================================================================
-      # SECTION 16 - RESET AND VALIDATE NETWORK MANAGER
-"""
-end_marker = """      # ======================================================================
-      # SECTION 23 - RECORD PRODUCTION CSV STATE BEFORE LOGGER
-"""
+start_marker = "# SECTION 16 - RESET AND VALIDATE NETWORK MANAGER"
+end_marker = "# SECTION 23 - RECORD PRODUCTION CSV STATE BEFORE LOGGER"
 if text.count(start_marker) != 1 or text.count(end_marker) != 1:
     raise SystemExit("network integration markers are missing or ambiguous")
 start = text.index(start_marker)
+start = text.rfind("      # ======================================================================", 0, start)
 end = text.index(end_marker)
-if end <= start:
+end = text.rfind("      # ======================================================================", 0, end)
+if start < 0 or end <= start:
     raise SystemExit("network integration markers are out of order")
 
 new_network_block = """      # ======================================================================
@@ -178,11 +176,25 @@ replace_once(
     '            (.decisions | type == "object" and length == 11)',
     "provider report S2 schema",
 )
-replace_once(
-    '          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"',
-    '          MANAGER="private_logger/Crypto Logger-Private Repo/s2_network_manager.py"',
-    "disconnect manager",
-)
+
+section25_marker = "# SECTION 25 - DISCONNECT VPN BEFORE GIT/GITHUB TRAFFIC"
+section26_marker = "# SECTION 26 - VALIDATE PRODUCTION CSV OUTPUT"
+if text.count(section25_marker) != 1 or text.count(section26_marker) != 1:
+    raise SystemExit("cleanup section markers are missing or ambiguous")
+section25 = text.index(section25_marker)
+section26 = text.index(section26_marker)
+if section26 <= section25:
+    raise SystemExit("cleanup section markers are out of order")
+cleanup_block = text[section25:section26]
+old_manager = '          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"'
+new_manager = '          MANAGER="private_logger/Crypto Logger-Private Repo/s2_network_manager.py"'
+if cleanup_block.count(old_manager) != 1:
+    raise SystemExit(
+        f"disconnect manager in section 25: expected exactly one match, found {cleanup_block.count(old_manager)}"
+    )
+cleanup_block = cleanup_block.replace(old_manager, new_manager, 1)
+text = text[:section25] + cleanup_block + text[section26:]
+
 replace_once(
     '            echo "## 🚀 Crypto Logger | Main | Production S1.5"',
     '            echo "## 🚀 Crypto Logger | Main | Production S2"',
