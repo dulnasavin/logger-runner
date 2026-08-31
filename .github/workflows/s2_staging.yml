@@ -59,6 +59,7 @@ jobs:
           set -euo pipefail
           test "$(git -C private_logger branch --show-current)" = "staging"
           test -s "private_logger/Crypto Logger-Private Repo/provider_network_recovery.py"
+          test -s "private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
           test -s "private_logger/Crypto Logger-Private Repo/s2_staging_probe.py"
           echo "Public branch: staging"
           echo "Private branch: staging"
@@ -112,6 +113,7 @@ jobs:
           python -m unittest -v \
             tests.test_provider_network_recovery \
             tests.test_recovery_controller_retry \
+            tests.test_s2_network_manager \
             tests.test_provider_error_classification.RuntimeBudgetTests \
             tests.test_network_security.NetworkManagerSecurityTests.test_reconnect_tears_down_managed_tunnel_before_connecting_again
 
@@ -249,7 +251,7 @@ jobs:
           ' "$BOOTSTRAP" >/dev/null
           STARTUP_NETWORK="$(jq -r '.startup_network' "$BOOTSTRAP")"
           echo "STARTUP_NETWORK=$STARTUP_NETWORK" >> "$GITHUB_ENV"
-          python "private_logger/Crypto Logger-Private Repo/network_manager.py" status
+          python "private_logger/Crypto Logger-Private Repo/s2_network_manager.py" status
           echo "✅ Bootstrap completed on ${STARTUP_NETWORK}"
 
       - name: "L08 Exercise real bounded S2 failover when VPN1 is primary"
@@ -271,7 +273,7 @@ jobs:
         run: |
           set -euo pipefail
           STATUS="${RUNNER_TEMP}/s2-final-status.json"
-          python "private_logger/Crypto Logger-Private Repo/network_manager.py" status | tee "$STATUS"
+          python "private_logger/Crypto Logger-Private Repo/s2_network_manager.py" status | tee "$STATUS"
           grep -q '"running": true' "$STATUS"
           SWITCH_COUNT="$(jq -r '.switch_count' "$STATUS")"
           test "$SWITCH_COUNT" -le 1
@@ -282,7 +284,7 @@ jobs:
         env: *network_env
         run: |
           set +e
-          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
+          MANAGER="private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
           [ -f "$MANAGER" ] && python "$MANAGER" reset
 
       - name: "L11 Prove staging made no production-data writes"
