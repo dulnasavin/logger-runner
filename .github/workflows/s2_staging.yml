@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: crypto-logger-s2-staging
@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: staging
-          persist-credentials: true
+          persist-credentials: false
 
       - name: "03 Require effective private read-only token"
         env:
@@ -64,7 +64,7 @@ jobs:
           echo "Public branch: staging"
           echo "Private branch: staging"
           echo "Runtime-data checkout: disabled"
-          echo "Remote writes: disabled except the one guarded S2 staging patch commit"
+          echo "Remote writes: disabled"
           echo "Neon credentials/writes: disabled"
 
       - name: "06 Setup Python 3.13"
@@ -127,7 +127,7 @@ jobs:
             --exclude "private_logger/Crypto Logger-Private Repo/tests,private_logger/Crypto Logger-Private Repo/windows_debug_helper/test_crypto_debug_helper.py" \
             "private_logger/Crypto Logger-Private Repo"
 
-      - name: "12 Apply exact S2 production-runner staging patch"
+      - name: "12 Build exact S2 production-runner candidate"
         run: |
           set -euo pipefail
           test -s scripts/s2_patch_crypto_runner.py
@@ -139,19 +139,23 @@ jobs:
             printf '%s\n' "$CHANGED"
             exit 1
           }
-          git rm -- scripts/s2_patch_crypto_runner.py
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add -- .github/workflows/crypto_runner.yml
-          STAGED="$(git diff --cached --name-only | sort)"
-          EXPECTED="$(printf '%s\n' '.github/workflows/crypto_runner.yml' 'scripts/s2_patch_crypto_runner.py' | sort)"
-          test "$STAGED" = "$EXPECTED" || {
-            echo "Unexpected staged patch scope:"
-            printf '%s\n' "$STAGED"
-            exit 1
-          }
-          git commit -m "Integrate bounded S2 recovery into production runner candidate"
-          git push origin HEAD:staging
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          target = Path('.github/workflows/crypto_runner.yml')
+          parsed = yaml.safe_load(target.read_text(encoding='utf-8'))
+          if not isinstance(parsed, dict) or 'jobs' not in parsed:
+              raise SystemExit('Patched workflow is not a valid workflow mapping')
+          print('✅ Patched crypto_runner.yml parses as YAML')
+          PY
+
+      - name: "13 Upload exact S2 production-runner candidate"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: s2-crypto-runner-candidate-${{ github.run_id }}
+          path: .github/workflows/crypto_runner.yml
+          if-no-files-found: error
+          retention-days: 1
 
   live-network-verification:
     if: github.event_name == 'workflow_dispatch'
