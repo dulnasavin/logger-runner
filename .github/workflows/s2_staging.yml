@@ -128,6 +128,7 @@ jobs:
             "private_logger/Crypto Logger-Private Repo"
 
   live-network-verification:
+    if: github.event_name == 'workflow_dispatch'
     name: Live VPN bootstrap and bounded failover
     needs: offline-tests
     runs-on: ubuntu-latest
