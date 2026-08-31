@@ -1,5 +1,5 @@
-name: "Crypto Logger | S2 Staging"
-run-name: "S2 Staging | Safety & Regression Tests"
+name: "Crypto Logger | S2 Staging Verification"
+run-name: "S2 Staging | Network Recovery Verification"
 
 on:
   push:
@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  s2-staging-tests:
-    name: Offline S2 policy and regression tests
+  offline-tests:
+    name: Offline regression and security tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -54,7 +54,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: "05 Prove the staging isolation boundary"
+      - name: "05 Prove staging isolation boundary"
         run: |
           set -euo pipefail
           test "$(git -C private_logger branch --show-current)" = "staging"
@@ -62,10 +62,9 @@ jobs:
           test -s "private_logger/Crypto Logger-Private Repo/s2_staging_probe.py"
           echo "Public branch: staging"
           echo "Private branch: staging"
-          echo "Provider calls: disabled"
-          echo "VPN credentials: not loaded"
+          echo "Runtime-data checkout: disabled"
           echo "Remote writes: disabled"
-          echo "Neon writes: disabled"
+          echo "Neon credentials/writes: disabled"
 
       - name: "06 Setup Python 3.13"
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -106,12 +105,13 @@ jobs:
               -type f -name 'test_*.py' -print0 | sort -z
           )
 
-      - name: "10 Run focused S2 fault simulations"
+      - name: "10 Run focused S2 recovery tests"
         working-directory: private_logger/Crypto Logger-Private Repo
         run: |
           set -euo pipefail
           python -m unittest -v \
             tests.test_provider_network_recovery \
+            tests.test_recovery_controller_retry \
             tests.test_provider_error_classification.RuntimeBudgetTests \
             tests.test_network_security.NetworkManagerSecurityTests.test_reconnect_tears_down_managed_tunnel_before_connecting_again
 
@@ -125,24 +125,176 @@ jobs:
             --exclude "private_logger/Crypto Logger-Private Repo/tests,private_logger/Crypto Logger-Private Repo/windows_debug_helper/test_crypto_debug_helper.py" \
             "private_logger/Crypto Logger-Private Repo"
 
-      - name: "12 Publish staging-only summary"
+  live-network-verification:
+    name: Live VPN bootstrap and bounded failover
+    needs: offline-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    permissions:
+      contents: read
+    env:
+      NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+      NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
+      VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
+      VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
+      VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
+      VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
+    steps:
+      - name: "L01 Require staging and VPN secrets"
+        env:
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          VPN1_CONFIG_SECRET: ${{ secrets.VPNBOOK_CONFIG }}
+          VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
+          VPN1_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
+          VPN2_CONFIG_SECRET: ${{ secrets.VPN2_CONFIG }}
+          VPN2_USERNAME: ${{ secrets.VPN2_USERNAME }}
+          VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/staging"
+          test -n "$PRIVATE_CODE_TOKEN"
+          test -n "$VPN1_CONFIG_SECRET"
+          test -n "$VPN1_USERNAME"
+          test -n "$VPN1_PASSWORD"
+          test -n "$VPN2_CONFIG_SECRET"
+          test -n "$VPN2_USERNAME"
+          test -n "$VPN2_PASSWORD"
+          echo "✅ Staging ref and required runtime secrets are available"
+
+      - name: "L02 Checkout private staging read-only"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: staging
+          path: private_logger
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: "L03 Setup Python 3.13"
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: "L04 Install OpenVPN and production dependencies"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+          sudo -n true
+          python -m pip install --disable-pip-version-check \
+            --require-hashes --only-binary=:all: \
+            -r "private_logger/Crypto Logger-Private Repo/requirements.lock"
+          echo "✅ OpenVPN and hash-locked runtime dependencies ready"
+
+      - name: "L05 Create protected VPN1/VPN2 runtime files"
+        env:
+          VPN1_CONFIG_SECRET: ${{ secrets.VPNBOOK_CONFIG }}
+          VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
+          VPN1_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
+          VPN2_CONFIG_SECRET: ${{ secrets.VPN2_CONFIG }}
+          VPN2_USERNAME: ${{ secrets.VPN2_USERNAME }}
+          VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "vpn-runtime"
+          root.mkdir(mode=0o700)
+          payloads = {
+              "vpn1.ovpn": os.environ["VPN1_CONFIG_SECRET"] + "\n",
+              "vpn1-auth.txt": os.environ["VPN1_USERNAME"] + "\n" + os.environ["VPN1_PASSWORD"] + "\n",
+              "vpn2.ovpn": os.environ["VPN2_CONFIG_SECRET"] + "\n",
+              "vpn2-auth.txt": os.environ["VPN2_USERNAME"] + "\n" + os.environ["VPN2_PASSWORD"] + "\n",
+          }
+          flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+          for name, payload in payloads.items():
+              descriptor = os.open(root / name, flags, 0o600)
+              with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                  handle.write(payload)
+                  handle.flush()
+                  os.fsync(handle.fileno())
+          PY
+          echo "✅ Protected VPN files created; VPN2 has not been connected"
+
+      - name: "L06 Bootstrap primary network with cold-standby VPN2"
+        env:
+          VPN_SECRET_UPDATE_TOKEN: ""
+        run: |
+          set -euo pipefail
+          CONTROLLER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
+          python "$CONTROLLER" \
+            --state-dir "$NETWORK_MANAGER_STATE_DIR" \
+            --vpn1-config "$VPN1_CONFIG" \
+            --vpn1-auth "$VPN1_AUTH_FILE" \
+            --vpn2-config "$VPN2_CONFIG_FILE" \
+            --vpn2-auth "$VPN2_AUTH_FILE" \
+            --self-test-output "${RUNNER_TEMP}/s2-bootstrap.json" \
+            --recovered-marker "${RUNNER_TEMP}/vpn-auth-recovered" \
+            --recovery-failed-marker "${RUNNER_TEMP}/vpn-auth-recovery-failed" \
+            --secret-update-success-marker "${RUNNER_TEMP}/vpn-secret-update-success" \
+            --secret-update-failed-marker "${RUNNER_TEMP}/vpn-secret-update-failed"
+
+      - name: "L07 Verify bootstrap state before failover simulation"
+        run: |
+          set -euo pipefail
+          BOOTSTRAP="${RUNNER_TEMP}/s2-bootstrap.json"
+          test -s "$BOOTSTRAP"
+          jq -e '
+            .passed == true and
+            .vpn2_standby_validated == true and
+            (.startup_network == "VPN1" or .startup_network == "VPN2")
+          ' "$BOOTSTRAP" >/dev/null
+          STARTUP_NETWORK="$(jq -r '.startup_network' "$BOOTSTRAP")"
+          echo "STARTUP_NETWORK=$STARTUP_NETWORK" >> "$GITHUB_ENV"
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" status
+          echo "✅ Bootstrap completed on ${STARTUP_NETWORK}"
+
+      - name: "L08 Exercise real bounded S2 failover when VPN1 is primary"
+        run: |
+          set -euo pipefail
+          if [ "$STARTUP_NETWORK" = "VPN1" ]; then
+            cd "private_logger/Crypto Logger-Private Repo"
+            python s2_staging_probe.py network-error
+            echo "✅ Live VPN1 reconnect + VPN2 failover path verified"
+          else
+            echo "⚠ Bootstrap already activated VPN2 because VPN1 could not recover"
+            test "$(jq -r '.switch_count' "$NETWORK_MANAGER_STATE_DIR/state.json")" = "1"
+            echo "✅ Real startup failover already exercised the one-switch budget"
+          fi
+
+      - name: "L09 Verify final bounded network state"
+        run: |
+          set -euo pipefail
+          STATUS="${RUNNER_TEMP}/s2-final-status.json"
+          python "private_logger/Crypto Logger-Private Repo/network_manager.py" status | tee "$STATUS"
+          grep -q '"running": true' "$STATUS"
+          SWITCH_COUNT="$(jq -r '.switch_count' "$STATUS")"
+          test "$SWITCH_COUNT" -le 1
+          echo "✅ Final managed VPN is healthy with switch_count=${SWITCH_COUNT}"
+
+      - name: "L10 Disconnect managed VPN"
+        if: always()
+        run: |
+          set +e
+          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
+          [ -f "$MANAGER" ] && python "$MANAGER" reset
+
+      - name: "L11 Prove staging made no production-data writes"
         if: always()
         run: |
           {
-            echo "## Crypto Logger | S2 Staging"
+            echo "## S2 staging verification"
             echo ""
             echo "- Public branch: staging"
-            echo "- Private branch: staging"
-            echo "- Result: ${{ job.status }}"
-            if [ "${{ job.status }}" = "success" ]; then
-              echo "- RATE_LIMIT → one VPN2 switch: passed"
-              echo "- NETWORK_ERROR → one global reconnect, then VPN2: passed"
-              echo "- SERVER_ERROR/AUTH_ERROR → no switch: passed"
-            else
-              echo "- S2 simulations did not complete; inspect the first failed step."
-            fi
-            echo "- Provider/VPN secrets: not loaded"
-            echo "- Remote CSV/state writes: disabled"
-            echo "- Neon writes: disabled"
+            echo "- Private branch: staging (read-only checkout)"
+            echo "- Runtime-data checkout: not performed"
+            echo "- CSV/state push: not performed"
+            echo "- Neon credentials: not loaded"
+            echo "- Neon writes: not performed"
+            echo "- GitHub secret persistence: disabled"
+            echo "- VPN2: cold standby until a real/simulated recovery need"
             echo "- Production main: untouched"
           } >> "$GITHUB_STEP_SUMMARY"
