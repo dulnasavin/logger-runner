@@ -77,10 +77,12 @@ jobs:
           persist-credentials: false
 
       - name: "07 Prove non-production boundary"
+        env:
+          EXPECTED_RELEASE_SHA: ${{ steps.release.outputs.private_code_sha }}
         run: |
           set -euo pipefail
           test "$(git -C private_logger branch --show-current)" = "staging"
-          test "$(git -C private_release rev-parse HEAD)" = "${{ steps.release.outputs.private_code_sha }}"
+          test "$(git -C private_release rev-parse HEAD)" = "$EXPECTED_RELEASE_SHA"
           test -s "private_logger/Crypto Logger-Private Repo/provider_network_recovery.py"
           test -s "private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
           test -s "private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
