@@ -1,5 +1,5 @@
-name: "Crypto Logger | S2 Staging Verification"
-run-name: "S2 Staging | Regression & Security"
+name: "Crypto Logger | S2 Staging"
+run-name: "S2 Staging | Safety & Regression Tests"
 
 on:
   push:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   offline-tests:
-    name: Offline regression and security tests
+    name: Safety, regression and S2 fault tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
