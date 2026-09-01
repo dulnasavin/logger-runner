@@ -1,5 +1,5 @@
 name: "Neon Schema | Controlled Migration"
-run-name: "Neon Schema | ${{ vars.PRIVATE_CODE_SHA }} | #${{ github.run_number }}"
+run-name: "Neon Schema | Controlled Migration | #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -14,7 +14,6 @@ permissions:
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
 
 concurrency:
   group: crypto-runtime-data
@@ -29,13 +28,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout protected public release authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate enabled Neon capability
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability neon
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Validate pinned source and secrets
         env:
           PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
           set -euo pipefail
-          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
           test -n "$PRIVATE_CODE_TOKEN"
           test -n "$NEON_DATABASE_URL"
 
@@ -44,7 +56,7 @@ jobs:
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ env.PRIVATE_CODE_SHA }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
           path: private_source
           fetch-depth: 1
           persist-credentials: false
@@ -85,6 +97,8 @@ jobs:
 
       - name: Publish migration summary
         if: success()
+        env:
+          PRIVATE_CODE_SHA: ${{ steps.release.outputs.private_code_sha }}
         run: |
           {
             echo "## Neon schema migration"

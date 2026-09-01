@@ -11,15 +11,15 @@ permissions:
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
   PRIVATE_DATA_BRANCH: runtime-data
 
 # ============================================================================
-# CRYPTO PRICE LOGGER - PRODUCTION S1.5
-# NETWORK SELF-HEALING + THREE-SOURCE PRICE CONSENSUS
+# CRYPTO PRICE LOGGER - PRODUCTION S2
+# BOUNDED NETWORK RECOVERY + THREE-SOURCE PRICE CONSENSUS
 # ============================================================================
 # Production rules:
-# - Public main executes one explicitly pinned private source commit.
+# - Protected public release authority selects one full private source commit.
+# - Mutable repository variables cannot select or enable production code.
 # - Runtime CSV/state lives on the dedicated private runtime-data branch.
 # - Only price_log.csv, csv_state.json, provider_incident_state.json, and the
 #   non-secret runtime manifest may be written by this workflow.
@@ -27,13 +27,13 @@ env:
 # - Only AUTH_FAILED triggers live VPNBook credential recovery.
 # - Live credentials are fetched only from the official VPNBook OpenVPN page.
 # - Retrieved credentials are masked before reuse.
-# - Recovery receives exactly one complete VPN1/VPN2 retry.
-# - VPN1 and VPN2 must prove different public exit IPs.
+# - VPN1 is the primary collection network; VPN2 is validated as cold standby.
+# - Transient VPN1 startup failures receive one bounded retry, then one VPN2 failover.
 # - GitHub Actions secrets are updated only after recovered credentials prove
 #   valid through the complete VPN test.
 # - Secret-update failure does not kill an already recovered price-logger run.
 # - Recovery failure stops the workflow and may send a private email alert.
-# - Provider-triggered VPN switching is NOT wired yet in S1.
+# - Provider-triggered recovery is enabled with one global VPN2 switch ceiling.
 # - Coinbase and Binance are authenticated primaries; CoinGecko validates.
 # - Cached estimates are labelled and automatically disable trading eligibility.
 # - Provider alerts send only on incident start, severity change, and recovery.
@@ -52,6 +52,10 @@ jobs:
     timeout-minutes: 2
     permissions:
       contents: read
+    outputs:
+      private_code_sha: ${{ steps.release.outputs.private_code_sha }}
+      neon_state: ${{ steps.release.outputs.neon_state }}
+      manifest_sha256: ${{ steps.release.outputs.manifest_sha256 }}
     steps:
       - name: Require the protected public main ref
         run: |
@@ -60,10 +64,20 @@ jobs:
             echo "Production may run only from refs/heads/main; received ${GITHUB_REF}"
             exit 1
           }
-          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
-            echo "PRIVATE_CODE_SHA repository variable must be one full 40-character commit SHA"
-            exit 1
-          }
+
+      - name: Checkout protected public release authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate enabled logger release capability
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability logger
+          --github-output "$GITHUB_OUTPUT"
 
   run-logger:
     name: Run, persist, and notify exact logger batch
@@ -72,6 +86,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      PRIVATE_CODE_SHA: ${{ needs.validate-invocation.outputs.private_code_sha }}
     outputs:
       core_commit_sha: ${{ steps.verify_core.outputs.core_commit_sha }}
       source_code_sha: ${{ steps.verify_core.outputs.source_code_sha }}
@@ -101,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "============================================================"
-          echo "🚀 CRYPTO PRICE LOGGER - PRODUCTION S1"
+          echo "🚀 CRYPTO PRICE LOGGER - PRODUCTION S2"
           echo "============================================================"
           echo "UTC time:        $(date -u)"
           echo "Repository:      ${GITHUB_REPOSITORY}"
@@ -193,6 +209,9 @@ jobs:
             "$LOGGER_DIR/provider_consensus.py" \
             "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
+            "$LOGGER_DIR/s2_network_manager.py" \
+            "$LOGGER_DIR/provider_network_recovery.py" \
+            "$LOGGER_DIR/vpn_profile_normalizer.py" \
             "$LOGGER_DIR/requirements.lock" \
             "$LOGGER_DIR/tests/test_csv_integrity.py" \
             "$LOGGER_DIR/tests/test_provider_consensus.py" \
@@ -250,6 +269,9 @@ jobs:
             "$LOGGER_DIR/provider_consensus.py" \
             "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
+            "$LOGGER_DIR/s2_network_manager.py" \
+            "$LOGGER_DIR/provider_network_recovery.py" \
+            "$LOGGER_DIR/vpn_profile_normalizer.py" \
             "$RECOVERY_DIR/recovery_controller.py" \
             "$RECOVERY_DIR/vpnbook_credentials.py" \
             "$RECOVERY_DIR/github_secret_updater.py" \
@@ -413,9 +435,9 @@ jobs:
           echo "✅ Protected VPN runtime files created"
 
       # ======================================================================
-      # SECTION 16 - RESET AND VALIDATE NETWORK MANAGER
+      # SECTION 16 - PREPARE S2 NETWORK MANAGER RUNTIME
       # ======================================================================
-      - name: "16.1 Reset network manager state"
+      - name: "16.1 Prepare S2 network runtime boundary"
         env: &network_env
           NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
           NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
@@ -425,45 +447,38 @@ jobs:
           VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
         run: |
           set -euo pipefail
-          python "private_logger/Crypto Logger-Private Repo/network_manager.py" reset
-
-      - name: "16.2 Validate both VPN profiles"
-        env: *network_env
-        run: |
-          set -euo pipefail
-          python "private_logger/Crypto Logger-Private Repo/network_manager.py" validate-all
-          echo "✅ Network manager and both VPN profiles validated"
-
-      # ======================================================================
-      # SECTION 17 - VERIFY NETWORK POLICY MAP
-      # ======================================================================
-      - name: "17.1 Verify S1 network policy classifications"
-        run: |
-          set -euo pipefail
-          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
-          python "$MANAGER" policy --error-type RATE_LIMIT
-          python "$MANAGER" policy --error-type NETWORK_ERROR
-          python "$MANAGER" policy --error-type SERVER_ERROR
-          python "$MANAGER" policy --error-type AUTH_ERROR
-          echo "✅ S1 network policy map validated"
+          test -s "private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
+          test -s "private_logger/Crypto Logger-Private Repo/provider_network_recovery.py"
+          test -s "private_logger/Crypto Logger-Private Repo/vpn_profile_normalizer.py"
+          test -s "$VPN1_CONFIG"
+          test -s "$VPN1_AUTH_FILE"
+          test -s "$VPN2_CONFIG_FILE"
+          test -s "$VPN2_AUTH_FILE"
+          echo "✅ S2 Network Manager is ready before any network-sensitive provider work"
 
       # ======================================================================
-      # SECTION 18 - RUN AUTH SELF-HEALING + FULL VPN QUALIFICATION
+      # SECTION 18 - BOOTSTRAP VPN1 + AUTH RECOVERY + COLD-STANDBY VPN2
       # ======================================================================
-      - name: "18.1 Run stored-auth test and automatic VPNBook recovery"
+      - name: "18.1 Bootstrap managed network and recover VPNBook auth if required"
         id: vpn_auth_recovery
         env:
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
+          VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
           VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
         run: |
           set -euo pipefail
           CONTROLLER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
           python "$CONTROLLER" \
-            --state-dir "${RUNNER_TEMP}/network-manager" \
-            --vpn1-config "${RUNNER_TEMP}/vpn-runtime/vpn1.ovpn" \
-            --vpn1-auth "${RUNNER_TEMP}/vpn-runtime/vpn1-auth.txt" \
-            --vpn2-config "${RUNNER_TEMP}/vpn-runtime/vpn2.ovpn" \
-            --vpn2-auth "${RUNNER_TEMP}/vpn-runtime/vpn2-auth.txt" \
-            --self-test-output "${RUNNER_TEMP}/s1-self-test.json" \
+            --state-dir "$NETWORK_MANAGER_STATE_DIR" \
+            --vpn1-config "$VPN1_CONFIG" \
+            --vpn1-auth "$VPN1_AUTH_FILE" \
+            --vpn2-config "$VPN2_CONFIG_FILE" \
+            --vpn2-auth "$VPN2_AUTH_FILE" \
+            --self-test-output "${RUNNER_TEMP}/s2-bootstrap.json" \
             --recovered-marker "${RUNNER_TEMP}/vpn-auth-recovered" \
             --recovery-failed-marker "${RUNNER_TEMP}/vpn-auth-recovery-failed" \
             --secret-update-success-marker "${RUNNER_TEMP}/vpn-secret-update-success" \
@@ -473,16 +488,27 @@ jobs:
             --update-vpn2-secrets
 
       # ======================================================================
-      # SECTION 19 - VERIFY VPN1/VPN2 SELF-TEST RESULTS
+      # SECTION 19 - VERIFY THE MANAGED STARTUP NETWORK
       # ======================================================================
-      - name: "19.1 Verify S1 qualification result"
+      - name: "19.1 Verify S2 bootstrap and bounded network state"
+        env: *network_env
         run: |
           set -euo pipefail
-          test -s "${RUNNER_TEMP}/s1-self-test.json"
-          cat "${RUNNER_TEMP}/s1-self-test.json"
-          grep -q '"passed": true' "${RUNNER_TEMP}/s1-self-test.json"
-          grep -q '"different_public_ips": true' "${RUNNER_TEMP}/s1-self-test.json"
-          echo "✅ VPN1 and VPN2 passed with different public IPs"
+          BOOTSTRAP="${RUNNER_TEMP}/s2-bootstrap.json"
+          STATUS="${RUNNER_TEMP}/network-manager-status.json"
+          test -s "$BOOTSTRAP"
+          jq -e '
+            .passed == true and
+            .vpn2_standby_validated == true and
+            (.startup_network == "VPN1" or .startup_network == "VPN2")
+          ' "$BOOTSTRAP" >/dev/null
+          STARTUP_NETWORK="$(jq -r '.startup_network' "$BOOTSTRAP")"
+          echo "STARTUP_NETWORK=$STARTUP_NETWORK" >> "$GITHUB_ENV"
+          python "private_logger/Crypto Logger-Private Repo/s2_network_manager.py" status | tee "$STATUS"
+          grep -q '"running": true' "$STATUS"
+          SWITCH_COUNT="$(jq -r '.switch_count' "$STATUS")"
+          test "$SWITCH_COUNT" -le 1
+          echo "✅ S2 bootstrap verified on ${STARTUP_NETWORK}; VPN2 remains cold unless recovery required"
 
       # ======================================================================
       # SECTION 20 - REPORT AUTH RECOVERY / SECRET UPDATE OUTCOME
@@ -502,74 +528,6 @@ jobs:
             echo "⚠ GitHub VPN secret update failed; current run may continue"
           else
             echo "ℹ GitHub VPN secret update was not required"
-          fi
-
-      # ======================================================================
-      # SECTION 21 - ESTABLISH FRESH VPN1 PRODUCTION COLLECTION SESSION
-      # ======================================================================
-      - name: "21.1 Reset after S1 qualification"
-        env: *network_env
-        run: |
-          set -euo pipefail
-          python "private_logger/Crypto Logger-Private Repo/network_manager.py" reset
-
-      - name: "21.2 Connect fresh VPN1 production session"
-        env: *network_env
-        run: |
-          set -euo pipefail
-          python "private_logger/Crypto Logger-Private Repo/network_manager.py" connect --network VPN1
-
-      - name: "21.3 Verify VPN1 production session"
-        env: *network_env
-        run: |
-          set -euo pipefail
-          STATUS_FILE="${RUNNER_TEMP}/network-manager-status.json"
-          python "private_logger/Crypto Logger-Private Repo/network_manager.py" status | tee "$STATUS_FILE"
-          grep -q '"active_network": "VPN1"' "$STATUS_FILE"
-          grep -q '"running": true' "$STATUS_FILE"
-          grep -q '"switch_count": 0' "$STATUS_FILE"
-          echo "✅ Fresh VPN1 production session verified"
-
-      # ======================================================================
-      # SECTION 22 - PROVIDER CONNECTIVITY PROBES
-      # ======================================================================
-      - name: "22.1 Probe Coinbase through VPN1 (diagnostic)"
-        run: |
-          set +e
-          HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/coinbase-probe.txt" --write-out "%{http_code}" https://api.coinbase.com/api/v3/brokerage/time)"
-          CURL_EXIT=$?
-          if [ "$CURL_EXIT" -ne 0 ]; then
-            echo "::warning::Coinbase diagnostic transport failure (curl exit ${CURL_EXIT}, HTTP ${HTTP_CODE:-000}); authenticated and public Coinbase calls will classify the failure"
-          elif [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Coinbase diagnostic HTTP 200"
-          else
-            echo "::warning::Coinbase diagnostic HTTP ${HTTP_CODE}; the logger will use bounded retries and its provider hierarchy"
-          fi
-
-      - name: "22.2 Probe CoinGecko through VPN1 (diagnostic)"
-        run: |
-          set +e
-          HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/coingecko-probe.txt" --write-out "%{http_code}" https://api.coingecko.com/api/v3/ping)"
-          CURL_EXIT=$?
-          if [ "$CURL_EXIT" -ne 0 ]; then
-            echo "::warning::CoinGecko diagnostic transport failure (curl exit ${CURL_EXIT}, HTTP ${HTTP_CODE:-000}); the multi-provider logger will decide whether fallback data is sufficient"
-          elif [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ CoinGecko diagnostic HTTP 200"
-          else
-            echo "::warning::CoinGecko diagnostic HTTP ${HTTP_CODE}; continuing because price_logger.py supports Binance and cached fallback paths"
-          fi
-
-      - name: "22.3 Probe Binance through VPN1 (diagnostic)"
-        run: |
-          set +e
-          HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "${RUNNER_TEMP}/binance-probe.txt" --write-out "%{http_code}" https://api.binance.com/api/v3/time)"
-          CURL_EXIT=$?
-          if [ "$CURL_EXIT" -ne 0 ]; then
-            echo "::warning::Binance diagnostic transport failure (curl exit ${CURL_EXIT}, HTTP ${HTTP_CODE:-000}); the multi-provider logger will perform its own classified retries and fallbacks"
-          elif [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Binance diagnostic HTTP 200"
-          else
-            echo "::warning::Binance diagnostic HTTP ${HTTP_CODE}; continuing because price_logger.py will classify the provider result and use available fallbacks"
           fi
 
       # ======================================================================
@@ -598,7 +556,7 @@ jobs:
       # ======================================================================
       # SECTION 24 - RUN THE PRODUCTION PRICE LOGGER
       # ======================================================================
-      - name: "24.1 Run price_logger.py on verified VPN1"
+      - name: "24.1 Run price_logger.py on managed S2 network"
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
@@ -607,6 +565,13 @@ jobs:
           CSV_RECOVERY_DIR: ${{ runner.temp }}/csv-recovery
           PROVIDER_REPORT_FILE: ${{ runner.temp }}/provider-report.json
           PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
+          CRYPTO_LOGGER_NETWORK_RECOVERY: "1"
+          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+          NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
+          VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
+          VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
+          VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
+          VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
@@ -629,6 +594,8 @@ jobs:
             .version == 1 and
             (.overall_severity | IN("HEALTHY", "WARNING", "CRITICAL")) and
             (.trading_allowed | type == "boolean") and
+            (.network_recovery.enabled == true) and
+            (.network_recovery.switch_count <= 1) and
             (.decisions | type == "object" and length == 11)
           ' "$REPORT" >/dev/null
           echo "Provider severity: $(jq -r '.overall_severity' "$REPORT")"
@@ -644,7 +611,7 @@ jobs:
         env: *network_env
         run: |
           set +e
-          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
+          MANAGER="private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
           [ -f "$MANAGER" ] && python "$MANAGER" reset
 
       - name: "25.2 Verify OpenVPN fully stopped"
@@ -934,7 +901,7 @@ jobs:
           fi
 
           {
-            echo "## 🚀 Crypto Logger | Main | Production S1.5"
+            echo "## 🚀 Crypto Logger | Main | Production S2"
             echo ""
             echo "### 1. Run identity"
             echo ""
@@ -947,13 +914,14 @@ jobs:
             echo ""
             echo "### 2. Network and recovery"
             echo ""
-            echo "- **VPN1 qualification:** Passed"
-            echo "- **VPN2 qualification:** Passed"
-            echo "- **Different public IPs:** Passed"
+            echo "- **Managed startup network:** ${STARTUP_NETWORK:-Unknown}"
+            echo "- **VPN2 cold-standby profile:** Validated"
             echo "- **VPNBook auth recovery:** ${AUTH_RECOVERY}"
             echo "- **GitHub VPN secret update:** ${SECRET_UPDATE}"
-            echo "- **Collection network:** VPN1"
-            echo "- **Provider-triggered VPN2 switching:** Not enabled yet"
+            echo "- **Provider-triggered network recovery:** Enabled"
+            echo "- **Successful reconnects:** $(jq -r '.network_recovery.reconnect_count // 0' "$REPORT")"
+            echo "- **Successful VPN2 switches:** $(jq -r '.network_recovery.switch_count // 0' "$REPORT")"
+            echo "- **Network after collection:** $(jq -r '.network_recovery.active_network // "unknown"' "$REPORT")"
             echo ""
             echo "### 3. Provider health"
             echo ""
@@ -1047,9 +1015,13 @@ jobs:
 
   sync-neon:
     name: Sync exact committed batch to Neon
-    needs: run-logger
+    needs:
+      - validate-invocation
+      - run-logger
     if: >-
       always() &&
+      needs.validate-invocation.result == 'success' &&
+      needs.validate-invocation.outputs.neon_state == 'enabled' &&
       needs.run-logger.outputs.core_commit_sha != '' &&
       needs.run-logger.outputs.source_code_sha != ''
     runs-on: ubuntu-latest

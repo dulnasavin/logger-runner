@@ -1,15 +1,28 @@
-name: "Neon Audit | Weekly"
-run-name: "Neon Audit | ${{ github.event_name == 'schedule' && 'Scheduled' || 'Manual' }}"
+name: "Neon Reconciliation | Controlled"
+run-name: "Neon Reconciliation | ${{ inputs.operation }}"
 
 on:
   workflow_dispatch:
     inputs:
-      confirmation:
-        description: "Type RUN_WEEKLY_AUDIT after testing on an isolated Neon branch"
+      operation:
+        description: "Preview an exact plan or apply one previously previewed plan"
         required: true
+        type: choice
+        options:
+          - preview
+          - apply-approved-plan
+      approved_plan_id:
+        description: "Required for apply: exact nrp-v1-* ID from a successful preview"
+        required: false
         type: string
-  schedule:
-    - cron: "0 0 * * 0"
+      confirmation:
+        description: "Required for apply: APPLY_NEON_RECONCILIATION"
+        required: false
+        type: string
+      change_reason:
+        description: "Required non-sensitive reason when applying a plan"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -17,25 +30,55 @@ permissions:
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
   PRIVATE_DATA_BRANCH: runtime-data
-  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
 
 concurrency:
   group: crypto-runtime-data
   cancel-in-progress: false
 
 jobs:
-  neon-audit:
-    name: Audit Neon against private runtime data
-    if: >-
-      (github.event_name == 'workflow_dispatch' &&
-       github.ref == 'refs/heads/main' &&
-       inputs.confirmation == 'RUN_WEEKLY_AUDIT') ||
-      (github.event_name == 'schedule' &&
-       vars.ENABLE_NEON_WEEKLY_AUDIT == 'true')
+  reconcile:
+    name: Preview or apply an immutable reconciliation plan
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Validate required secrets
+      - name: "01 Validate protected request"
+        env:
+          OPERATION: ${{ inputs.operation }}
+          APPROVED_PLAN_ID: ${{ inputs.approved_plan_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          CHANGE_REASON: ${{ inputs.change_reason }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          case "$OPERATION" in
+            preview) ;;
+            apply-approved-plan)
+              [[ "$APPROVED_PLAN_ID" =~ ^nrp-v1-[0-9a-f]{64}$ ]] || {
+                echo "Apply requires the exact nrp-v1-* ID from preview"
+                exit 1
+              }
+              test "$CONFIRMATION" = "APPLY_NEON_RECONCILIATION"
+              test -n "$CHANGE_REASON"
+              ;;
+            *) echo "Unsupported reconciliation operation"; exit 1 ;;
+          esac
+
+      - name: "01.2 Checkout protected public release authority"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: "01.3 Validate enabled Neon capability"
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability neon
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: "01.4 Validate required secrets"
         env:
           PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -43,10 +86,10 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$PRIVATE_CODE_TOKEN" || { echo "No effective private code-read token is configured"; exit 1; }
-          test -n "$PRIVATE_DATA_TOKEN" || { echo "No effective private data token is configured"; exit 1; }
+          test -n "$PRIVATE_DATA_TOKEN" || { echo "No effective private runtime-data token is configured"; exit 1; }
           test -n "$NEON_DATABASE_URL" || { echo "NEON_DATABASE_URL is missing"; exit 1; }
 
-      - name: Checkout private runtime data
+      - name: "02 Checkout private runtime data"
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
@@ -56,8 +99,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Read exact private source handoff
+      - name: "03 Verify runtime provenance"
         id: manifest
+        env:
+          PRIVATE_CODE_SHA: ${{ steps.release.outputs.private_code_sha }}
         run: |
           set -euo pipefail
           test -s private_data/runtime_manifest.json
@@ -67,23 +112,23 @@ jobs:
             exit 1
           }
           test "$SOURCE_SHA" = "${PRIVATE_CODE_SHA,,}" || {
-            echo "runtime manifest source is not the approved PRIVATE_CODE_SHA"
+            echo "Runtime provenance does not match approved PRIVATE_CODE_SHA"
             exit 1
           }
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "data_sha=$(git -C private_data rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout exact private audit source
+      - name: "04 Checkout exact private reconciliation source"
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ steps.manifest.outputs.source_sha }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
           path: private_source
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Assemble exact audit workspace
+      - name: "05 Assemble immutable reconciliation workspace"
         env:
           EXPECTED_SOURCE_SHA: ${{ steps.manifest.outputs.source_sha }}
         run: |
@@ -97,14 +142,14 @@ jobs:
           test -s "private_source/Crypto Logger-Private Repo/csv_integrity.py"
           test -s "private_source/Neon Weekly Audit/neon_audit.py"
 
-      - name: Set up Python
+      - name: "06 Set up Python 3.13"
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: private_source/Crypto Logger-Private Repo/requirements.lock
 
-      - name: Install and validate locked audit dependencies
+      - name: "07 Install and validate hash-locked dependencies"
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check \
@@ -115,17 +160,28 @@ jobs:
             "private_source/Crypto Logger-Private Repo/csv_integrity.py" \
             "private_source/Neon Weekly Audit/neon_audit.py"
 
-      - name: Run generation-aware controlled reconciliation
+      - name: "08 Execute controlled reconciliation mode"
         env:
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          OPERATION: ${{ inputs.operation }}
+          APPROVED_PLAN_ID: ${{ inputs.approved_plan_id }}
         run: |
           set -euo pipefail
           cd private_source
-          python "Neon Weekly Audit/neon_audit.py" | tee "${RUNNER_TEMP}/neon-audit-summary.txt"
+          if test "$OPERATION" = "preview"; then
+            python "Neon Weekly Audit/neon_audit.py" --mode preview \
+              | tee "${RUNNER_TEMP}/neon-reconciliation-summary.txt"
+          else
+            python "Neon Weekly Audit/neon_audit.py" --mode apply \
+              --approved-plan-id "$APPROVED_PLAN_ID" \
+              | tee "${RUNNER_TEMP}/neon-reconciliation-summary.txt"
+          fi
 
-      - name: Commit only CSV rows restored from Neon
+      - name: "09 Persist CSV restorations from an approved apply only"
+        if: inputs.operation == 'apply-approved-plan'
         env:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_DATA_BRANCH: ${{ env.PRIVATE_DATA_BRANCH }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
@@ -138,7 +194,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- price_log.csv
-          git commit -m "Restore audited CSV rows from Neon"
+          git commit -m "Restore rows from approved Neon reconciliation"
           ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
           printf '%s\n' '#!/bin/sh' \
             'case "$1" in' \
@@ -151,33 +207,36 @@ jobs:
           git fetch origin "$PRIVATE_DATA_BRANCH"
           git rebase "origin/$PRIVATE_DATA_BRANCH" || {
             git rebase --abort || true
-            echo "Runtime data changed during audit; no overwrite attempted"
+            echo "Runtime data changed during reconciliation; no overwrite attempted"
             exit 1
           }
           git push origin "HEAD:$PRIVATE_DATA_BRANCH"
           rm -f "$ASKPASS"
 
-      - name: Add sanitized workflow summary
+      - name: "10 Publish sanitized reconciliation summary"
         if: always()
         env:
           SOURCE_SHA: ${{ steps.manifest.outputs.source_sha || 'unavailable' }}
           DATA_SHA: ${{ steps.manifest.outputs.data_sha || 'unavailable' }}
+          OPERATION: ${{ inputs.operation }}
         run: |
           {
-            echo "## Neon Weekly Audit"
+            echo "## Neon Reconciliation Control"
+            echo "- Operation: \`$OPERATION\`"
             echo "- Source commit: \`$SOURCE_SHA\`"
-            echo "- Starting data commit: \`$DATA_SHA\`"
+            echo "- Starting runtime-data commit: \`$DATA_SHA\`"
+            echo "- Apply requires an exact content-addressed plan ID from preview."
             echo "- Same-key conflicts are never auto-overwritten."
-            echo "- Neon deletes require an exact CSV-state tombstone created by controlled maintenance."
-            if test -s "${RUNNER_TEMP}/neon-audit-summary.txt"; then
+            echo "- Neon deletion requires an exact active-generation tombstone."
+            if test -s "${RUNNER_TEMP}/neon-reconciliation-summary.txt"; then
               echo "### Sanitized counters"
-              grep -E '^(Dataset generation|Missing in Neon before repair|Inserted into Neon|Missing in CSV before repair|Restored into CSV from Neon|Intentional deletion tombstones|Deleted from Neon|Conflicts|Status):' \
-                "${RUNNER_TEMP}/neon-audit-summary.txt" || true
+              grep -E '^(Plan ID|Mode|Dataset generation|Missing in Neon before repair|Inserted into Neon|Missing in CSV before repair|Restored into CSV from Neon|Intentional deletion tombstones|Deleted from Neon|Conflicts|Status):' \
+                "${RUNNER_TEMP}/neon-reconciliation-summary.txt" || true
             fi
-            echo "- Private row contents and raw audit logs were not uploaded."
+            echo "- Private row contents and raw database logs were not uploaded."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Cleanup private checkouts
+      - name: "11 Cleanup private workspaces"
         if: always()
         run: |
           rm -rf private_data private_source

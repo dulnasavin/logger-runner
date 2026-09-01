@@ -1,0 +1,158 @@
+name: "Provider Resilience | Staging Verification Gate"
+run-name: "Provider Resilience | Offline S2 Verification"
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-provider-resilience-staging
+  cancel-in-progress: false
+
+jobs:
+  offline-verification:
+    name: Regression, recovery-budget and security verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: "01 Require staging isolation"
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/staging" || {
+            echo "This verification gate runs only from refs/heads/staging"
+            exit 1
+          }
+
+      - name: "02 Checkout public staging read-only"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: staging
+          persist-credentials: false
+
+      - name: "03 Validate disabled production release authority"
+        id: release
+        run: |
+          set -euo pipefail
+          python scripts/validate_release_manifest.py \
+            --mode review \
+            --github-output "$GITHUB_OUTPUT"
+          python -m unittest -v tests/test_validate_release_manifest.py
+          test "$(jq -r '.capabilities.logger' config/production-release.json)" = "disabled"
+          test "$(jq -r '.capabilities.runtime_maintenance' config/production-release.json)" = "disabled"
+          test "$(jq -r '.capabilities.neon' config/production-release.json)" = "disabled"
+
+      - name: "04 Validate private read credential"
+        env:
+          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_CODE_TOKEN" || {
+            echo "No effective private code-read token is configured"
+            exit 1
+          }
+
+      - name: "05 Checkout private staging read-only"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: staging
+          path: private_logger
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: "06 Checkout disabled production pin read-only"
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ steps.release.outputs.private_repository }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          path: private_release
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: "07 Prove non-production boundary"
+        env:
+          EXPECTED_RELEASE_SHA: ${{ steps.release.outputs.private_code_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C private_logger branch --show-current)" = "staging"
+          test "$(git -C private_release rev-parse HEAD)" = "$EXPECTED_RELEASE_SHA"
+          test -s "private_logger/Crypto Logger-Private Repo/provider_network_recovery.py"
+          test -s "private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
+          test -s "private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
+          for mutable_file in price_log.csv csv_state.json provider_incident_state.json runtime_manifest.json; do
+            test ! -e "private_logger/$mutable_file" || {
+              echo "Mutable runtime file leaked into the private code branch: $mutable_file"
+              exit 1
+            }
+          done
+          test ! -d private_data
+          test ! -e private_release/runtime_manifest.json
+          echo "Runtime-data checkout: absent"
+          echo "Neon credential usage: absent"
+          echo "Live VPN/provider execution: absent"
+
+      - name: "08 Set up Python 3.13"
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: private_logger/Crypto Logger-Private Repo/requirements-dev.lock
+
+      - name: "09 Install hermetic development environment"
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: >-
+          python -m pip install
+          --require-hashes
+          --only-binary=:all:
+          --requirement "private_logger/Crypto Logger-Private Repo/requirements-dev.lock"
+
+      - name: "10 Compile all private Python"
+        run: >-
+          python -m compileall -q
+          "private_logger/Crypto Logger-Private Repo"
+          "private_logger/Neon Sync"
+          "private_logger/Neon Weekly Audit"
+
+      - name: "11 Run complete private regression suite"
+        working-directory: private_logger
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}/private_logger/Crypto Logger-Private Repo:${GITHUB_WORKSPACE}/private_logger/Crypto Logger-Private Repo/windows_debug_helper:${GITHUB_WORKSPACE}/private_logger/Crypto Logger-Private Repo/vpn_auth_recovery:${GITHUB_WORKSPACE}/private_logger/Neon Sync:${GITHUB_WORKSPACE}/private_logger/Neon Weekly Audit"
+          while IFS= read -r -d '' test_file; do
+            python "$test_file"
+          done < <(
+            find \
+              "Crypto Logger-Private Repo" \
+              "Neon Sync" \
+              "Neon Weekly Audit" \
+              -type f -name 'test_*.py' -print0 | sort -z
+          )
+
+      - name: "12 Verify bounded S2 recovery policy"
+        working-directory: private_logger/Crypto Logger-Private Repo
+        run: |
+          set -euo pipefail
+          python -m unittest -v \
+            tests.test_provider_network_recovery \
+            tests.test_recovery_controller_retry \
+            tests.test_s2_network_manager \
+            tests.test_provider_error_classification.RuntimeBudgetTests \
+            tests.test_network_security.NetworkManagerSecurityTests.test_reconnect_tears_down_managed_tunnel_before_connecting_again
+
+      - name: "13 Run static and security gates"
+        run: |
+          set -euo pipefail
+          python -m ruff check --select E9,F63,F7,F82 private_logger
+          python -m bandit --quiet --recursive \
+            --severity-level medium --confidence-level medium \
+            --exclude "private_logger/Crypto Logger-Private Repo/tests,private_logger/Crypto Logger-Private Repo/windows_debug_helper/test_crypto_debug_helper.py" \
+            "private_logger/Crypto Logger-Private Repo"
