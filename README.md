@@ -17,6 +17,18 @@ The private repository supplies the corresponding code plane:
 
 `runtime-data` must never be merged into `main` or `staging`.
 
+## Zero-cost production release authority
+
+`config/production-release.json` is the only production release authority. It
+pins one full private source commit and independently disables or enables the
+logger, runtime maintenance and Neon capabilities. Production-capable
+workflows validate it with `scripts/validate_release_manifest.py` and fail
+closed. A mutable repository variable cannot select production code.
+
+Because the authority lives on protected public `main`, changing a private
+production pin or enabling a capability remains reviewable even when private
+branch-protection enforcement is unavailable on the free GitHub plan.
+
 ## Permanent workflows
 
 - `Crypto Logger | Main` — production logger, manual dispatch entry point, protected `main` only.
@@ -28,4 +40,3 @@ The private repository supplies the corresponding code plane:
 - `Workflow Security` and `CodeQL` — supply-chain and source security gates.
 
 See [Architecture and operations](docs/ARCHITECTURE_AND_OPERATIONS.md) for invariants, promotion rules and recovery procedures.
-

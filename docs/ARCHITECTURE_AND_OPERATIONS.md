@@ -12,6 +12,11 @@ The system separates orchestration, immutable code and mutable data so a workflo
 | Data | private `runtime-data` | `price_log.csv`, `csv_state.json`, `provider_incident_state.json`, `runtime_manifest.json` |
 | Database | Neon | Generation-aware relational copy and reconciliation records |
 
+The protected public `config/production-release.json` manifest bridges the
+control and code planes. It selects exactly one private commit and carries
+separate fail-closed capability switches for logger execution, runtime
+maintenance and Neon operations.
+
 ## Non-negotiable invariants
 
 1. Production executes only public `main` and one full private source SHA.
@@ -24,6 +29,8 @@ The system separates orchestration, immutable code and mutable data so a workflo
 8. Neon reconciliation is previewed before apply and the approved plan ID must match the current CSV and Neon state.
 9. Same-key financial conflicts and incomplete batches fail closed.
 10. All third-party GitHub Actions use full commit SHAs.
+11. Production code selection comes only from the protected public release manifest, never a mutable repository variable.
+12. Every production-capable workflow validates its own capability as enabled before accessing private runtime data or Neon.
 
 ## Intentional row deletion
 
@@ -43,9 +50,10 @@ If either CSV or Neon changes between steps 4 and 6, the content-addressed plan 
 3. Review complete `main...staging` diffs and remove temporary artifacts.
 4. Open private and public pull requests; never merge `runtime-data`.
 5. Merge only after explicit approval and passing required checks.
-6. Update `PRIVATE_CODE_SHA` to the approved private production commit.
-7. Keep production execution disabled until a separately approved canary.
-8. Keep Neon reconciliation separate from the production canary.
+6. Update the protected release manifest to the approved full private production commit while all capabilities remain disabled.
+7. Enable only the logger capability in a separate approved public pull request for the canary.
+8. Keep runtime maintenance and Neon disabled until separately approved.
+9. Enable each remaining capability through its own reviewable public manifest change.
 
 ## Recovery policy
 
@@ -54,4 +62,3 @@ If either CSV or Neon changes between steps 4 and 6, the content-addressed plan 
 - Provider server error: bounded backoff without changing network routes.
 - VPN authentication error: dedicated VPNBook credential recovery, not ordinary provider failover.
 - Exhausted recovery: fail closed without persisting an incomplete price batch.
-

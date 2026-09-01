@@ -10,7 +10,6 @@ permissions:
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
   PRIVATE_DATA_BRANCH: runtime-data
-  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
 
 concurrency:
   group: crypto-runtime-data
@@ -23,6 +22,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Require protected public main
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Checkout protected public release authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate enabled Neon capability
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability neon
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Validate required secrets
         env:
           PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -46,6 +64,8 @@ jobs:
 
       - name: Read and validate exact source handoff
         id: manifest
+        env:
+          PRIVATE_CODE_SHA: ${{ steps.release.outputs.private_code_sha }}
         run: |
           set -euo pipefail
           test -s private_data/runtime_manifest.json
@@ -66,7 +86,7 @@ jobs:
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ steps.manifest.outputs.source_sha }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
           path: private_source
           fetch-depth: 1
           persist-credentials: false

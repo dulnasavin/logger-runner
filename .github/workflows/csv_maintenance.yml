@@ -35,7 +35,6 @@ permissions:
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
   PRIVATE_DATA_BRANCH: runtime-data
 
 concurrency:
@@ -47,7 +46,28 @@ jobs:
     name: Validate controlled maintenance request
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    outputs:
+      private_code_sha: ${{ steps.release.outputs.private_code_sha }}
     steps:
+      - name: Require protected public main
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Checkout protected public release authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate enabled runtime-maintenance capability
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability runtime_maintenance
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Validate protected request
         env:
           PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -58,13 +78,8 @@ jobs:
           REQUEST_BATCH_TIMESTAMPS: ${{ inputs.batch_timestamps_nz }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = "refs/heads/main"
           test -n "$PRIVATE_CODE_TOKEN" || { echo "No effective private code-read token is configured"; exit 1; }
           test -n "$PRIVATE_DATA_TOKEN" || { echo "No effective private data token is configured"; exit 1; }
-          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
-            echo "PRIVATE_CODE_SHA must be a full private source commit SHA"
-            exit 1
-          }
           case "$REQUESTED_OPERATION" in
             intentional-reset)
               test "$REQUEST_CONFIRMATION" = "RESET_PRICE_LOG"
@@ -101,13 +116,15 @@ jobs:
     if: inputs.operation == 'seed-runtime-data'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PRIVATE_CODE_SHA: ${{ needs.validate-request.outputs.private_code_sha }}
     steps:
-      - name: Checkout current private main only as initial data source
+      - name: Checkout exact approved private source for initial data
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: main
+          ref: ${{ env.PRIVATE_CODE_SHA }}
           path: private_seed
           fetch-depth: 0
           persist-credentials: false
@@ -171,6 +188,8 @@ jobs:
     if: inputs.operation != 'seed-runtime-data'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PRIVATE_CODE_SHA: ${{ needs.validate-request.outputs.private_code_sha }}
     steps:
       - name: Checkout pinned CSV integrity source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

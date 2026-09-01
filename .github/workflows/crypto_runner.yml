@@ -1,1249 +1,1 @@
-name: "Crypto Logger | Main"
-run-name: "Crypto Logger | Main | #${{ github.run_number }}"
-
-on:
-  workflow_dispatch:
-  # The existing external five-minute dispatcher is authoritative. Do not add a
-  # second GitHub cron here: duplicate schedulers can queue overlapping runs.
-
-permissions:
-  contents: read
-
-env:
-  PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  PRIVATE_CODE_SHA: ${{ vars.PRIVATE_CODE_SHA }}
-  PRIVATE_DATA_BRANCH: runtime-data
-
-# ============================================================================
-# CRYPTO PRICE LOGGER - PRODUCTION S2
-# BOUNDED NETWORK RECOVERY + THREE-SOURCE PRICE CONSENSUS
-# ============================================================================
-# Production rules:
-# - Public main executes one explicitly pinned private source commit.
-# - Runtime CSV/state lives on the dedicated private runtime-data branch.
-# - Only price_log.csv, csv_state.json, provider_incident_state.json, and the
-#   non-secret runtime manifest may be written by this workflow.
-# - Stored VPN credentials are attempted first.
-# - Only AUTH_FAILED triggers live VPNBook credential recovery.
-# - Live credentials are fetched only from the official VPNBook OpenVPN page.
-# - Retrieved credentials are masked before reuse.
-# - VPN1 is the primary collection network; VPN2 is validated as cold standby.
-# - Transient VPN1 startup failures receive one bounded retry, then one VPN2 failover.
-# - GitHub Actions secrets are updated only after recovered credentials prove
-#   valid through the complete VPN test.
-# - Secret-update failure does not kill an already recovered price-logger run.
-# - Recovery failure stops the workflow and may send a private email alert.
-# - Provider-triggered recovery is enabled with one global VPN2 switch ceiling.
-# - Coinbase and Binance are authenticated primaries; CoinGecko validates.
-# - Cached estimates are labelled and automatically disable trading eligibility.
-# - Provider alerts send only on incident start, severity change, and recovery.
-# - Neon sync is a dependent job and consumes the exact verified data/source
-#   commits after core persistence succeeds; the standalone workflow is manual.
-# ============================================================================
-
-concurrency:
-  group: crypto-runtime-data
-  cancel-in-progress: false
-
-jobs:
-  validate-invocation:
-    name: Validate production invocation
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      contents: read
-    steps:
-      - name: Require the protected public main ref
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF" = "refs/heads/main" || {
-            echo "Production may run only from refs/heads/main; received ${GITHUB_REF}"
-            exit 1
-          }
-          [[ "$PRIVATE_CODE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
-            echo "PRIVATE_CODE_SHA repository variable must be one full 40-character commit SHA"
-            exit 1
-          }
-
-  run-logger:
-    name: Run, persist, and notify exact logger batch
-    needs: validate-invocation
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    outputs:
-      core_commit_sha: ${{ steps.verify_core.outputs.core_commit_sha }}
-      source_code_sha: ${{ steps.verify_core.outputs.source_code_sha }}
-      alert_required: ${{ steps.send_make_alert.outputs.required }}
-      alert_type: ${{ steps.send_make_alert.outputs.alert_type }}
-      alert_delivery_failed: ${{ steps.send_make_alert.outcome == 'failure' }}
-      provider_alert_required: ${{ steps.send_provider_alert.outputs.required }}
-      provider_alert_type: ${{ steps.send_provider_alert.outputs.alert_type }}
-      provider_alert_severity: ${{ steps.send_provider_alert.outputs.alert_severity }}
-      provider_alert_event_id: ${{ steps.send_provider_alert.outputs.event_id }}
-      provider_alert_fingerprint: ${{ steps.send_provider_alert.outputs.fingerprint }}
-      provider_alert_delivery_failed: ${{ steps.send_provider_alert.outcome == 'failure' }}
-
-    steps:
-      # ======================================================================
-      # SECTION 01 - CHECK OUT THE PUBLIC PRODUCTION RUNNER
-      # ======================================================================
-      - name: "01.1 Checkout public production runner"
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-
-      # ======================================================================
-      # SECTION 02 - IDENTIFY THIS EXACT PRODUCTION RUN
-      # ======================================================================
-      - name: "02.1 Display production run identity"
-        run: |
-          set -euo pipefail
-          echo "============================================================"
-          echo "П÷ ─ CRYPTO PRICE LOGGER - PRODUCTION S1"
-          echo "============================================================"
-          echo "UTC time:        $(date -u)"
-          echo "Repository:      ${GITHUB_REPOSITORY}"
-          echo "Public branch:   ${GITHUB_REF_NAME}"
-          echo "Public commit:   ${GITHUB_SHA}"
-          echo "Workflow:        ${GITHUB_WORKFLOW}"
-          echo "Run number:      ${GITHUB_RUN_NUMBER}"
-          echo "Run ID:          ${GITHUB_RUN_ID}"
-          echo "Run attempt:     ${GITHUB_RUN_ATTEMPT}"
-          echo "Runner OS:       ${RUNNER_OS}"
-          echo "============================================================"
-
-      # ======================================================================
-      # SECTION 03 - VALIDATE PRIVATE REPOSITORY ACCESS
-      # ======================================================================
-      - name: "03.1 Validate effective private repository tokens"
-        env:
-          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$PRIVATE_CODE_TOKEN" || { echo "Б²▄ PRIVATE_CODE_READ_TOKEN/PRIVATE_REPO_TOKEN missing"; exit 1; }
-          test -n "$PRIVATE_DATA_TOKEN" || { echo "Б²▄ PRIVATE_DATA_WRITE_TOKEN/PRIVATE_REPO_TOKEN missing"; exit 1; }
-          echo "Б°┘ Effective private code-read and runtime-data tokens configured"
-
-      # ======================================================================
-      # SECTION 04 - CHECK OUT PINNED CODE + ISOLATED RUNTIME DATA
-      # ======================================================================
-      - name: "04.1 Checkout exact private production source"
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ env.PRIVATE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ env.PRIVATE_CODE_SHA }}
-          path: private_logger
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: "04.2 Verify and detach immutable private source"
-        run: |
-          set -euo pipefail
-          cd private_logger
-          ACTUAL_SHA="$(git rev-parse HEAD)"
-          test "$ACTUAL_SHA" = "${PRIVATE_CODE_SHA,,}" || {
-            echo "Б²▄ Private source does not match PRIVATE_CODE_SHA"
-            exit 1
-          }
-          git remote remove origin
-          echo "SOURCE_CODE_SHA=$ACTUAL_SHA" >> "$GITHUB_ENV"
-          echo "Б°┘ Exact private production source verified and detached"
-
-      - name: "04.3 Checkout isolated private runtime-data branch"
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ env.PRIVATE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ env.PRIVATE_DATA_BRANCH }}
-          path: private_data
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: "04.4 Verify runtime-data branch and copy named state"
-        run: |
-          set -euo pipefail
-          test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
-          for state_file in csv_state.json provider_incident_state.json; do
-            test -f "private_data/$state_file" || {
-              echo "Б²▄ runtime-data is missing $state_file; seed the branch using CSV Maintenance"
-              exit 1
-            }
-            cp -- "private_data/$state_file" "private_logger/$state_file"
-          done
-          if [ -f private_data/price_log.csv ]; then
-            cp -- private_data/price_log.csv private_logger/price_log.csv
-          else
-            echo "Б ═ price_log.csv is absent; generation-aware preflight recovery will inspect Git history"
-          fi
-          echo "Б°┘ Runtime state copied into the immutable source workspace"
-
-      # ======================================================================
-      # SECTION 05 - VERIFY PRODUCTION LOGGER FILE STRUCTURE
-      # ======================================================================
-      - name: "05.1 Validate core production logger files"
-        run: |
-          set -euo pipefail
-          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
-          for required in \
-            "$LOGGER_DIR/price_logger.py" \
-            "$LOGGER_DIR/provider_consensus.py" \
-            "$LOGGER_DIR/csv_integrity.py" \
-            "$LOGGER_DIR/network_manager.py" \
-            "$LOGGER_DIR/s2_network_manager.py" \
-            "$LOGGER_DIR/provider_network_recovery.py" \
-            "$LOGGER_DIR/vpn_profile_normalizer.py" \
-            "$LOGGER_DIR/requirements.lock" \
-            "$LOGGER_DIR/tests/test_csv_integrity.py" \
-            "$LOGGER_DIR/tests/test_provider_consensus.py" \
-            "$LOGGER_DIR/tests/test_provider_alert_email.py"; do
-            test -s "$required" || { echo "Б²▄ Missing or empty: $required"; exit 1; }
-          done
-          echo "Б°┘ Core production files validated"
-
-      - name: "05.2 Validate VPN auth recovery helper files"
-        run: |
-          set -euo pipefail
-          RECOVERY_DIR="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery"
-          for required in \
-            "$RECOVERY_DIR/__init__.py" \
-            "$RECOVERY_DIR/recovery_controller.py" \
-            "$RECOVERY_DIR/vpnbook_credentials.py" \
-            "$RECOVERY_DIR/github_secret_updater.py" \
-            "$RECOVERY_DIR/alert_email.py"; do
-            test -s "$required" || { echo "Б²▄ Missing or empty recovery file: $required"; exit 1; }
-          done
-          echo "Б°┘ VPN auth recovery package validated"
-
-      # ======================================================================
-      # SECTION 06 - SET UP PYTHON
-      # ======================================================================
-      - name: "06.1 Setup Python 3.13"
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-
-      # ======================================================================
-      # SECTION 07 - INSTALL AND VERIFY DEPENDENCIES
-      # ======================================================================
-      - name: "07.1 Install production logger dependencies"
-        run: |
-          set -euo pipefail
-          cd private_logger/"Crypto Logger-Private Repo"
-          python -m pip install --disable-pip-version-check \
-            --require-hashes --only-binary=:all: \
-            -r requirements.lock
-          python -m pip check
-          python -c "from coinbase.rest import RESTClient; print('Coinbase SDK import verified')"
-          echo "Б°┘ Python dependencies installed and verified"
-
-      # ======================================================================
-      # SECTION 08 - COMPILE ALL PYTHON MODULES
-      # ======================================================================
-      - name: "08.1 Compile production Python modules"
-        run: |
-          set -euo pipefail
-          LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
-          RECOVERY_DIR="$LOGGER_DIR/vpn_auth_recovery"
-          python -m py_compile \
-            "$LOGGER_DIR/price_logger.py" \
-            "$LOGGER_DIR/provider_consensus.py" \
-            "$LOGGER_DIR/csv_integrity.py" \
-            "$LOGGER_DIR/network_manager.py" \
-            "$LOGGER_DIR/s2_network_manager.py" \
-            "$LOGGER_DIR/provider_network_recovery.py" \
-            "$LOGGER_DIR/vpn_profile_normalizer.py" \
-            "$RECOVERY_DIR/recovery_controller.py" \
-            "$RECOVERY_DIR/vpnbook_credentials.py" \
-            "$RECOVERY_DIR/github_secret_updater.py" \
-            "$RECOVERY_DIR/alert_email.py"
-          echo "Б°┘ All production Python modules compile"
-
-      - name: "08.2 Run production regression tests"
-        run: |
-          set -euo pipefail
-          cd private_logger/"Crypto Logger-Private Repo"
-          python -m unittest discover \
-            -s tests \
-            -p 'test_*.py' \
-            -v
-          echo "Б°┘ CSV, consensus, incident-alert, and recovery tests passed"
-
-      # ======================================================================
-      # SECTION 09 - VALIDATE BINANCE SECRETS
-      # ======================================================================
-      - name: "09.1 Validate Binance API secrets"
-        env:
-          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$BINANCE_API_KEY" || { echo "Б²▄ BINANCE_API_KEY missing"; exit 1; }
-          test -n "$BINANCE_SECRET_KEY" || { echo "Б²▄ BINANCE_SECRET_KEY missing"; exit 1; }
-          echo "Б°┘ Binance API secrets configured"
-
-      - name: "09.2 Validate Coinbase read-only API secrets"
-        env:
-          COINBASE_API_KEY_NAME: ${{ secrets.COINBASE_API_KEY_NAME }}
-          COINBASE_API_PRIVATE_KEY: ${{ secrets.COINBASE_API_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$COINBASE_API_KEY_NAME" || { echo "Б²▄ COINBASE_API_KEY_NAME missing"; exit 1; }
-          test -n "$COINBASE_API_PRIVATE_KEY" || { echo "Б²▄ COINBASE_API_PRIVATE_KEY missing"; exit 1; }
-          # Coinbase currently issues either a full resource name such as
-          # organizations/.../apiKeys/... or a standalone key ID.  The official
-          # SDK accepts both, so do not reject a valid modern key format here.
-          test "${#COINBASE_API_KEY_NAME}" -ge 16 || { echo "Б²▄ COINBASE_API_KEY_NAME is unexpectedly short"; exit 1; }
-          test "${#COINBASE_API_PRIVATE_KEY}" -ge 32 || { echo "Б²▄ COINBASE_API_PRIVATE_KEY is unexpectedly short"; exit 1; }
-          echo "Б°┘ Coinbase key ID/name and private key are configured (values not printed)"
-
-      # ======================================================================
-      # SECTION 10 - VALIDATE VPN1 SECRETS
-      # ======================================================================
-      - name: "10.1 Validate VPN1 production secrets"
-        env:
-          VPN1_CONFIG: ${{ secrets.VPNBOOK_CONFIG }}
-          VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
-          VPN1_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "$VPN1_CONFIG" || { echo "Б²▄ VPNBOOK_CONFIG missing"; exit 1; }
-          test -n "$VPN1_USERNAME" || { echo "Б²▄ VPNBOOK_USERNAME missing"; exit 1; }
-          test -n "$VPN1_PASSWORD" || { echo "Б²▄ VPNBOOK_PASSWORD missing"; exit 1; }
-          echo "Б°┘ VPN1 production secrets configured"
-
-      # ======================================================================
-      # SECTION 11 - VALIDATE VPN2 SECRETS
-      # ======================================================================
-      - name: "11.1 Validate VPN2 production secrets"
-        env:
-          VPN2_CONFIG: ${{ secrets.VPN2_CONFIG }}
-          VPN2_USERNAME: ${{ secrets.VPN2_USERNAME }}
-          VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "$VPN2_CONFIG" || { echo "Б²▄ VPN2_CONFIG missing"; exit 1; }
-          test -n "$VPN2_USERNAME" || { echo "Б²▄ VPN2_USERNAME missing"; exit 1; }
-          test -n "$VPN2_PASSWORD" || { echo "Б²▄ VPN2_PASSWORD missing"; exit 1; }
-          echo "Б°┘ VPN2 production secrets configured"
-
-      # ======================================================================
-      # SECTION 12 - CHECK OPTIONAL VPN SECRET UPDATE TOKEN
-      # ======================================================================
-      - name: "12.1 Check VPN_SECRET_UPDATE_TOKEN"
-        env:
-          VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "$VPN_SECRET_UPDATE_TOKEN" ]; then
-            echo "Б°┘ Automatic GitHub VPN secret update enabled"
-          else
-            echo "Б ═ VPN_SECRET_UPDATE_TOKEN missing; runtime recovery can work but cannot persist refreshed credentials"
-          fi
-
-      # ======================================================================
-      # SECTION 13 - CHECK AUTHENTICATED MAKE/OUTLOOK ALERT SECRETS
-      # ======================================================================
-      - name: "13.1 Check Make webhook alert secrets"
-        env:
-          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
-          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
-          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "$ALERT_MAKE_WEBHOOK_URL" ] && [ -n "$ALERT_MAKE_API_KEY" ]; then
-            echo "Б°┘ Authenticated Make/Outlook alert delivery configured"
-          else
-            echo "Б ═ Make/Outlook alert secrets incomplete; GitHub Issue fallback will protect required alerts"
-          fi
-          if [ -n "$ALERT_LOCAL_HELPER_TOKEN" ] && [ "${#ALERT_LOCAL_HELPER_TOKEN}" -ge 32 ]; then
-            echo "Б°┘ Signed Windows localhost debug links enabled"
-          elif [ -n "$ALERT_LOCAL_HELPER_TOKEN" ]; then
-            echo "Б ═ ALERT_LOCAL_HELPER_TOKEN is too short; alert delivery will reject it"
-          else
-            echo "Б└╧ Windows localhost debug links are not enabled"
-          fi
-
-      # ======================================================================
-      # SECTION 14 - INSTALL OPENVPN
-      # ======================================================================
-      - name: "14.1 Install and verify OpenVPN"
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y openvpn
-          openvpn --version | head -n 1
-          sudo -n true
-          echo "Б°┘ OpenVPN ready"
-
-      # ======================================================================
-      # SECTION 15 - CREATE PROTECTED VPN RUNTIME FILES
-      # ======================================================================
-      - name: "15.1 Create protected VPN1/VPN2 runtime files"
-        env:
-          VPN1_CONFIG_SECRET: ${{ secrets.VPNBOOK_CONFIG }}
-          VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
-          VPN1_PASSWORD: ${{ secrets.VPNBOOK_PASSWORD }}
-          VPN2_CONFIG_SECRET: ${{ secrets.VPN2_CONFIG }}
-          VPN2_USERNAME: ${{ secrets.VPN2_USERNAME }}
-          VPN2_PASSWORD: ${{ secrets.VPN2_PASSWORD }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          root = Path(os.environ["RUNNER_TEMP"]) / "vpn-runtime"
-          root.mkdir(mode=0o700)
-          payloads = {
-              "vpn1.ovpn": os.environ["VPN1_CONFIG_SECRET"] + "\n",
-              "vpn1-auth.txt": os.environ["VPN1_USERNAME"] + "\n" + os.environ["VPN1_PASSWORD"] + "\n",
-              "vpn2.ovpn": os.environ["VPN2_CONFIG_SECRET"] + "\n",
-              "vpn2-auth.txt": os.environ["VPN2_USERNAME"] + "\n" + os.environ["VPN2_PASSWORD"] + "\n",
-          }
-          flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-          for name, payload in payloads.items():
-              descriptor = os.open(root / name, flags, 0o600)
-              with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-                  file.write(payload)
-                  file.flush()
-                  os.fsync(file.fileno())
-          PY
-          test -s "${RUNNER_TEMP}/vpn-runtime/vpn1.ovpn"
-          test -s "${RUNNER_TEMP}/vpn-runtime/vpn1-auth.txt"
-          test -s "${RUNNER_TEMP}/vpn-runtime/vpn2.ovpn"
-          test -s "${RUNNER_TEMP}/vpn-runtime/vpn2-auth.txt"
-          echo "Б°┘ Protected VPN runtime files created"
-
-      # ======================================================================
-      # SECTION 16 - PREPARE S2 NETWORK MANAGER RUNTIME
-      # ======================================================================
-      - name: "16.1 Prepare S2 network runtime boundary"
-        env: &network_env
-          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
-          NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
-          VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
-          VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
-          VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
-          VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
-        run: |
-          set -euo pipefail
-          test -s "private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
-          test -s "private_logger/Crypto Logger-Private Repo/provider_network_recovery.py"
-          test -s "private_logger/Crypto Logger-Private Repo/vpn_profile_normalizer.py"
-          test -s "$VPN1_CONFIG"
-          test -s "$VPN1_AUTH_FILE"
-          test -s "$VPN2_CONFIG_FILE"
-          test -s "$VPN2_AUTH_FILE"
-          echo "Б°┘ S2 Network Manager is ready before any network-sensitive provider work"
-
-      # ======================================================================
-      # SECTION 18 - BOOTSTRAP VPN1 + AUTH RECOVERY + COLD-STANDBY VPN2
-      # ======================================================================
-      - name: "18.1 Bootstrap managed network and recover VPNBook auth if required"
-        id: vpn_auth_recovery
-        env:
-          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
-          NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
-          VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
-          VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
-          VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
-          VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
-          VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
-        run: |
-          set -euo pipefail
-          CONTROLLER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/recovery_controller.py"
-          python "$CONTROLLER" \
-            --state-dir "$NETWORK_MANAGER_STATE_DIR" \
-            --vpn1-config "$VPN1_CONFIG" \
-            --vpn1-auth "$VPN1_AUTH_FILE" \
-            --vpn2-config "$VPN2_CONFIG_FILE" \
-            --vpn2-auth "$VPN2_AUTH_FILE" \
-            --self-test-output "${RUNNER_TEMP}/s2-bootstrap.json" \
-            --recovered-marker "${RUNNER_TEMP}/vpn-auth-recovered" \
-            --recovery-failed-marker "${RUNNER_TEMP}/vpn-auth-recovery-failed" \
-            --secret-update-success-marker "${RUNNER_TEMP}/vpn-secret-update-success" \
-            --secret-update-failed-marker "${RUNNER_TEMP}/vpn-secret-update-failed" \
-            --repository "$GITHUB_REPOSITORY" \
-            --persist-secrets \
-            --update-vpn2-secrets
-
-      # ======================================================================
-      # SECTION 19 - VERIFY THE MANAGED STARTUP NETWORK
-      # ======================================================================
-      - name: "19.1 Verify S2 bootstrap and bounded network state"
-        env: *network_env
-        run: |
-          set -euo pipefail
-          BOOTSTRAP="${RUNNER_TEMP}/s2-bootstrap.json"
-          STATUS="${RUNNER_TEMP}/network-manager-status.json"
-          test -s "$BOOTSTRAP"
-          jq -e '
-            .passed == true and
-            .vpn2_standby_validated == true and
-            (.startup_network == "VPN1" or .startup_network == "VPN2")
-          ' "$BOOTSTRAP" >/dev/null
-          STARTUP_NETWORK="$(jq -r '.startup_network' "$BOOTSTRAP")"
-          echo "STARTUP_NETWORK=$STARTUP_NETWORK" >> "$GITHUB_ENV"
-          python "private_logger/Crypto Logger-Private Repo/s2_network_manager.py" status | tee "$STATUS"
-          grep -q '"running": true' "$STATUS"
-          SWITCH_COUNT="$(jq -r '.switch_count' "$STATUS")"
-          test "$SWITCH_COUNT" -le 1
-          echo "Б°┘ S2 bootstrap verified on ${STARTUP_NETWORK}; VPN2 remains cold unless recovery required"
-
-      # ======================================================================
-      # SECTION 20 - REPORT AUTH RECOVERY / SECRET UPDATE OUTCOME
-      # ======================================================================
-      - name: "20.1 Report VPN credential recovery state"
-        run: |
-          set -euo pipefail
-          if [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ]; then
-            echo "Б ═ Stored credentials expired; live VPNBook recovery succeeded"
-          else
-            echo "Б°┘ Stored VPN credentials remained valid"
-          fi
-
-          if [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ]; then
-            echo "Б°┘ GitHub VPN secrets updated"
-          elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
-            echo "Б ═ GitHub VPN secret update failed; current run may continue"
-          else
-            echo "Б└╧ GitHub VPN secret update was not required"
-          fi
-
-      # ======================================================================
-      # SECTION 23 - RECORD PRODUCTION CSV STATE BEFORE LOGGER
-      # ======================================================================
-      - name: "23.1 Preflight and record production CSV state"
-        run: |
-          set -euo pipefail
-          CSV="private_data/price_log.csv"
-          INTEGRITY="private_logger/Crypto Logger-Private Repo/csv_integrity.py"
-          RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
-          mkdir -p "$RECOVERY_DIR"
-          python "$INTEGRITY" \
-            --path "$CSV" \
-            --recovery-dir "$RECOVERY_DIR" \
-            --missing-policy restore-from-git \
-            --git-repository private_data \
-            | tee "${RUNNER_TEMP}/csv-integrity-preflight.log"
-          cp -- private_data/price_log.csv private_logger/price_log.csv
-          cp -- private_data/csv_state.json private_logger/csv_state.json
-          cp -- private_data/provider_incident_state.json private_logger/provider_incident_state.json
-          BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
-          echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
-          echo "Production CSV rows before logger: ${BEFORE_ROWS}"
-
-      # ======================================================================
-      # SECTION 24 - RUN THE PRODUCTION PRICE LOGGER
-      # ======================================================================
-      - name: "24.1 Run price_logger.py on managed S2 network"
-        env:
-          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
-          COINBASE_API_KEY_NAME: ${{ secrets.COINBASE_API_KEY_NAME }}
-          COINBASE_API_PRIVATE_KEY: ${{ secrets.COINBASE_API_PRIVATE_KEY }}
-          CSV_RECOVERY_DIR: ${{ runner.temp }}/csv-recovery
-          PROVIDER_REPORT_FILE: ${{ runner.temp }}/provider-report.json
-          PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
-          CRYPTO_LOGGER_NETWORK_RECOVERY: "1"
-          NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
-          NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
-          VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
-          VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
-          VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
-          VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
-          PYTHONUNBUFFERED: "1"
-        run: |
-          set -euo pipefail
-          cd private_logger/"Crypto Logger-Private Repo"
-          echo "============================================================"
-          echo "П÷ ─ STARTING PRODUCTION CRYPTO PRICE LOGGER"
-          echo "UTC time: $(date -u)"
-          echo "============================================================"
-          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-            -u http_proxy -u https_proxy -u all_proxy \
-            python price_logger.py
-          echo "Б°┘ PRODUCTION CRYPTO PRICE LOGGER COMPLETED"
-
-      - name: "24.2 Validate sanitized provider decision report"
-        run: |
-          set -euo pipefail
-          REPORT="${RUNNER_TEMP}/provider-report.json"
-          test -s "$REPORT" || { echo "Б²▄ Provider report missing"; exit 1; }
-          jq -e '
-            .version == 1 and
-            (.overall_severity | IN("HEALTHY", "WARNING", "CRITICAL")) and
-            (.trading_allowed | type == "boolean") and
-            (.network_recovery.enabled == true) and
-            (.network_recovery.switch_count <= 1) and
-            (.decisions | type == "object" and length == 11)
-          ' "$REPORT" >/dev/null
-          echo "Provider severity: $(jq -r '.overall_severity' "$REPORT")"
-          echo "Trading allowed:   $(jq -r '.trading_allowed' "$REPORT")"
-          echo "Affected symbols:  $(jq -r '.affected_symbols | join(", ") | if length == 0 then "none" else . end' "$REPORT")"
-          echo "Б°┘ Provider report schema validated"
-
-      # ======================================================================
-      # SECTION 25 - DISCONNECT VPN BEFORE GIT/GITHUB TRAFFIC
-      # ======================================================================
-      - name: "25.1 Disconnect managed VPN"
-        if: always()
-        env: *network_env
-        run: |
-          set +e
-          MANAGER="private_logger/Crypto Logger-Private Repo/s2_network_manager.py"
-          [ -f "$MANAGER" ] && python "$MANAGER" reset
-
-      - name: "25.2 Verify OpenVPN fully stopped"
-        if: always()
-        run: |
-          set -euo pipefail
-          STATE="${RUNNER_TEMP}/network-manager/state.json"
-          test -s "$STATE"
-          test "$(jq -r '.active_network' "$STATE")" = "null"
-          test "$(jq -r '.pid_file' "$STATE")" = "null"
-          echo "Б°┘ Managed VPN disconnected before Git/GitHub traffic"
-
-      # ======================================================================
-      # SECTION 26 - VALIDATE PRODUCTION CSV OUTPUT
-      # ======================================================================
-      - name: "26.1 Validate production CSV schema and new rows"
-        run: |
-          set -euo pipefail
-          CSV="private_logger/price_log.csv"
-          INTEGRITY="private_logger/Crypto Logger-Private Repo/csv_integrity.py"
-          EXPECTED_HEADER="timestamp_nz,symbol,price_usd,price_nzd,status,usd_nzd_rate"
-          python "$INTEGRITY" \
-            --path "$CSV" \
-            --recovery-dir "${RUNNER_TEMP}/csv-recovery" \
-            --validate-only \
-            | tee "${RUNNER_TEMP}/csv-integrity-postflight.log"
-          test -s "$CSV"
-          ACTUAL_HEADER="$(head -n 1 "$CSV" | tr -d '\r')"
-          test "$ACTUAL_HEADER" = "$EXPECTED_HEADER" || { echo "Б²▄ CSV header mismatch"; exit 1; }
-          BEFORE_ROWS="$(cat "${RUNNER_TEMP}/csv_rows_before.txt")"
-          AFTER_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
-          ADDED_ROWS="$((AFTER_ROWS - BEFORE_ROWS))"
-          echo "Rows before: ${BEFORE_ROWS}"
-          echo "Rows after:  ${AFTER_ROWS}"
-          echo "Rows added:  ${ADDED_ROWS}"
-          test "$ADDED_ROWS" -eq 11 || { echo "Б²▄ Expected exactly 11 new symbol rows, got ${ADDED_ROWS}"; exit 1; }
-          echo "Б°┘ Production CSV validated"
-
-      # ======================================================================
-      # SECTION 27 - BACK UP PRICE + NON-SECRET INCIDENT STATE
-      # ======================================================================
-      - name: "27.1 Backup production state before Git operations"
-        run: |
-          set -euo pipefail
-          cp -- private_logger/price_log.csv "${RUNNER_TEMP}/price_log.csv"
-          cp -- private_logger/csv_state.json "${RUNNER_TEMP}/csv_state.json"
-          cp -- private_logger/provider_incident_state.json "${RUNNER_TEMP}/provider_incident_state.json"
-          test -s "${RUNNER_TEMP}/price_log.csv"
-          test -s "${RUNNER_TEMP}/provider_incident_state.json"
-
-      # ======================================================================
-      # SECTION 28 - COMMIT ONLY ALLOWLISTED RUNTIME STATE
-      # ======================================================================
-      - name: "28.1 Commit production logger state locally"
-        run: |
-          set -euo pipefail
-          cp -- private_logger/price_log.csv private_data/price_log.csv
-          cp -- private_logger/csv_state.json private_data/csv_state.json
-          cp -- private_logger/provider_incident_state.json private_data/provider_incident_state.json
-          jq -n \
-            --arg source_code_sha "$SOURCE_CODE_SHA" \
-            --arg producer_repository "$GITHUB_REPOSITORY" \
-            --arg producer_workflow "$GITHUB_WORKFLOW" \
-            --arg producer_run_id "$GITHUB_RUN_ID" \
-            --arg producer_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg generated_at_utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            '{version: 1, source_code_sha: $source_code_sha,
-              producer_repository: $producer_repository,
-              producer_workflow: $producer_workflow,
-              producer_run_id: $producer_run_id,
-              producer_run_attempt: $producer_run_attempt,
-              generated_at_utc: $generated_at_utc}' \
-            > private_data/runtime_manifest.json
-          cd private_data
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add -- price_log.csv csv_state.json provider_incident_state.json runtime_manifest.json
-          UNEXPECTED="$(git diff --name-only | grep -Ev '^(price_log\.csv|csv_state\.json|provider_incident_state\.json|runtime_manifest\.json)$' || true)"
-          test -z "$UNEXPECTED" || { echo "Б²▄ Unexpected runtime-data changes detected"; exit 1; }
-          git diff --cached --quiet && { echo "Б²▄ No production logger state change detected"; exit 1; }
-          git commit -m "Update runtime data for logger run ${GITHUB_RUN_ID}"
-
-      - name: "28.2 Rebase and push private runtime-data"
-        env:
-          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
-          printf '%s\n' '#!/bin/sh' \
-            'case "$1" in' \
-            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
-            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
-            '  *) exit 1 ;;' \
-            'esac' > "$ASKPASS"
-          chmod 700 "$ASKPASS"
-          export GIT_ASKPASS="$ASKPASS"
-          cd private_data
-          for attempt in 1 2 3; do
-            echo "Production Git sync attempt ${attempt}/3"
-            git fetch origin "$PRIVATE_DATA_BRANCH"
-            if ! git rebase "origin/$PRIVATE_DATA_BRANCH"; then
-              git rebase --abort || true
-              echo "Б²▄ Runtime-data changed concurrently; no overwrite attempted"
-              exit 1
-            fi
-            if git push origin "HEAD:$PRIVATE_DATA_BRANCH"; then
-              rm -f "$ASKPASS"
-              echo "Б°┘ Allowlisted state pushed to private runtime-data"
-              exit 0
-            fi
-            [ "$attempt" -lt 3 ] && sleep 5
-          done
-          echo "Б²▄ Production state push failed"
-          exit 1
-
-      # ======================================================================
-      # SECTION 29 - VERIFY PRIVATE MAIN PUSH
-      # ======================================================================
-      - name: "29.1 Verify remote private runtime-data SHA"
-        id: verify_core
-        env:
-          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
-          printf '%s\n' '#!/bin/sh' \
-            'case "$1" in' \
-            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
-            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
-            '  *) exit 1 ;;' \
-            'esac' > "$ASKPASS"
-          chmod 700 "$ASKPASS"
-          export GIT_ASKPASS="$ASKPASS"
-          cd private_data
-          LOCAL_SHA="$(git rev-parse HEAD)"
-          REMOTE_SHA="$(git ls-remote origin "refs/heads/$PRIVATE_DATA_BRANCH" | awk '{print $1}')"
-          test -n "$REMOTE_SHA"
-          test "$LOCAL_SHA" = "$REMOTE_SHA"
-          echo "core_commit_sha=$LOCAL_SHA" >> "$GITHUB_OUTPUT"
-          echo "source_code_sha=$SOURCE_CODE_SHA" >> "$GITHUB_OUTPUT"
-          rm -f "$ASKPASS"
-          echo "Б°┘ Exact private runtime-data commit verified"
-
-      # ======================================================================
-      # SECTION 30 - CLASSIFY PRODUCTION ALERT CONDITION
-      # ======================================================================
-      - name: "30.1 Determine whether human attention is required"
-        if: always()
-        env:
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          set +e
-          rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
-          [ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo "VPN_AUTH_RECOVERY_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
-          [ ! -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] && [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo "VPN_SECRET_UPDATE_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
-          [ ! -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] && [ "$JOB_STATUS" = "failure" ] && echo "PRODUCTION_WORKFLOW_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
-          [ -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] \
-            && echo "Б ═ Production alert required: $(cat "${RUNNER_TEMP}/vpn-alert-type.txt")" \
-            || echo "Б°┘ No production alert required"
-
-      # ======================================================================
-      # SECTION 31 - SEND PRIVATE HIGH-PRIORITY ALERT THROUGH MAKE/OUTLOOK
-      # ======================================================================
-      - name: "31.1 Send production VPN recovery alert"
-        id: send_make_alert
-        if: always()
-        continue-on-error: true
-        env:
-          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
-          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
-          ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
-          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
-          CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
-        run: |
-          set -euo pipefail
-          ALERT_FILE="${RUNNER_TEMP}/vpn-alert-type.txt"
-          NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
-          if [ ! -f "$ALERT_FILE" ]; then
-            echo "required=false" >> "$GITHUB_OUTPUT"
-            echo "No production VPN recovery alert required"
-            exit 0
-          fi
-          echo "required=true" >> "$GITHUB_OUTPUT"
-          test -s "$NOTIFIER" || { echo "Б²▄ alert_email.py unavailable"; exit 1; }
-          test -n "$ALERT_MAKE_WEBHOOK_URL" || { echo "Б²▄ ALERT_MAKE_WEBHOOK_URL missing"; exit 1; }
-          test -n "$ALERT_MAKE_API_KEY" || { echo "Б²▄ ALERT_MAKE_API_KEY missing"; exit 1; }
-          ALERT_TYPE="$(cat "$ALERT_FILE")"
-          echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
-          python "$NOTIFIER" --alert-type "$ALERT_TYPE"
-
-      - name: "31.3 Send deduplicated price-source event alert"
-        id: send_provider_alert
-        if: always()
-        continue-on-error: true
-        env:
-          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
-          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
-          ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
-          ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
-          CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
-          PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
-        run: |
-          set -euo pipefail
-          NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
-          if [ ! -s "$PROVIDER_EVENT_FILE" ]; then
-            echo "required=false" >> "$GITHUB_OUTPUT"
-            echo "No new provider incident/severity/recovery email required"
-            exit 0
-          fi
-          echo "required=true" >> "$GITHUB_OUTPUT"
-          EVENT_TYPE="$(jq -r '.event_type' "$PROVIDER_EVENT_FILE")"
-          EVENT_SEVERITY="$(jq -r '.severity' "$PROVIDER_EVENT_FILE")"
-          EVENT_ID="$(jq -r '.event_id // empty' "$PROVIDER_EVENT_FILE")"
-          EVENT_FINGERPRINT="$(jq -r '.fingerprint // empty' "$PROVIDER_EVENT_FILE")"
-          case "$EVENT_TYPE" in
-            PRICE_SOURCE_INCIDENT|PRICE_SOURCE_SEVERITY_CHANGED|PRICE_SOURCE_RECOVERED) ;;
-            *) echo "Б²▄ Unsupported provider event type: ${EVENT_TYPE}"; exit 1 ;;
-          esac
-          case "$EVENT_SEVERITY" in
-            HEALTHY|WARNING|CRITICAL) ;;
-            *) echo "Б²▄ Unsupported provider event severity"; exit 1 ;;
-          esac
-          [[ "$EVENT_ID" =~ ^[0-9a-f]{32}$ ]] || { echo "Б²▄ Invalid provider event ID"; exit 1; }
-          [[ "$EVENT_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { echo "Б²▄ Invalid provider fingerprint"; exit 1; }
-          echo "alert_type=$EVENT_TYPE" >> "$GITHUB_OUTPUT"
-          echo "alert_severity=$EVENT_SEVERITY" >> "$GITHUB_OUTPUT"
-          echo "event_id=$EVENT_ID" >> "$GITHUB_OUTPUT"
-          echo "fingerprint=$EVENT_FINGERPRINT" >> "$GITHUB_OUTPUT"
-          python "$NOTIFIER" --alert-type "$EVENT_TYPE"
-
-      - name: "31.5 Acknowledge and persist delivered provider event"
-        if: always() && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success'
-        continue-on-error: true
-        env:
-          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          CONSENSUS="private_logger/Crypto Logger-Private Repo/provider_consensus.py"
-          python "$CONSENSUS" acknowledge-delivery \
-            --state-file private_logger/provider_incident_state.json \
-            --event-file "$PROVIDER_EVENT_FILE"
-          cp -- private_logger/provider_incident_state.json private_data/provider_incident_state.json
-          cd private_data
-          git add -- provider_incident_state.json
-          git diff --cached --quiet && { echo "Provider event was already acknowledged"; exit 0; }
-          git commit -m "Acknowledge provider alert ${GITHUB_RUN_ID}"
-          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
-          printf '%s\n' '#!/bin/sh' \
-            'case "$1" in' \
-            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
-            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
-            '  *) exit 1 ;;' \
-            'esac' > "$ASKPASS"
-          chmod 700 "$ASKPASS"
-          export GIT_ASKPASS="$ASKPASS"
-          git fetch origin "$PRIVATE_DATA_BRANCH"
-          git rebase "origin/$PRIVATE_DATA_BRANCH"
-          git push origin "HEAD:$PRIVATE_DATA_BRANCH"
-          rm -f "$ASKPASS"
-          echo "Б°┘ Provider delivery acknowledged after Make accepted the event"
-
-      # ======================================================================
-      # SECTION 32 - CREATE PRODUCTION SUCCESS SUMMARY
-      # ======================================================================
-      - name: "32.1 Create structured production summary"
-        if: success()
-        run: |
-          set -euo pipefail
-          CSV="private_logger/price_log.csv"
-          REPORT="${RUNNER_TEMP}/provider-report.json"
-          CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
-          AUTH_RECOVERY="Not needed"
-          SECRET_UPDATE="Not needed"
-
-          if [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ]; then
-            AUTH_RECOVERY="Used successfully"
-          fi
-
-          if [ -f "${RUNNER_TEMP}/vpn-secret-update-success" ]; then
-            SECRET_UPDATE="Updated successfully"
-          elif [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ]; then
-            SECRET_UPDATE="Failed - private alert requested"
-          fi
-
-          {
-            echo "## П÷ ─ Crypto Logger | Main | Production S2"
-            echo ""
-            echo "### 1. Run identity"
-            echo ""
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Run | #${GITHUB_RUN_NUMBER} (attempt ${GITHUB_RUN_ATTEMPT}) |"
-            echo "| Public commit | \`${GITHUB_SHA}\` |"
-            echo "| Completed UTC | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |"
-            echo "| Trigger | ${GITHUB_EVENT_NAME} |"
-            echo ""
-            echo "### 2. Network and recovery"
-            echo ""
-            echo "- **Managed startup network:** ${STARTUP_NETWORK:-Unknown}"
-            echo "- **VPN2 cold-standby profile:** Validated"
-            echo "- **VPNBook auth recovery:** ${AUTH_RECOVERY}"
-            echo "- **GitHub VPN secret update:** ${SECRET_UPDATE}"
-            echo "- **Provider-triggered network recovery:** Enabled"
-            echo "- **Successful reconnects:** $(jq -r '.network_recovery.reconnect_count // 0' "$REPORT")"
-            echo "- **Successful VPN2 switches:** $(jq -r '.network_recovery.switch_count // 0' "$REPORT")"
-            echo "- **Network after collection:** $(jq -r '.network_recovery.active_network // "unknown"' "$REPORT")"
-            echo ""
-            echo "### 3. Provider health"
-            echo ""
-            echo "| Provider path | Result |"
-            echo "|---|---|"
-            jq -r '.provider_statuses | to_entries | sort_by(.key)[] | "| \(.key) | \(.value) |"' "$REPORT"
-            echo ""
-            echo "- **Overall source severity:** $(jq -r '.overall_severity' "$REPORT")"
-            echo "- **Trading allowed:** $(jq -r '.trading_allowed' "$REPORT")"
-            echo "- **FX selection:** $(jq -r '.fx_status' "$REPORT")"
-            echo "- **Affected symbols:** $(jq -r '.affected_symbols | join(", ") | if length == 0 then "None" else . end' "$REPORT")"
-            echo ""
-            echo "### 4. Per-symbol consensus"
-            echo ""
-            echo "| Symbol | Decision | Confidence | Severity | Sources used |"
-            echo "|---|---|---|---|---|"
-            jq -r '.decisions | to_entries | sort_by(.key)[] | "| \(.key) | \(.value.status) | \(.value.confidence) | \(.value.severity) | \(.value.used_sources | join(" + ")) |"' "$REPORT"
-            echo ""
-            echo "### 5. Persistence and downstream state"
-            echo ""
-            echo "- **Rows appended this run:** 11"
-            echo "- **Production CSV rows:** ${CSV_ROWS}"
-            echo "- **Incident state persisted:** Yes"
-            echo "- **Neon handoff:** Runs only after the exact runtime-data commit is verified"
-            echo ""
-            echo "### 6. Next production phase"
-            echo ""
-            echo "- S2 will wire classified provider failures into VPN2 switching and extended retries."
-            echo "- Full time-aware Smart Cache remains deliberately separate from this interim trusted-history guard."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ======================================================================
-      # SECTION 33 - COLLECT FAILURE DIAGNOSTICS
-      # ======================================================================
-      - name: "33.1 Collect non-secret production diagnostics"
-        if: failure()
-        run: |
-          set +e
-          mkdir -p debug
-          {
-            echo '{'
-            printf '  "run_id": "%s",\n' "$GITHUB_RUN_ID"
-            printf '  "run_attempt": "%s",\n' "$GITHUB_RUN_ATTEMPT"
-            printf '  "source_code_sha": "%s",\n' "${SOURCE_CODE_SHA:-unavailable}"
-            printf '  "vpn_auth_recovered": %s,\n' "$([ -f "${RUNNER_TEMP}/vpn-auth-recovered" ] && echo true || echo false)"
-            printf '  "vpn_auth_recovery_failed": %s,\n' "$([ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo true || echo false)"
-            printf '  "vpn_secret_update_failed": %s\n' "$([ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo true || echo false)"
-            echo '}'
-          } > debug/diagnostic-summary.json
-          if [ -s "${RUNNER_TEMP}/provider-report.json" ]; then
-            jq '{version, overall_severity, trading_allowed,
-                 affected_symbol_count: (.affected_symbols | length),
-                 provider_statuses}' "${RUNNER_TEMP}/provider-report.json" \
-              > debug/provider-summary.json || true
-          fi
-          chmod -R u+rwX,go-rwx debug
-
-      - name: "33.2 Upload production failure diagnostics"
-        if: failure()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: production-crypto-price-logger-debug-${{ github.run_id }}-${{ github.run_attempt }}
-          path: debug/
-          if-no-files-found: ignore
-          retention-days: 3
-
-      # ======================================================================
-      # SECTION 34 - FINAL EPHEMERAL RUNNER CLEANUP
-      # ======================================================================
-      - name: "34.1 Cleanup temporary production runner data"
-        if: always()
-        env: *network_env
-        run: |
-          set +e
-          MANAGER="private_logger/Crypto Logger-Private Repo/network_manager.py"
-          [ -f "$MANAGER" ] && python "$MANAGER" reset >/dev/null 2>&1 || true
-          rm -rf private_logger private_data
-          sudo rm -rf debug
-          rm -rf "${RUNNER_TEMP}/network-manager"
-          rm -rf "${RUNNER_TEMP}/vpn-runtime"
-          rm -rf "${RUNNER_TEMP}/csv-recovery"
-          rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
-          rm -f "${RUNNER_TEMP}/provider-report.json"
-          rm -f "${RUNNER_TEMP}/provider-event.json"
-          rm -f "${RUNNER_TEMP}/coinbase-probe.txt"
-          rm -f "${RUNNER_TEMP}/coingecko-probe.txt"
-          rm -f "${RUNNER_TEMP}/binance-probe.txt"
-          rm -f "${RUNNER_TEMP}/crypto-git-askpass"
-          echo "Б°┘ Production runner cleanup completed"
-
-  sync-neon:
-    name: Sync exact committed batch to Neon
-    needs: run-logger
-    if: >-
-      always() &&
-      needs.run-logger.outputs.core_commit_sha != '' &&
-      needs.run-logger.outputs.source_code_sha != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Validate exact handoff and database secret
-        env:
-          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
-          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
-        run: |
-          set -euo pipefail
-          test -n "$PRIVATE_CODE_TOKEN"
-          test -n "$PRIVATE_DATA_TOKEN"
-          test -n "$NEON_DATABASE_URL"
-          [[ "$DATA_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-
-      - name: Checkout exact committed runtime data
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ env.PRIVATE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ needs.run-logger.outputs.core_commit_sha }}
-          path: private_data
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Checkout exact source used by the logger
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ env.PRIVATE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ needs.run-logger.outputs.source_code_sha }}
-          path: private_source
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Verify manifest and assemble exact sync workspace
-        env:
-          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
-          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
-        run: |
-          set -euo pipefail
-          test "$(git -C private_data rev-parse HEAD)" = "$DATA_SHA"
-          test "$(git -C private_source rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(jq -r '.source_code_sha' private_data/runtime_manifest.json)" = "$SOURCE_SHA"
-          test "$(jq -r '.producer_run_id' private_data/runtime_manifest.json)" = "$GITHUB_RUN_ID"
-          cp -- private_data/price_log.csv private_source/price_log.csv
-          cp -- private_data/csv_state.json private_source/csv_state.json
-          echo "Б°┘ Logger source and committed data handoff match exactly"
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: private_source/Crypto Logger-Private Repo/requirements.lock
-
-      - name: Install locked private dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check \
-            --require-hashes --only-binary=:all: \
-            -r "private_source/Crypto Logger-Private Repo/requirements.lock"
-          python -m pip check
-
-      - name: Run exact one-way Neon sync
-        env:
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-        run: |
-          set -euo pipefail
-          cd private_source
-          python "Neon Sync/sync_to_neon.py"
-
-      - name: Publish sanitized Neon handoff summary
-        if: always()
-        env:
-          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
-          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
-        run: |
-          {
-            echo "## Neon exact handoff"
-            echo "- Runtime-data commit: \`$DATA_SHA\`"
-            echo "- Private source commit: \`$SOURCE_SHA\`"
-            echo "- No CSV rows, database URL, or provider credentials were printed or uploaded."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Cleanup private handoff workspaces
-        if: always()
-        run: rm -rf private_data private_source
-
-  fallback-issues:
-    name: Trusted GitHub Issue fallback
-    needs:
-      - run-logger
-      - sync-neon
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read # retain the workflow-wide read-only source permission
-      issues: write # create or update sanitized alert-delivery fallback issues
-    steps:
-      - name: "31.2 Create or update trusted Issue if workflow alert delivery fails"
-        if: >-
-          needs.run-logger.result == 'failure' ||
-          needs.sync-neon.result == 'failure' ||
-          needs.run-logger.outputs.alert_delivery_failed == 'true'
-        continue-on-error: true
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        env:
-          LOGGER_ALERT_TYPE: ${{ needs.run-logger.outputs.alert_type }}
-          LOGGER_RESULT: ${{ needs.run-logger.result }}
-          SYNC_RESULT: ${{ needs.sync-neon.result }}
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const crypto = require("crypto");
-            const { owner, repo } = context.repo;
-            const label = "crypto-alert-fallback";
-            const alertType = process.env.SYNC_RESULT === "failure"
-              ? "NEON_SYNC_FAILED"
-              : (process.env.LOGGER_ALERT_TYPE || "PRODUCTION_WORKFLOW_FAILED");
-            const fingerprint = crypto.createHash("sha256")
-              .update(`workflow:${alertType}`)
-              .digest("hex").slice(0, 24);
-            const marker = `<!-- crypto-alert-fallback:${fingerprint} -->`;
-            const title = "П÷ ╗ Crypto Logger alert delivery failed";
-            try {
-              await github.rest.issues.getLabel({ owner, repo, name: label });
-            } catch (error) {
-              if (error.status !== 404) throw error;
-              await github.rest.issues.createLabel({
-                owner, repo, name: label, color: "b60205",
-                description: "Trusted fallback created by the production alert workflow"
-              });
-            }
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner, repo, state: "open", labels: label, per_page: 100
-            });
-            const trustedAuthors = new Set(["github-actions[bot]", owner.toLowerCase()]);
-            const existing = issues.find(issue =>
-              !issue.pull_request &&
-              trustedAuthors.has((issue.user?.login || "").toLowerCase()) &&
-              issue.labels.some(item => (item.name || item) === label) &&
-              (issue.body || "").includes(marker)
-            );
-            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const reminder = [
-              `Delivery failed again for **${alertType}**.`,
-              `Run: ${runUrl}`,
-              `Attempt: ${process.env.GITHUB_RUN_ATTEMPT || "unknown"}`
-            ].join("\n");
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: existing.number, body: reminder
-              });
-              core.warning(`Updated trusted fallback issue #${existing.number}`);
-              return;
-            }
-            const body = [
-              marker,
-              "## Crypto Logger alert delivery failure",
-              "",
-              `- **Alert type:** ${alertType}`,
-              `- **Run:** ${runUrl}`,
-              "",
-              "Check the Make scenario, Outlook OAuth connection, and Make repository secrets. No provider or credential value is included here."
-            ].join("\n");
-            const created = await github.rest.issues.create({
-              owner, repo, title, body, labels: [label]
-            });
-            core.warning(`Created trusted fallback issue #${created.data.number}`);
-
-      - name: "31.4 Create or update trusted Issue if provider delivery fails"
-        if: needs.run-logger.outputs.provider_alert_delivery_failed == 'true'
-        continue-on-error: true
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        env:
-          ALERT_TYPE: ${{ needs.run-logger.outputs.provider_alert_type }}
-          ALERT_SEVERITY: ${{ needs.run-logger.outputs.provider_alert_severity }}
-          ALERT_EVENT_ID: ${{ needs.run-logger.outputs.provider_alert_event_id }}
-          ALERT_FINGERPRINT: ${{ needs.run-logger.outputs.provider_alert_fingerprint }}
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const crypto = require("crypto");
-            const { owner, repo } = context.repo;
-            const label = "crypto-alert-fallback";
-            const eventType = process.env.ALERT_TYPE || "unknown";
-            const severity = process.env.ALERT_SEVERITY || "unknown";
-            const eventId = process.env.ALERT_EVENT_ID || "missing-event-id";
-            const eventFingerprint = process.env.ALERT_FINGERPRINT || eventId;
-            const fingerprint = crypto.createHash("sha256")
-              .update(`provider:${eventFingerprint}`)
-              .digest("hex").slice(0, 24);
-            const marker = `<!-- crypto-alert-fallback:${fingerprint} -->`;
-            const title = "П÷ ╗ Crypto Logger provider alert delivery failed";
-            try {
-              await github.rest.issues.getLabel({ owner, repo, name: label });
-            } catch (error) {
-              if (error.status !== 404) throw error;
-              await github.rest.issues.createLabel({
-                owner, repo, name: label, color: "b60205",
-                description: "Trusted fallback created by the production alert workflow"
-              });
-            }
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner, repo, state: "open", labels: label, per_page: 100
-            });
-            const trustedAuthors = new Set(["github-actions[bot]", owner.toLowerCase()]);
-            const existing = issues.find(issue =>
-              !issue.pull_request &&
-              trustedAuthors.has((issue.user?.login || "").toLowerCase()) &&
-              issue.labels.some(item => (item.name || item) === label) &&
-              (issue.body || "").includes(marker)
-            );
-            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const reminder = `Provider alert delivery failed again. Event: **${eventType}**; severity: **${severity}**; run: ${runUrl}`;
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: existing.number, body: reminder
-              });
-              core.warning(`Updated trusted provider fallback issue #${existing.number}`);
-              return;
-            }
-            const body = [
-              marker,
-              "## Provider alert delivery failure",
-              "",
-              `- **Event:** ${eventType}`,
-              `- **Severity:** ${severity}`,
-              `- **Run:** ${runUrl}`,
-              "",
-              "The event remains pending in private runtime state and will be retried. No provider API secret is included."
-            ].join("\n");
-            const created = await github.rest.issues.create({
-              owner, repo, title, body, labels: [label]
-            });
-            core.warning(`Created trusted provider fallback issue #${created.data.number}`);
+Y╙Г┼x-╝Иэjв²╒Кi╨з+┼╖j[h▒Иэ╒ИМш]╣ы:-jZ.╤⌡╜√)чЁVФжS╒$7'≈FРфЖvvW"бж√Б ╖'VБжФжS╒$7'≈FРфЖvvW"бж√Бб2G╥╡v≈F┤V"Г'VЕЖГVж&W"вр ═╕ЖЦ═╒vВ&╤fфВuЖF≈7F6┐═╒2F├RW├≈7F√ФrW┤FW&Фбf≈fRжж√ГWFRF≈7F6├W"≈2WF├В&≈FF≈fRБFРФВBFB╒26V6ЖФBv≈D┤V"7&ЖБ├W&S╒GWф√6FR66├VGVфW'26БVWVRВfW&ф√Фr'VГ2Ю═╖W&ж≈76√ЖГ3═╒6ЖГFVГG3╒&V@═╕VГc═╒$∙dDUУ$UУ4∙DУ%⌠╒GVфФ6f√БУ&WВ6≈FВ'▓жФжRж7'≈FРвG&6╤W"у&≈fFRу√W0╒$∙dDUТDDТ%$Д4┐╒'VГF√жRжFF═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒25%∙DР$■4RдТttU"р$ТET5D■ТБ3 ╒2$УTДDTBДUEtУ$╡$T4УdU%▓╡D┘$TRу4УU$4R$■4R4ТЕ4TЕ5U0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒2&ЖGV7F√ЖБ'VфW3═╒2р&ВFV7FVBV&ф√2&VфV6RWF├В&≈G▓6VфV7G2ЖФRgVфб&≈fFR6ВW&6R6Жжж≈BЮ╒2рвWF&фR&WВ6≈FВ'▓f&√&фW26ФФВB6VфV7BВ"VФ&фR&ЖGV7F√ЖБ6ЖFRЮ╒2р'VГF√жR55bВ7FFRф≈fW2ЖБF├RFVF√6FVB&≈fFR'VГF√жRжFF'&Ф6┌Ю╒2рЖФг▓&√6UЖфЖrФ77bб77eВ7FFRФ╖6ЖБб&Вf√FW%Ж√Ф6√FVГEВ7FFRФ╖6ЖБбФBF├P╒2ФЖБв6V7&WB'VГF√жRжФ√fW7Bж▓&Rw&≈GFVБ'▓F├≈2vВ&╤fфВrЮ╒2р7FВ&VBeБ7&VFVГF√г2&RGFVвFVBf≈'7BЮ╒2рЖФг▓UD┘Тd■дTBG&√vvW'2ф≈fReД&ЖЖ╡7&VFVГF√б&V6ВfW'▓Ю╒2рф≈fR7&VFVГF√г2&RfWF6├VBЖФг▓g&ЖрF├RЖff√6√бeД&ЖЖ╡ВVЕeБvRЮ╒2р&WG&√WfVB7&VFVГF√г2&Rж6╤VB&VfВ&R&WW6RЮ╒2рeЦ≈2F├R&√ж'▓6ЖффV7F√ЖБФWGvВ&Ё╡eЦ"≈2fф√FFVB26ЖфB7FФF'▓Ю╒2рG&Г6√VГBeЦ7F'GWf√гW&W2&V6V≈fRЖФR&ВVФFVB&WG'▓бF├VБЖФReЦ"f√фВfW"Ю╒2рv≈D┤V"7F√ЖГ26V7&WG2&RWFFVBЖФг▓gFW"&V6ВfW&VB7&VFVГF√г2&ВfP╒2fф√BF┤&ВVv┌F├R6ЖвфWFReБFW7BЮ╒2р6V7&WBвWFFRf√гW&RFЖW2ФВB╤√фбБг&VG▓&V6ВfW&VB&√6RжфЖvvW"'VБЮ╒2р&V6ВfW'▓f√гW&R7FВ2F├RvВ&╤fфВrФBж▓6VФB&≈fFRVж√бфW'BЮ╒2р&Вf√FW"вG&√vvW&VB&V6ВfW'▓≈2VФ&фVBv≈F┌ЖФRvфЖ&бeЦ"7v≈F6┌6V√ф√ФrЮ╒2р6Ж√Ф&6RФB&√ФФ6R&RWF├VГF√6FVB&√ж&√W3╡6Ж√ДvV6╤Рfф√FFW2Ю╒2р66├VBW7F√жFW2&Rф&VффVBФBWFЖжF√6фг▓F≈6&фRG&F√ФrVф√v√&√ф≈G▓Ю╒2р&Вf√FW"фW'G26VФBЖФг▓ЖБ√Ф6√FVГB7F'Bб6WfW&≈G▓6├ФvRбФB&V6ВfW'▓Ю╒2рФVЖБ7√Ф2≈2FWVФFVГB╕Ж"ФB6ЖГ7VжW2F├RW├7BfW&√f√VBFFВ6ВW&6P╒26Жжж≈G2gFW"6В&RW'6≈7FVФ6R7V66VVG3╡F├R7FФFфЖФRvВ&╤fфВr≈2жГVбЮ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп═╕6ЖФ7W'&VФ7⌠═╒w&ВW╒7'≈FРв'VГF√жRжFF╒6Ф6Vбж√Бв&Жw&W73╒fг6P═╕╕Ж'3═╒fф√FFRж√ГfЖ6F√ЖЦ═╒ФжS╒fф√FFR&ЖGV7F√ЖБ√ГfЖ6F√ЖЮ╒'VГ2жЖЦ╒V'VГGRжфFW7@╒F√жVВWBжж√ГWFW3╒ ╒W&ж≈76√ЖГ3═╒6ЖГFVГG3╒&V@╒ВWGWG3═╒&≈fFUЖ6ЖFUВ6├╒G╥╡7FW2Г&VфV6RФВWGWG2Г&≈fFUЖ6ЖFUВ6├вп╒ФVЖЕВ7FFS╒G╥╡7FW2Г&VфV6RФВWGWG2ФФVЖЕВ7FFRвп╒жФ√fW7EВ6├#Sc╒G╥╡7FW2Г&VфV6RФВWGWG2ФжФ√fW7EВ6├#Sbвп╒7FW3═╒рФжS╒&WV≈&RF├R&ВFV7FVBV&ф√2ж√Б&V`╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7B"Dt∙D┘T%У$Tb"р'&Vg2Ж├VG2Жж√Б"гб╟╒V6├Р%&ЖGV7F√ЖБж▓'VБЖФг▓g&Жр&Vg2Ж├VG2Жж√Ц╡&V6V≈fVBG╢t∙D┘T%У$Tgр ╒W├≈B╒п═╒рФжS╒6├V6╤ВWB&ВFV7FVBV&ф√2&VфV6RWF├В&≈G░╒W6W3╒7F√ЖГ2Ж6├V6╤ВWDC#3CCC├SSf#f33FVFfCSS3S3c┐22c`╒v≈F┐═╒&Vc╒G╥╡v≈F┤V"Г6├вп╒W'6≈7Bж7&VFVГF√г3╒fг6P═╒рФжS╒fф√FFRVФ&фVBфЖvvW"&VфV6R6&√ф≈G░╒√C╒&VфV6P╒'VЦ╒Бп╒≈F├ЖБ67&≈G2Вfф√FFUВ&VфV6UЖжФ√fW7BГ░╒ржжЖFRW├V7WFP╒рж6&√ф≈G▓фЖvvW ╒ржv≈F┤V"жВWGWB"Dt∙D┘T%ТУUEUB ═╒'VБжфЖvvW#═╒ФжS╒'VБбW'6≈7BбФBФВF√g▓W├7BфЖvvW"&F6─╒ФVVG3╒fф√FFRж√ГfЖ6F√ЖЮ╒'VГ2жЖЦ╒V'VГGRжфFW7@╒F√жVВWBжж√ГWFW3╒P╒W&ж≈76√ЖГ3═╒6ЖГFVГG3╒&V@╒VГc═╒$∙dDUТ4ТDUУ4└╒G╥╡ФVVG2Гfф√FFRж√ГfЖ6F√ЖБФВWGWG2Г&≈fFUЖ6ЖFUВ6├вп╒ВWGWG3═╒6В&UЖ6Жжж≈EВ6├╒G╥╡7FW2ГfW&√g∙Ж6В&RФВWGWG2Ф6В&UЖ6Жжж≈EВ6├вп╒6ВW&6UЖ6ЖFUВ6├╒G╥╡7FW2ГfW&√g∙Ж6В&RФВWGWG2Г6ВW&6UЖ6ЖFUВ6├вп╒фW'EВ&WV≈&VC╒G╥╡7FW2Г6VФEЖж╤UЖфW'BФВWGWG2Г&WV≈&VBвп╒фW'EВG≈S╒G╥╡7FW2Г6VФEЖж╤UЖфW'BФВWGWG2ФфW'EВG≈Rвп╒фW'EЖFVф≈fW'∙Жf√фVC╒G╥╡7FW2Г6VФEЖж╤UЖфW'BФВWF6ЖжRсрvf√гW&Rrвп╒&Вf√FW%ЖфW'EВ&WV≈&VC╒G╥╡7FW2Г6VФEВ&Вf√FW%ЖфW'BФВWGWG2Г&WV≈&VBвп╒&Вf√FW%ЖфW'EВG≈S╒G╥╡7FW2Г6VФEВ&Вf√FW%ЖфW'BФВWGWG2ФфW'EВG≈Rвп╒&Вf√FW%ЖфW'EВ6WfW&≈G⌠╒G╥╡7FW2Г6VФEВ&Вf√FW%ЖфW'BФВWGWG2ФфW'EВ6WfW&≈G▓вп╒&Вf√FW%ЖфW'EЖWfVГEЖ√C╒G╥╡7FW2Г6VФEВ&Вf√FW%ЖфW'BФВWGWG2ФWfVГEЖ√Bвп╒&Вf√FW%ЖфW'EЖf√ФvW'&√ГC╒G╥╡7FW2Г6VФEВ&Вf√FW%ЖфW'BФВWGWG2Фf√ФvW'&√ГBвп╒&Вf√FW%ЖфW'EЖFVф≈fW'∙Жf√фVC╒G╥╡7FW2Г6VФEВ&Вf√FW%ЖфW'BФВWF6ЖжRсрvf√гW&Rrвп═╒7FW3═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБр4└T4╡УUBD└RT$д■2$ТET5D■ТБ%TДДU ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#Ц6├V6╤ВWBV&ф√2&ЖGV7F√ЖБ'VФФW" ╒W6W3╒7F√ЖГ2Ж6├V6╤ВWDC#3CCC├SSf#f33FVFfCSS3S3c┐22c`╒v≈F┐═╒W'6≈7Bж7&VFVГF√г3╒fг6P═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ"р■DTЕD■e▓D└∙2U└5B$ТET5D■ТБ%TЮ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#"ЦF≈7ф▓&ЖGV7F√ЖБ'VБ√FVГF≈G▓ ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒V6├Р#ссссссссссссссссссссссссссссссссссссссссссссссссссссссссссср ╒V6├Р/	Ы╗5%∙DР$■4RдТttU"р$ТET5D■ТБ3" ╒V6├Р#ссссссссссссссссссссссссссссссссссссссссссссссссссссссссссср ╒V6├Р%UD2F√жS╒B├FFRвR▓ ╒V6├Р%&WВ6≈FВ'⌠╒G╢t∙D┘T%У$UУ4∙DУ%≈р ╒V6├Р%V&ф√2'&Ф6┐╒G╢t∙D┘T%У$TeТДтWр ╒V6├Р%V&ф√26Жжж≈C╒G╢t∙D┘T%У4└р ╒V6├Р%vВ&╤fфВs╒G╢t∙D┘T%УtУ$╢dдУwр ╒V6├Р%'VБГVж&W#╒G╢t∙D┘T%У%TЕТЕTт$U'р ╒V6├Р%'VБ■C╒G╢t∙D┘T%У%TЕТ■Gр ╒V6├Р%'VБGFVвC╒G╢t∙D┘T%У%TЕТEDTуGр ╒V6├Р%'VФФW"У3╒G╣%TДДU%ТУ7р ╒V6├Р#ссссссссссссссссссссссссссссссссссссссссссссссссссссссссссср ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ2рdд■DDR$∙dDR$UУ4∙DУ%▓44U50╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#2Цfф√FFRVffV7F≈fR&≈fFR&WВ6≈FВ'▓FЖ╤VГ2 ╒VГc═╒$∙dDUТ4ТDUУDТ╢TЦ╒G╥╡6V7&WG2Е$∙dDUТ4ТDUУ$TEУDТ╢TБгб6V7&WG2Е$∙dDUУ$UУУDТ╢TБвп╒$∙dDUТDDУDТ╢TЦ╒G╥╡6V7&WG2Е$∙dDUТDDУu$∙DUУDТ╢TБгб6V7&WG2Е$∙dDUУ$UУУDТ╢TБвп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7BжБ"E$∙dDUТ4ТDUУDТ╢TБ"гб╡V6├Р.)ьб$∙dDUТ4ТDUУ$TEУDТ╢TБУ$∙dDUУ$UУУDТ╢TБж≈76√Фr#╡W├≈B╡п╒FW7BжБ"E$∙dDUТDDУDТ╢TБ"гб╡V6├Р.)ьб$∙dDUТDDУu$∙DUУDТ╢TБУ$∙dDUУ$UУУDТ╢TБж≈76√Фr#╡W├≈B╡п╒V6├Р.)хRVffV7F≈fR&≈fFR6ЖFRв&VBФB'VГF√жRжFFFЖ╤VГ26ЖФf√wW&VB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБBр4└T4╡УUB■ДДTB4ТDR╡∙4ТдDTB%TЕD■тRDD╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#BЦ6├V6╤ВWBW├7B&≈fFR&ЖGV7F√ЖБ6ВW&6R ╒W6W3╒7F√ЖГ2Ж6├V6╤ВWDC#3CCC├SSf#f33FVFfCSS3S3c┐22c`╒v≈F┐═╒&WВ6≈FВ'⌠╒G╥╡VГbЕ$∙dDUУ$UУ4∙DУ%▓вп╒FЖ╤VЦ╒G╥╡6V7&WG2Е$∙dDUТ4ТDUУ$TEУDТ╢TБгб6V7&WG2Е$∙dDUУ$UУУDТ╢TБвп╒&Vc╒G╥╡VГbЕ$∙dDUТ4ТDUУ4└вп╒F┐╒&≈fFUЖфЖvvW ╒fWF6┌жFWF┐╒╒W'6≈7Bж7&VFVГF√г3╒fг6P═╒рФжS╒#BЦ"fW&√g▓ФBFWF6┌√жвWF&фR&≈fFR6ВW&6R ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒6B&≈fFUЖфЖvvW ╒5ETеУ4└р"B├v≈B&Wbв'6R└TB▓ ╒FW7B"D5ETеУ4└"р"G╣$∙dDUТ4ТDUУ4└бгр"гб╟╒V6├Р.)ьб&≈fFR6ВW&6RFЖW2ФВBжF6┌$∙dDUТ4ТDUУ4└ ╒W├≈B╒п╒v≈B&VжВFR&VжВfRВ&√v√Ю╒V6├Р%4УU$4UТ4ТDUУ4└рD5ETеУ4└"ЦБ"Dt∙D┘T%ТTЕb ╒V6├Р.)хRW├7B&≈fFR&ЖGV7F√ЖБ6ВW&6RfW&√f√VBФBFWF6├VB ═╒рФжS╒#BЦ26├V6╤ВWB≈6ЖфFVB&≈fFR'VГF√жRжFF'&Ф6┌ ╒W6W3╒7F√ЖГ2Ж6├V6╤ВWDC#3CCC├SSf#f33FVFfCSS3S3c┐22c`╒v≈F┐═╒&WВ6≈FВ'⌠╒G╥╡VГbЕ$∙dDUУ$UУ4∙DУ%▓вп╒FЖ╤VЦ╒G╥╡6V7&WG2Е$∙dDUТDDУu$∙DUУDТ╢TБгб6V7&WG2Е$∙dDUУ$UУУDТ╢TБвп╒&Vc╒G╥╡VГbЕ$∙dDUТDDТ%$Д4┌вп╒F┐╒&≈fFUЖFF╒fWF6┌жFWF┐╒ ╒W'6≈7Bж7&VFVГF√г3╒fг6P═╒рФжS╒#BЦBfW&√g▓'VГF√жRжFF'&Ф6┌ФB6В▓ФжVB7FFR ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7B"B├v≈Bт2&≈fFUЖFF'&Ф6┌рв6├Вrж7W'&VГB▓"р"E$∙dDUТDDТ%$Д4┌ ╒fВ"7FFUЖf√фR√Б77eВ7FFRФ╖6ЖБ&Вf√FW%Ж√Ф6√FVГEВ7FFRФ╖6ЖЦ╡FП╒FW7Bжb'&≈fFUЖFFРG7FFUЖf√фR"гб╟╒V6├Р.)ьб'VГF√жRжFF≈2ж≈76√ФrG7FFUЖf√фS╡6VVBF├R'&Ф6┌W6√Фr55bж√ГFVФФ6R ╒W├≈B╒п╒7рр'&≈fFUЖFFРG7FFUЖf√фR"'&≈fFUЖфЖvvW"РG7FFUЖf√фR ╒FЖФP╒√b╡жb&≈fFUЖFFВ&√6UЖфЖrФ77bс╡F├VЮ╒7рр&≈fFUЖFFВ&√6UЖфЖrФ77b&≈fFUЖфЖvvW"В&√6UЖфЖrФ77`╒Vг6P╒V6├Р.)╙&√6UЖфЖrФ77b≈2'6VГC╡vVФW&F√ЖБжv&R&Vfф√v┤B&V6ВfW'▓v√фб√Г7V7Bv≈B├≈7FВ'▓ ╒f░╒V6├Р.)хR'VГF√жR7FFR6В√VB√ГFРF├R√жвWF&фR6ВW&6RvВ&╥76R ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБRрdU$■e▓$ТET5D■ТБдТttU"d■дR5E%T5EU$P╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#RЦfф√FFR6В&R&ЖGV7F√ЖБфЖvvW"f√фW2 ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒дТttU%ТD∙#р'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WР ╒fВ"&WV≈&VB√Бю╒"DдТttU%ТD∙"В&√6UЖфЖvvW"Г▓"ю╒"DдТttU%ТD∙"В&Вf√FW%Ж6ЖГ6VГ7W2Г▓"ю╒"DдТttU%ТD∙"Ж77eЖ√ГFVw&≈G▓Г▓"ю╒"DдТttU%ТD∙"ЖФWGvВ&╣ЖжФvW"Г▓"ю╒"DдТttU%ТD∙"В3%ЖФWGvВ&╣ЖжФvW"Г▓"ю╒"DдТttU%ТD∙"В&Вf√FW%ЖФWGvВ&╣В&V6ВfW'▓Г▓"ю╒"DдТttU%ТD∙"ВgЕВ&Жf√фUЖФВ&жф≈╕W"Г▓"ю╒"DдТttU%ТD∙"В&WV≈&VжVГG2ФфЖ6╡"ю╒"DдТttU%ТD∙"ВFW7G2ВFW7EЖ77eЖ√ГFVw&≈G▓Г▓"ю╒"DдТttU%ТD∙"ВFW7G2ВFW7EВ&Вf√FW%Ж6ЖГ6VГ7W2Г▓"ю╒"DдТttU%ТD∙"ВFW7G2ВFW7EВ&Вf√FW%ЖфW'EЖVж√бГ▓#╡FП╒FW7Bв2"G&WV≈&VB"гб╡V6├Р.)ьбж≈76√ФrВ"VвG⌠╒G&WV≈&VB#╡W├≈B╡п╒FЖФP╒V6├Р.)хR6В&R&ЖGV7F√ЖБf√фW2fф√FFVB ═╒рФжS╒#RЦ"fф√FFReБWF┌&V6ВfW'▓├VгW"f√фW2 ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒$T4УdU%∙ТD∙#р'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WРВgЕЖWF┘В&V6ВfW'▓ ╒fВ"&WV≈&VB√Бю╒"E$T4УdU%∙ТD∙"УУЖ√Ф≈EУРГ▓"ю╒"E$T4УdU%∙ТD∙"В&V6ВfW'∙Ж6ЖГG&ЖффW"Г▓"ю╒"E$T4УdU%∙ТD∙"ВgФ&ЖЖ╣Ж7&VFVГF√г2Г▓"ю╒"E$T4УdU%∙ТD∙"Жv≈F┤V%В6V7&WEВWFFW"Г▓"ю╒"E$T4УdU%∙ТD∙"ЖфW'EЖVж√бГ▓#╡FП╒FW7Bв2"G&WV≈&VB"гб╡V6├Р.)ьбж≈76√ФrВ"VвG▓&V6ВfW'▓f√фS╒G&WV≈&VB#╡W├≈B╡п╒FЖФP╒V6├Р.)хReБWF┌&V6ВfW'▓6╤vRfф√FFVB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБbр4UBU∙D└ТЮ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#bЦ6WGW≈F├ЖБ2Ц2 ╒W6W3╒7F√ЖГ2В6WGWв≈F├ЖДV6Sv6#f6VfVffcsC⌠├C┐cC⌠┐f3Ccs├3c2c`╒v≈F┐═╒≈F├ЖБвfW'6√ЖЦ╒#2Ц2 ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБrр■Е5DдбДBdU$■e▓DUTДDTД4■U0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#rЦ√Г7Fфб&ЖGV7F√ЖБфЖvvW"FWVФFVФ6√W2 ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒6B&≈fFUЖфЖvvW"Р$7'≈FРфЖvvW"у&≈fFR&WР ╒≈F├ЖБжр≈√Г7FфбржF≈6&фRв≈вfW'6√ЖБж6├V6╡ю╒рв&WV≈&Rж├6├W2ржЖФг▓ж&√Ф'⌠с╕фц╒ю╒в"&WV≈&VжVГG2ФфЖ6╟╒≈F├ЖБжр≈6├V6╟╒≈F├ЖБж2&g&Жр6Ж√Ф&6RГ&W7B√вВ'B$U5D6ф√VГC╡&√ГB┌t6Ж√Ф&6R4D╡√вВ'BfW&√f√VBr▓ ╒V6├Р.)хR≈F├ЖБFWVФFVФ6√W2√Г7FффVBФBfW&√f√VB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ┌р4Ту■дRдб∙D└ТБтТETдU0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#┌Ц6Жв√фR&ЖGV7F√ЖБ≈F├ЖБжЖGVфW2 ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒дТttU%ТD∙#р'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WР ╒$T4УdU%∙ТD∙#р"DдТttU%ТD∙"ВgЕЖWF┘В&V6ВfW'▓ ╒≈F├ЖБжр∙Ж6Жв√фRю╒"DдТttU%ТD∙"В&√6UЖфЖvvW"Г▓"ю╒"DдТttU%ТD∙"В&Вf√FW%Ж6ЖГ6VГ7W2Г▓"ю╒"DдТttU%ТD∙"Ж77eЖ√ГFVw&≈G▓Г▓"ю╒"DдТttU%ТD∙"ЖФWGvВ&╣ЖжФvW"Г▓"ю╒"DдТttU%ТD∙"В3%ЖФWGvВ&╣ЖжФvW"Г▓"ю╒"DдТttU%ТD∙"В&Вf√FW%ЖФWGvВ&╣В&V6ВfW'▓Г▓"ю╒"DдТttU%ТD∙"ВgЕВ&Жf√фUЖФВ&жф≈╕W"Г▓"ю╒"E$T4УdU%∙ТD∙"В&V6ВfW'∙Ж6ЖГG&ЖффW"Г▓"ю╒"E$T4УdU%∙ТD∙"ВgФ&ЖЖ╣Ж7&VFVГF√г2Г▓"ю╒"E$T4УdU%∙ТD∙"Жv≈F┤V%В6V7&WEВWFFW"Г▓"ю╒"E$T4УdU%∙ТD∙"ЖфW'EЖVж√бГ▓ ╒V6├Р.)хRфб&ЖGV7F√ЖБ≈F├ЖБжЖGVфW26Жв√фR ═╒рФжS╒#┌Ц"'VБ&ЖGV7F√ЖБ&Vw&W76√ЖБFW7G2 ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒6B&≈fFUЖфЖvvW"Р$7'≈FРфЖvvW"у&≈fFR&WР ╒≈F├ЖБжрVФ≈GFW7BF≈66ВfW"ю╒в2FW7G2ю╒вwFW7EР╒Г▓rю╒в`╒V6├Р.)хR55bб6ЖГ6VГ7W2б√Ф6√FVГBжфW'BбФB&V6ВfW'▓FW7G276VB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ▓рdд■DDR$■ДД4R4T5$UE0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#▓Цfф√FFR&√ФФ6R▓6V7&WG2 ╒VГc═╒$■ДД4UТ∙Т╢U⌠╒G╥╡6V7&WG2Д$■ДД4UТ∙Т╢U▓вп╒$■ДД4UУ4T5$UEТ╢U⌠╒G╥╡6V7&WG2Д$■ДД4UУ4T5$UEТ╢U▓вп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7BжБ"D$■ДД4UТ∙Т╢U▓"гб╡V6├Р.)ьб$■ДД4UТ∙Т╢U▓ж≈76√Фr#╡W├≈B╡п╒FW7BжБ"D$■ДД4UУ4T5$UEТ╢U▓"гб╡V6├Р.)ьб$■ДД4UУ4T5$UEТ╢U▓ж≈76√Фr#╡W├≈B╡п╒V6├Р.)хR&√ФФ6R▓6V7&WG26ЖФf√wW&VB ═╒рФжS╒#▓Ц"fф√FFR6Ж√Ф&6R&VBжЖФг▓▓6V7&WG2 ╒VГc═╒4Т■Д$4UТ∙Т╢U∙ТДтS╒G╥╡6V7&WG2Д4Т■Д$4UТ∙Т╢U∙ТДтRвп╒4Т■Д$4UТ∙У$∙dDUТ╢U⌠╒G╥╡6V7&WG2Д4Т■Д$4UТ∙У$∙dDUТ╢U▓вп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7BжБ"D4Т■Д$4UТ∙Т╢U∙ТДтR"гб╡V6├Р.)ьб4Т■Д$4UТ∙Т╢U∙ТДтRж≈76√Фr#╡W├≈B╡п╒FW7BжБ"D4Т■Д$4UТ∙У$∙dDUТ╢U▓"гб╡V6├Р.)ьб4Т■Д$4UТ∙У$∙dDUТ╢U▓ж≈76√Фr#╡W├≈B╡п╒26Ж√Ф&6R7W'&VГFг▓≈77VW2V≈F├W"gVфб&W6ВW&6RФжR7V6┌0╒2В&vФ≈╕F√ЖГ2РБББЖ■╤W≈2РБББВ"7FФFфЖФR╤W▓■BБF├RЖff√6√ю╒24D╡66WG2&ВF┌б6РFРФВB&V╕V7Bfф√BжЖFW&Б╤W▓fВ&жB├W&RЮ╒FW7B"G╡44Т■Д$4UТ∙Т╢U∙ТДтWр"жvRbгб╡V6├Р.)ьб4Т■Д$4UТ∙Т╢U∙ТДтR≈2VФW┤V7FVFг▓6├В'B#╡W├≈B╡п╒FW7B"G╡44Т■Д$4UТ∙У$∙dDUТ╢U≈р"жvR3"гб╡V6├Р.)ьб4Т■Д$4UТ∙У$∙dDUТ╢U▓≈2VФW┤V7FVFг▓6├В'B#╡W├≈B╡п╒V6├Р.)хR6Ж√Ф&6R╤W▓■BЖФжRФB&≈fFR╤W▓&R6ЖФf√wW&VB┤fгVW2ФВB&√ГFVB▓ ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБрdд■DDReЦ4T5$UE0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#Цfф√FFReЦ&ЖGV7F√ЖБ6V7&WG2 ╒VГc═╒eЦТ4ТДd■s╒G╥╡6V7&WG2ЕeД$ТТ╣Т4ТДd■rвп╒eЦУU4U$ДтS╒G╥╡6V7&WG2ЕeД$ТТ╣УU4U$ДтRвп╒eЦУ55tУ$C╒G╥╡6V7&WG2ЕeД$ТТ╣У55tУ$Bвп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7BжБ"EeЦТ4ТДd■r"гб╡V6├Р.)ьбeД$ТТ╣Т4ТДd■rж≈76√Фr#╡W├≈B╡п╒FW7BжБ"EeЦУU4U$ДтR"гб╡V6├Р.)ьбeД$ТТ╣УU4U$ДтRж≈76√Фr#╡W├≈B╡п╒FW7BжБ"EeЦУ55tУ$B"гб╡V6├Р.)ьбeД$ТТ╣У55tУ$Bж≈76√Фr#╡W├≈B╡п╒V6├Р.)хReЦ&ЖGV7F√ЖБ6V7&WG26ЖФf√wW&VB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБрdд■DDReЦ"4T5$UE0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#Цfф√FFReЦ"&ЖGV7F√ЖБ6V7&WG2 ╒VГc═╒eЦ%Т4ТДd■s╒G╥╡6V7&WG2ЕeЦ%Т4ТДd■rвп╒eЦ%УU4U$ДтS╒G╥╡6V7&WG2ЕeЦ%УU4U$ДтRвп╒eЦ%У55tУ$C╒G╥╡6V7&WG2ЕeЦ%У55tУ$Bвп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7BжБ"EeЦ%Т4ТДd■r"гб╡V6├Р.)ьбeЦ%Т4ТДd■rж≈76√Фr#╡W├≈B╡п╒FW7BжБ"EeЦ%УU4U$ДтR"гб╡V6├Р.)ьбeЦ%УU4U$ДтRж≈76√Фr#╡W├≈B╡п╒FW7BжБ"EeЦ%У55tУ$B"гб╡V6├Р.)ьбeЦ%У55tУ$Bж≈76√Фr#╡W├≈B╡п╒V6├Р.)хReЦ"&ЖGV7F√ЖБ6V7&WG26ЖФf√wW&VB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ"р4└T4╡УD■ТДбeБ4T5$UBUDDRDТ╢TЮ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#"Ц6├V6╡eЕУ4T5$UEУUDDUУDТ╢TБ ╒VГc═╒eЕУ4T5$UEУUDDUУDТ╢TЦ╒G╥╡6V7&WG2ЕeЕУ4T5$UEУUDDUУDТ╢TБвп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒√b╡жБ"EeЕУ4T5$UEУUDDUУDТ╢TБ"с╡F├VЮ╒V6├Р.)хRWFЖжF√2v≈D┤V"eБ6V7&WBWFFRVФ&фVB ╒Vг6P╒V6├Р.)╙eЕУ4T5$UEУUDDUУDТ╢TБж≈76√Фs╡'VГF√жR&V6ВfW'▓6БvВ&╡'WB6ФФВBW'6≈7B&Vg&W6├VB7&VFVГF√г2 ╒f░═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ2р4└T4╡UD└TЕD■4DTBт╢RТУUDдТТ╡дU%B4T5$UE0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#2Ц6├V6╡ж╤RvV&├ЖЖ╡фW'B6V7&WG2 ╒VГc═╒дU%EТт╢UУtT$└ТТ╣УU$ц╒G╥╡6V7&WG2ДдU%EТт╢UУtT$└ТТ╣УU$бвп╒дU%EТт╢UТ∙Т╢U⌠╒G╥╡6V7&WG2ДдU%EТт╢UТ∙Т╢U▓вп╒дU%EТдТ4еТ└TеU%УDТ╢TЦ╒G╥╡6V7&WG2ДдU%EТдТ4еТ└TеU%УDТ╢TБвп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒√b╡жБ"DдU%EТт╢UУtT$└ТТ╣УU$б"рbb╡жБ"DдU%EТт╢UТ∙Т╢U▓"с╡F├VЮ╒V6├Р.)хRWF├VГF√6FVBж╤RТВWFфЖЖ╡фW'BFVф≈fW'▓6ЖФf√wW&VB ╒Vг6P╒V6├Р.)╙ж╤RТВWFфЖЖ╡фW'B6V7&WG2√Ф6ЖвфWFS╡v≈D┤V"≈77VRfфф&6╡v√фб&ВFV7B&WV≈&VBфW'G2 ╒f░╒√b╡жБ"DдU%EТдТ4еТ└TеU%УDТ╢TБ"рbb╡"G╡4дU%EТдТ4еТ└TеU%УDТ╢TГр"жvR3"с╡F├VЮ╒V6├Р.)хR6√vФVBv√ФFВw2фЖ6ф├В7BFV'Vrф√Ф╥2VФ&фVB ╒Vф√b╡жБ"DдU%EТдТ4еТ└TеU%УDТ╢TБ"с╡F├VЮ╒V6├Р.)╙дU%EТдТ4еТ└TеU%УDТ╢TБ≈2FЖР6├В'C╡фW'BFVф≈fW'▓v√фб&V╕V7B≈B ╒Vг6P╒V6├Р.(K▓v√ФFВw2фЖ6ф├В7BFV'Vrф√Ф╥2&RФВBVФ&фVB ╒f░═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБBр■Е5DдбУTЕeЮ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#BЦ√Г7FфбФBfW&√g▓ВVЕeБ ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒7VFРBжvWBWFFP╒7VFРBжvWB√Г7Fфбв▓ВVГgЮ╒ВVГgБрвfW'6√ЖБб├VBжБ╒7VFРжБG'VP╒V6├Р.)хRВVЕeБ&VG▓ ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБRр5$TDR$УDT5DTBeБ%TЕD■тRd■дU0╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#RЦ7&VFR&ВFV7FVBeЦУeЦ"'VГF√жRf√фW2 ╒VГc═╒eЦТ4ТДd■uУ4T5$UC╒G╥╡6V7&WG2ЕeД$ТТ╣Т4ТДd■rвп╒eЦУU4U$ДтS╒G╥╡6V7&WG2ЕeД$ТТ╣УU4U$ДтRвп╒eЦУ55tУ$C╒G╥╡6V7&WG2ЕeД$ТТ╣У55tУ$Bвп╒eЦ%Т4ТДd■uУ4T5$UC╒G╥╡6V7&WG2ЕeЦ%Т4ТДd■rвп╒eЦ%УU4U$ДтS╒G╥╡6V7&WG2ЕeЦ%УU4U$ДтRвп╒eЦ%У55tУ$C╒G╥╡6V7&WG2ЕeЦ%У55tУ$Bвп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒≈F├ЖБрцбu▓p╒√вВ'BВ0╒g&ЖрF├ф√"√вВ'BF─═╒&ЖВBрF┌├В2ФVГf≈&ЖЕ╡%%TДДU%УDTу%р▓Р'gБв'VГF√жR ╒&ЖВBФж╤F≈"├жЖFSсСs░╒√фЖG2р╟╒'gЦФВgБ#╒В2ФVГf≈&ЖЕ╡%eЦТ4ТДd■uУ4T5$UB%р╡%фБ"ю╒'gЦжWF┌ГG┤B#╒В2ФVГf≈&ЖЕ╡%eЦУU4U$ДтR%р╡%фБ"╡В2ФVГf≈&ЖЕ╡%eЦУ55tУ$B%р╡%фБ"ю╒'gЦ"ФВgБ#╒В2ФVГf≈&ЖЕ╡%eЦ%Т4ТДd■uУ4T5$UB%р╡%фБ"ю╒'gЦ"жWF┌ГG┤B#╒В2ФVГf≈&ЖЕ╡%eЦ%УU4U$ДтR%р╡%фБ"╡В2ФVГf≈&ЖЕ╡%eЦ%У55tУ$B%р╡%фБ"ю╒п╒fфw2рВ2ДУУu$ТДе▓бВ2ДУТ5$TBбВ2ДУТU└4ббvWFGG"├В2б$УТДТdТддУr"б░╒fВ"ФжRб√фЖB√Б√фЖG2Ф≈FVв2┌⌠═╒FW67&≈FВ"рВ2ФВVБ┤&ЖВBРФжRбfфw2бСc░╒v≈F┌В2ФfFВVБ├FW67&≈FВ"б'r"бVФ6ЖF√Фsр'WFbс┌"▓2f√фS═╒f√фRГw&≈FR┤√фЖB░╒f√фRФfгW6┌┌░╒В2Фg7√Ф2├f√фRФf√фVФР┌▓░╒░╒FW7Bв2"G╣%TДДU%УDTурВgБв'VГF√жRВgЦФВgБ ╒FW7Bв2"G╣%TДДU%УDTурВgБв'VГF√жRВgЦжWF┌ГG┤B ╒FW7Bв2"G╣%TДДU%УDTурВgБв'VГF√жRВgЦ"ФВgБ ╒FW7Bв2"G╣%TДДU%УDTурВgБв'VГF√жRВgЦ"жWF┌ГG┤B ╒V6├Р.)хR&ВFV7FVBeБ'VГF√жRf√фW27&VFVB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБbр$U$R3"ДUEtУ$╡тДtU"%TЕD■тP╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#bЦ&W&R3"ФWGvВ&╡'VГF√жR&ВVФF'▓ ╒VГc╒fФWGvВ&╣ЖVГ`╒ДUEtУ$╣ТтДtU%У5DDUТD∙#╒G╥╡'VФФW"ГFVвврЖФWGvВ&╡жжФvW ╒ДUEtУ$╣ТтДtU%ТддУtTEУ$ТУE3╒G╥╡'VФФW"ГFVввс╒G╥╡v≈F┤V"ГvВ&╥76Rвп╒eЦТ4ТДd■s╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦФВgЮ╒eЦТUD┘Тd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦжWF┌ГG┤@╒eЦ%Т4ТДd■uТd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦ"ФВgЮ╒eЦ%ТUD┘Тd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦ"жWF┌ГG┤@╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒FW7Bв2'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WРВ3%ЖФWGvВ&╣ЖжФvW"Г▓ ╒FW7Bв2'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WРВ&Вf√FW%ЖФWGvВ&╣В&V6ВfW'▓Г▓ ╒FW7Bв2'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WРВgЕВ&Жf√фUЖФВ&жф≈╕W"Г▓ ╒FW7Bв2"EeЦТ4ТДd■r ╒FW7Bв2"EeЦТUD┘Тd■дR ╒FW7Bв2"EeЦ%Т4ТДd■uТd■дR ╒FW7Bв2"EeЦ%ТUD┘Тd■дR ╒V6├Р.)хR3"ФWGvВ&╡жФvW"≈2&VG▓&VfВ&RГ▓ФWGvВ&╡в6VГ6≈F≈fR&Вf√FW"vВ&╡ ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ┌р$ТУE5E$eЦ╡UD┌$T4УdU%▓╡4ТдBу5DДD%▓eЦ ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#┌Ц&ЖВG7G&жФvVBФWGvВ&╡ФB&V6ВfW"eД&ЖЖ╡WF┌√b&WV≈&VB ╒√C╒gЕЖWF┘В&V6ВfW'░╒VГc═╒ДUEtУ$╣ТтДtU%У5DDUТD∙#╒G╥╡'VФФW"ГFVвврЖФWGvВ&╡жжФvW ╒ДUEtУ$╣ТтДtU%ТддУtTEУ$ТУE3╒G╥╡'VФФW"ГFVввс╒G╥╡v≈F┤V"ГvВ&╥76Rвп╒eЦТ4ТДd■s╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦФВgЮ╒eЦТUD┘Тd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦжWF┌ГG┤@╒eЦ%Т4ТДd■uТd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦ"ФВgЮ╒eЦ%ТUD┘Тd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦ"жWF┌ГG┤@╒eЕУ4T5$UEУUDDUУDТ╢TЦ╒G╥╡6V7&WG2ЕeЕУ4T5$UEУUDDUУDТ╢TБвп╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒4ТЕE$ТддU#р'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WРВgЕЖWF┘В&V6ВfW'▓В&V6ВfW'∙Ж6ЖГG&ЖффW"Г▓ ╒≈F├ЖБ"D4ТЕE$ТддU""ю╒рв7FFRжF≈""DДUEtУ$╣ТтДtU%У5DDUТD∙""ю╒рвgЦж6ЖФf√r"EeЦТ4ТДd■r"ю╒рвgЦжWF┌"EeЦТUD┘Тd■дR"ю╒рвgЦ"ж6ЖФf√r"EeЦ%Т4ТДd■uТd■дR"ю╒рвgЦ"жWF┌"EeЦ%ТUD┘Тd■дR"ю╒рв6VфbвFW7BжВWGWB"G╣%TДДU%УDTурВ3"ж&ЖВG7G&Ф╖6ЖБ"ю╒рв&V6ВfW&VBжж&╤W""G╣%TДДU%УDTурВgБжWF┌в&V6ВfW&VB"ю╒рв&V6ВfW'▓жf√фVBжж&╤W""G╣%TДДU%УDTурВgБжWF┌в&V6ВfW'▓жf√фVB"ю╒рв6V7&WBвWFFRв7V66W72жж&╤W""G╣%TДДU%УDTурВgБв6V7&WBвWFFRв7V66W72"ю╒рв6V7&WBвWFFRжf√фVBжж&╤W""G╣%TДДU%УDTурВgБв6V7&WBвWFFRжf√фVB"ю╒рв&WВ6≈FВ'▓"Dt∙D┘T%У$UУ4∙DУ%▓"ю╒рвW'6≈7Bв6V7&WG2ю╒рвWFFRвgЦ"в6V7&WG0═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ▓рdU$■e▓D└RтДtTB5D%EUДUEtУ$╟╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒#▓ЦfW&√g▓3"&ЖВG7G&ФB&ВVФFVBФWGvВ&╡7FFR ╒VГc╒╕ФWGvВ&╣ЖVГ`╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒$ТУE5E$р"G╣%TДДU%УDTурВ3"ж&ЖВG7G&Ф╖6ЖБ ╒5DEU3р"G╣%TДДU%УDTурЖФWGvВ&╡жжФvW"в7FGW2Ф╖6ЖБ ╒FW7Bв2"D$ТУE5E$ ╒╖жRp╒Г76VBсрG'VRФ@╒ГgЦ%В7FФF'∙Вfф√FFVBсрG'VRФ@╒┌Г7F'GWЖФWGvВ&╡ср%eЦ"В"Г7F'GWЖФWGvВ&╡ср%eЦ""░╒r"D$ТУE5E$"БЖFWbЖГVфю╒5D%EUТДUEtУ$Ёр"B├╖в"rГ7F'GWЖФWGvВ&╡r"D$ТУE5E$"▓ ╒V6├Р%5D%EUТДUEtУ$ЁрE5D%EUТДUEtУ$╡"ЦБ"Dt∙D┘T%ТTЕb ╒≈F├ЖБ'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WРВ3%ЖФWGvВ&╣ЖжФvW"Г▓"7FGW2бFVR"E5DEU2 ╒w&Wвr''VФФ√Фr#╒G'VRr"E5DEU2 ╒5t∙D4┘Т4УTЕCр"B├╖в"rГ7v≈F6┘Ж6ВVГBr"E5DEU2"▓ ╒FW7B"E5t∙D4┘Т4УTЕB"жфR╒V6├Р.)хR3"&ЖВG7G&fW&√f√VBЖБG╣5D%EUТДUEtУ$╥с╡eЦ"&Vж√Г26ЖфBVФфW72&V6ВfW'▓&WV≈&VB ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ#р$UУ%BUD┌$T4УdU%▓Р4T5$UBUDDRУUD4ТтP╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒##Ц&WВ'BeБ7&VFVГF√б&V6ВfW'▓7FFR ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒√b╡жb"G╣%TДДU%УDTурВgБжWF┌в&V6ВfW&VB"с╡F├VЮ╒V6├Р.)╙7FВ&VB7&VFVГF√г2W┤≈&VC╡ф≈fReД&ЖЖ╡&V6ВfW'▓7V66VVFVB ╒Vг6P╒V6├Р.)хR7FВ&VBeБ7&VFVГF√г2&Vж√ФVBfф√B ╒f░═╒√b╡жb"G╣%TДДU%УDTурВgБв6V7&WBвWFFRв7V66W72"с╡F├VЮ╒V6├Р.)хRv≈D┤V"eБ6V7&WG2WFFVB ╒Vф√b╡жb"G╣%TДДU%УDTурВgБв6V7&WBвWFFRжf√фVB"с╡F├VЮ╒V6├Р.)╙v≈D┤V"eБ6V7&WBWFFRf√фVC╡7W'&VГB'VБж▓6ЖГF√ГVR ╒Vг6P╒V6├Р.(K▓v≈D┤V"eБ6V7&WBWFFRv2ФВB&WV≈&VB ╒f░═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ#2р$T4У$B$ТET5D■ТБ55b5DDR$TdУ$RдТttU ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒##2Ц&Vfф√v┤BФB&V6В&B&ЖGV7F√ЖБ55b7FFR ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒55cр'&≈fFUЖFFВ&√6UЖфЖrФ77b ╒■ЕDTu$∙E⌠р'&≈fFUЖфЖvvW"Т7'≈FРфЖvvW"у&≈fFR&WРЖ77eЖ√ГFVw&≈G▓Г▓ ╒$T4УdU%∙ТD∙#р"G╣%TДДU%УDTурЖ77bв&V6ВfW'▓ ╒ж╤F≈"в"E$T4УdU%∙ТD∙" ╒≈F├ЖБ"D■ЕDTu$∙E▓"ю╒рвF┌"D55b"ю╒рв&V6ВfW'▓жF≈""E$T4УdU%∙ТD∙""ю╒ржж≈76√ФrвЖф√7▓&W7FВ&Rжg&Жржv≈Bю╒ржv≈Bв&WВ6≈FВ'▓&≈fFUЖFFю╒бFVR"G╣%TДДU%УDTурЖ77bж√ГFVw&≈G▓в&Vfф√v┤BФфЖr ╒7рр&≈fFUЖFFВ&√6UЖфЖrФ77b&≈fFUЖфЖvvW"В&√6UЖфЖrФ77`╒7рр&≈fFUЖFFЖ77eВ7FFRФ╖6ЖБ&≈fFUЖфЖvvW"Ж77eВ7FFRФ╖6ЖЮ╒7рр&≈fFUЖFFВ&Вf√FW%Ж√Ф6√FVГEВ7FFRФ╖6ЖБ&≈fFUЖфЖvvW"В&Вf√FW%Ж√Ф6√FVГEВ7FFRФ╖6ЖЮ╒$TdУ$UУ$Уu3р"B┤v2жбб"D55b"бG"жBrr▓ ╒V6├Р"D$TdУ$UУ$Уu2"Б"G╣%TДДU%УDTурЖ77eВ&Вw5Ж&VfВ&RГG┤B ╒V6├Р%&ЖGV7F√ЖБ55b&Вw2&VfВ&RфЖvvW#╒G╢$TdУ$UУ$Уu7р ═╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒24T5D■ТБ#Bр%TБD└R$ТET5D■ТБ$■4RдТttU ╒2сссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссссп╒рФжS╒##BЦ'VБ&√6UЖфЖvvW"Г▓ЖБжФvVB3"ФWGvВ&╡ ╒VГc═╒$■ДД4UТ∙Т╢U⌠╒G╥╡6V7&WG2Д$■ДД4UТ∙Т╢U▓вп╒$■ДД4UУ4T5$UEТ╢U⌠╒G╥╡6V7&WG2Д$■ДД4UУ4T5$UEТ╢U▓вп╒4Т■Д$4UТ∙Т╢U∙ТДтS╒G╥╡6V7&WG2Д4Т■Д$4UТ∙Т╢U∙ТДтRвп╒4Т■Д$4UТ∙У$∙dDUТ╢U⌠╒G╥╡6V7&WG2Д4Т■Д$4UТ∙У$∙dDUТ╢U▓вп╒55eУ$T4УdU%∙ТD∙#╒G╥╡'VФФW"ГFVвврЖ77bв&V6ВfW'░╒$Уd■DU%У$UУ%EТd■дS╒G╥╡'VФФW"ГFVвврВ&Вf√FW"в&WВ'BФ╖6ЖЮ╒$Уd■DU%ТUdTЕEТd■дS╒G╥╡'VФФW"ГFVвврВ&Вf√FW"жWfVГBФ╖6ЖЮ╒5%∙DУТдТttU%ТДUEtУ$╣У$T4УdU%⌠╒# ╒ДUEtУ$╣ТтДtU%У5DDUТD∙#╒G╥╡'VФФW"ГFVвврЖФWGvВ&╡жжФvW ╒ДUEtУ$╣ТтДtU%ТддУtTEУ$ТУE3╒G╥╡'VФФW"ГFVввс╒G╥╡v≈F┤V"ГvВ&╥76Rвп╒eЦТ4ТДd■s╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦФВgЮ╒eЦТUD┘Тd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦжWF┌ГG┤@╒eЦ%Т4ТДd■uТd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦ"ФВgЮ╒eЦ%ТUD┘Тd■дS╒G╥╡'VФФW"ГFVвврВgБв'VГF√жRВgЦ"жWF┌ГG┤@╒∙D└ТЕTД%TddU$TC╒# ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒6B&≈fFUЖфЖvvW"Р$7'≈FРфЖvvW"у&≈fFR&WР ╒V6├Р#ссссссссссссссссссссссссссссссссссссссссссссссссссссссссссср ╒V6├Р/	Ы╗5D%D■Дr$ТET5D■ТБ5%∙DР$■4RдТttU" ╒V6├Р%UD2F√жS╒B├FFRвR▓ ╒V6├Р#ссссссссссссссссссссссссссссссссссссссссссссссссссссссссссср ╒VГbвR┘EEУ$У┘▓вR┘EE5У$У┘▓вRдеУ$У┘▓ю╒вR┤GGВ&В┤▓вR┤GG5В&В┤▓вRфеВ&В┤▓ю╒≈F├ЖБ&√6UЖфЖvvW"Г░╒V6├Р.)хR$ТET5D■ТБ5%∙DР$■4RдТttU"4ТудUDTB ═╒рФжS╒##BЦ"fф√FFR6Ф≈F≈╕VB&Вf√FW"FV6≈6√ЖБ&WВ'B ╒'VЦ╒ю╒6WBжWVР≈Vf√ю╒$UУ%Cр"G╣%TДДU%УDTурВ&Вf√FW"в&WВ'BФ╖6ЖБ ╒FW7Bв2"E$UУ%B"гб╡V6├Р.)ьб&Вf√FW"&WВ'Bж≈76√Фr#╡W├≈B╡п╒╖жRp╒ГfW'6√ЖБсрФ@╒┌ФВfW&феВ6WfW&≈G▓б■Б┌$└TеD┘▓"б%t$Д■Дr"б$5$∙D■4б"▓▓Ф@╒┌ГG&F√ФuЖффВvVBбG≈Rср&&ЖЖфVБ"▓Ф@╒vвkh▒ИЛ╤╩╖q╚^u5│MQQ(──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────╢│╧┘╣■Х─┬хЮ╦д│╫╣╣╔п│аи╫▒у█я╔╫╦│╠╫²²∙х│мя┘я■│╠╫█┘╠╠Д┬(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│█ю─╢╢│аи╔ы┘я∙}╠╫²²∙х╫аи╔█∙}╠╫°╧█мь│аи╔ы┘я∙}▒┘я└╫аи╔█∙}╠╫°╧█мь(─────────│█ю─╢╢│аи╔ы┘я∙}╠╫²²∙х╫█мы}мя┘я■╧╘м╫╦│аи╔ы┘я∙}▒┘я└╫█мы}мя┘я■╧╘м╫╦(─────────│█ю─╢╢│аи╔ы┘я∙}╠╫²²∙х╫аи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я■╧╘м╫╦│аи╔ы┘я∙}▒┘я└╫аи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я■╧╘м╫╦(─────────│╘д─╣╦│p(────────────╢╣┘и°│м╫уи█∙}█╫▒∙}м║└─┬▒M=UI}=}M!┬│p(────────────╢╣┘и°│аи╫▒у█∙и}и∙а╫м╔я╫иД─┬▒%Q!U	}IA=M%Q=Id┬│p(────────────╢╣┘и°│аи╫▒у█∙и}щ╫и╜≥╠╫э─┬▒%Q!U	}]=I-1=\┬│p(────────────╢╣┘и°│аи╫▒у█∙и}иу╧}╔░─┬▒%Q!U	}IU9}%┬│p(────────────╢╣┘и°│аи╫▒у█∙и}иу╧}┘яя∙╣ап─┬▒%Q!U	}IU9}QQ5AP┬│p(────────────╢╣┘и°│²∙╧∙и┘я∙▒}┘я}уя▄─┬░║▒┘я■─╣т─╛°∙d╢∙╢╢∙▒P∙ Х∙4Х∙Mh°╓┬│p(────────────²Мы∙им╔╫╦Х─д╟│м╫уи█∙}█╫▒∙}м║└Х─▒м╫уи█∙}█╫▒∙}м║└╟(─────────────│аи╫▒у█∙и}и∙а╫м╔я╫иДХ─▒аи╫▒у█∙и}и∙а╫м╔я╫иД╟(─────────────│аи╫▒у█∙и}щ╫и╜≥╠╫эХ─▒аи╫▒у█∙и}щ╫и╜≥╠╫э╟(─────────────│аи╫▒у█∙и}иу╧}╔░Х─▒аи╫▒у█∙и}иу╧}╔░╟(─────────────│аи╫▒у█∙и}иу╧}┘яя∙╣апХ─▒аи╫▒у█∙и}иу╧}┘яя∙╣ап╟(─────────────│²∙╧∙и┘я∙▒}┘я}уя▄Х─▒²∙╧∙и┘я∙▒}┘я}уя█Т°│p(────────────Ь│аи╔ы┘я∙}▒┘я└╫иу╧я╔╣∙}╣┘╧╔≥∙мп╧╘м╫╦(─────────│█░│аи╔ы┘я∙}▒┘я└(─────────│²╔п│█╫╧≥╔°│ум∙х╧╧┘╣■─┴²╔я║у┬╣┘█я╔╫╧л┬(─────────│²╔п│█╫╧≥╔°│ум∙х╧∙╣┘╔╟─┴┘█я╔╫╧м²╔я║у┬╧█╫╢┬(─────────│²╔п│┘▒░─╢╢│аи╔█∙}╠╫°╧█мь│█мы}мя┘я■╧╘м╫╦│аи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я■╧╘м╫╦│иу╧я╔╣∙}╣┘╧╔≥∙мп╧╘м╫╦(─────────│U9aAQТ┬░║²╔п│▒╔≥≤─╢╣╧┘╣■╣╫╧╠Д│П│²и∙ю─╣ь─²x║аи╔█∙}╠╫²p╧█мыЯ█мы}мя┘я∙p╧╘м╫╧Яаи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я∙p╧╘м╫╧Яиу╧я╔╣∙}╣┘╧╔≥∙мяp╧╘м╫╦╓░°│ЯП│яиу■╓┬(─────────│я∙мп─╣Х─┬▒U9aAQ┬│ЯП│Л│∙█║╪─▀┼v0│U╧∙Аа∙█я∙░│иу╧я╔╣■╣▒┘я└│█║┘╧²∙л│▒∙я∙█я∙░┬Л│∙А╔п─дЛ│Т(─────────│²╔п│▒╔≥≤─╢╣█┘█║∙░─╢╣еу╔∙п─≤≤│Л│∙█║╪─▀┼v0│9╪│аи╫▒у█я╔╫╦│╠╫²²∙х│мя┘я■│█║┘╧²■│▒∙я∙█я∙░┬Л│∙А╔п─дЛ│Т(─────────│²╔п│█╫╣╣╔п─╣╢─┴Uа▒┘я■│иу╧я╔╣■│▒┘я└│≥╫х│╠╫²²∙х│иу╦─▒М%Q!U	}IU9}%Т┬((──────╢│╧┘╣■Х─┬хЮ╦х│I∙┴┘м■│┘╧░│аум═│аи╔ы┘я■│иу╧я╔╣■╣▒┘я└┬(───────│∙╧ьХ(─────────│AI%YQ}Q}Q=-8Х─▒МЛ│м∙█и∙ял╧AI%YQ}Q}]I%Q}Q=-8│ЯП│м∙█и∙ял╧AI%YQ}IA=}Q=-8│УТ(─────────│%Q}QI5%91}AI=5APХ─┬ю┬(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│M-AMLТ┬▒МIU99I}Q5AТ╫█иЕая╪╣²╔п╣┘м╜а┘мл┬(─────────│аи╔╧я≤─°∙мq╦°─°▄└╫┴╔╦╫м═°│p(────────────²█┘м■─┬░д┬│╔╦°│p(────────────°──╘Uм∙и╧┘╣■╗╓│аи╔╧я≤─┬∙мqq╦┬─┴Ю╣┘██∙мл╣я╫╜∙╦┬─ЛЛ°│p(────────────°──╘A┘ммщ╫и░╗╓│аи╔╧я≤─┬∙мqq╦┬─┬▒AI%YQ}Q}Q=-8┬─ЛЛ°│p(────────────°──╗╓│∙А╔п─д─ЛЛ°│p(────────────²∙м┘▄°─Ь─┬▒M-AML┬(─────────│█║╣╫░─эюю─┬▒M-AML┬(─────────│∙Аа╫ип│%Q}M-AMLТ┬▒M-AML┬(─────────│█░│аи╔ы┘я∙}▒┘я└(─────────│≥╫х│┘яя∙╣ап│╔╦─д─х─лЛ│▒╪(───────────│∙█║╪─┴Aи╫▒у█я╔╫╦│╔п│мЕ╧▄│┘яя∙╣ап─▒М┘яя∙╣аяТ╪л┬(───────────│²╔п│≥∙я█═│╫и╔²╔╦─┬▒AI%YQ}Q}	I9 ┬(───────────│╔≤─└│²╔п│и∙┴┘м■─┴╫и╔²╔╦╪▒AI%YQ}Q}	I9 ┬Л│я║∙╦(─────────────│²╔п│и∙┴┘м■─╢╣┘┴╫ип│ЯП│яиу■(─────────────│∙█║╪─▀┼v0│Iу╧я╔╣■╣▒┘я└│█║┘╧²∙░│█╫╧█уии∙╧я╠ДЛ│╧╪│╫ы∙ищи╔я■│┘яя∙╣ая∙░┬(─────────────│∙А╔п─д(───────────│≥╓(───────────│╔≤│²╔п│аум═│╫и╔²╔╦─┴!Х▒AI%YQ}Q}	I9 ┬Л│я║∙╦(─────────────│и╢─╣≤─┬▒M-AML┬(─────────────│∙█║╪─▀┼r│╠╠╫щ╠╔мя∙░│мя┘я■│аум║∙░│я╪│аи╔ы┘я■│иу╧я╔╣■╣▒┘я└┬(─────────────│∙А╔п─ю(───────────│≥╓(───────────│l─┬▒┘яя∙╣ап┬─╣╠п─л│t─≤≤│м╠∙∙ю─т(─────────│▒╫╧■(─────────│∙█║╪─▀┼v0│Aи╫▒у█я╔╫╦│мя┘я■│аум═│≥┘╔╠∙░┬(─────────│∙А╔п─д((──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────▄│MQ%=8─хД─╢│YI%d│AI%YQ│5%8│AUM (──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────╢│╧┘╣■Х─┬хД╦д│Y∙и╔≥Д│и∙╣╫я■│аи╔ы┘я■│иу╧я╔╣■╣▒┘я└│M!┬(───────│╔░Х│ы∙и╔≥Е}█╫и■(───────│∙╧ьХ(─────────│AI%YQ}Q}Q=-8Х─▒МЛ│м∙█и∙ял╧AI%YQ}Q}]I%Q}Q=-8│ЯП│м∙█и∙ял╧AI%YQ}IA=}Q=-8│УТ(─────────│%Q}QI5%91}AI=5APХ─┬ю┬(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│M-AMLТ┬▒МIU99I}Q5AТ╫█иЕая╪╣²╔п╣┘м╜а┘мл┬(─────────│аи╔╧я≤─°∙мq╦°─°▄└╫┴╔╦╫м═°│p(────────────²█┘м■─┬░д┬│╔╦°│p(────────────°──╘Uм∙и╧┘╣■╗╓│аи╔╧я≤─┬∙мqq╦┬─┴Ю╣┘██∙мл╣я╫╜∙╦┬─ЛЛ°│p(────────────°──╘A┘ммщ╫и░╗╓│аи╔╧я≤─┬∙мqq╦┬─┬▒AI%YQ}Q}Q=-8┬─ЛЛ°│p(────────────°──╗╓│∙А╔п─д─ЛЛ°│p(────────────²∙м┘▄°─Ь─┬▒M-AML┬(─────────│█║╣╫░─эюю─┬▒M-AML┬(─────────│∙Аа╫ип│%Q}M-AMLТ┬▒M-AML┬(─────────│█░│аи╔ы┘я∙}▒┘я└(─────────│1=1}M!Т┬░║²╔п│и∙ь╣а┘им■│!╓┬(─────────│I5=Q}M!Т┬░║²╔п│╠л╣и∙╣╫я■│╫и╔²╔╦─┴и∙≥л╫║∙┘▒л╪▒AI%YQ}Q}	I9 ┬│П│┘щ╛─²Маи╔╧п─░еТ°╓┬(─────────│я∙мп─╣╦─┬▒I5=Q}M!┬(─────────│я∙мп─┬▒1=1}M!┬─Т─┬▒I5=Q}M!┬(─────────│∙█║╪─┴█╫и∙}█╫╣╣╔я}м║└Т▒1=1}M!┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│∙█║╪─┴м╫уи█∙}█╫▒∙}м║└Т▒M=UI}=}M!┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│и╢─╣≤─┬▒M-AML┬(─────────│∙█║╪─▀┼r│А┘█п│аи╔ы┘я■│иу╧я╔╣■╣▒┘я└│█╫╣╣╔п│ы∙и╔≥╔∙░┬((──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────▄│MQ%=8─лю─╢│1MM%d│AI=UQ%=8│1IP│=9%Q%=8(──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────╢│╧┘╣■Х─┬лю╦д│∙я∙и╣╔╧■│щ║∙я║∙х│║у╣┘╦│┘яя∙╧я╔╫╦│╔л│и∙еу╔и∙░┬(───────│╔≤Х│┘╠щ┘Ел═╓(───────│∙╧ьХ(─────────│)=	}MQQULХ─▒МЛ│╘╫┬╧мя┘яул│УТ(───────│иу╦Х│П(─────────│м∙п─╜■(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬(─────────│l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘уя═╣и∙█╫ы∙иД╣≥┘╔╠∙░┬│t─≤≤│∙█║╪─┴YA9}UQ!}I=YIe}%1┬─Ь─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬(─────────│l─└─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬│t─≤≤│l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣м∙█и∙п╣уа▒┘я■╣≥┘╔╠∙░┬│t─≤≤│∙█║╪─┴YA9}MIQ}UAQ}%1┬─Ь─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬(─────────│l─└─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬│t─≤≤│l─┬▒)=	}MQQUL┬─Т─┴≥┘╔╠уи■┬│t─≤≤│∙█║╪─┴AI=UQ%=9}]=I-1=]}%1┬─Ь─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬(─────────│l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬│t│p(────────────≤≤│∙█║╪─▀┼j─│Aи╫▒у█я╔╫╦│┘╠∙ип│и∙еу╔и∙░Х─░║█┘п─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬╓┬│p(───────────│ЯП│∙█║╪─▀┼r│9╪│аи╫▒у█я╔╫╦│┘╠∙ип│и∙еу╔и∙░┬((──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────▄│MQ%=8─лд─╢│M9│AI%YQ│!% ╣AI%=I%Qd│1IP│Q!I=U │5-╫=UQ1==,(──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────╢│╧┘╣■Х─┬лд╦д│M∙╧░│аи╫▒у█я╔╫╦│YA8│и∙█╫ы∙иД│┘╠∙ип┬(───────│╔░Х│м∙╧▒}╣┘╜∙}┘╠∙ип(───────│╔≤Х│┘╠щ┘Ел═╓(───────│█╫╧я╔╧у■╣╫╦╣∙ии╫хХ│яиу■(───────│∙╧ьХ(─────────│1IQ}5-}]	!==-}UI0Х─▒МЛ│м∙█и∙ял╧1IQ}5-}]	!==-}UI0│УТ(─────────│1IQ}5-}A%}-dХ─▒МЛ│м∙█и∙ял╧1IQ}5-}A%}-d│УТ(─────────│1IQ}!QAQ}!Q}UI0Х─▒МЛ│м∙█и∙ял╧1IQ}!QAQ}!Q}UI0│УТ(─────────│1IQ}1=1}!1AI}Q=-8Х─▒МЛ│м∙█и∙ял╧1IQ}1=1}!1AI}Q=-8│УТ(─────────│IeAQ=}1=I}9Y%I=959PХ│AI=UQ%=8(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│1IQ}%1Т┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬(─────────│9=Q%%HТ┴аи╔ы┘я∙}╠╫²²∙х╫иЕая╪│1╫²²∙х╣Aи╔ы┘я■│I∙а╪╫ыа╧}┘уя║}и∙█╫ы∙иД╫┘╠∙ия}∙╣┘╔╟╧аД┬(─────────│╔≤│l─└─╣≤─┬▒1IQ}%1┬│tЛ│я║∙╦(───────────│∙█║╪─┴и∙еу╔и∙░У≥┘╠м■┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(───────────│∙█║╪─┴9╪│аи╫▒у█я╔╫╦│YA8│и∙█╫ы∙иД│┘╠∙ип│и∙еу╔и∙░┬(───────────│∙А╔п─ю(─────────│≥╓(─────────│∙█║╪─┴и∙еу╔и∙░Уяиу■┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│я∙мп─╣л─┬▒9=Q%%H┬│ЯП│Л│∙█║╪─▀┼v0│┘╠∙ия}∙╣┘╔╟╧аД│у╧┘ы┘╔╠┘┴╠■┬Л│∙А╔п─дЛ│Т(─────────│я∙мп─╣╦─┬▒1IQ}5-}]	!==-}UI0┬│ЯП│Л│∙█║╪─▀┼v0│1IQ}5-}]	!==-}UI0│╣╔мм╔╧°┬Л│∙А╔п─дЛ│Т(─────────│я∙мп─╣╦─┬▒1IQ}5-}A%}-d┬│ЯП│Л│∙█║╪─▀┼v0│1IQ}5-}A%}-d│╣╔мм╔╧°┬Л│∙А╔п─дЛ│Т(─────────│1IQ}QeAТ┬░║█┘п─┬▒1IQ}%1┬╓┬(─────────│∙█║╪─┴┘╠∙ия}яЕа■Т▒1IQ}QeA┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│аЕя║╫╦─┬▒9=Q%%H┬─╢╣┘╠∙ип╣яЕа■─┬▒1IQ}QeA┬((──────╢│╧┘╣■Х─┬лд╦л│M∙╧░│▒∙▒уа╠╔█┘я∙░│аи╔█■╣м╫уи█■│∙ы∙╧п│┘╠∙ип┬(───────│╔░Х│м∙╧▒}аи╫ы╔▒∙и}┘╠∙ип(───────│╔≤Х│┘╠щ┘Ел═╓(───────│█╫╧я╔╧у■╣╫╦╣∙ии╫хХ│яиу■(───────│∙╧ьХ(─────────│1IQ}5-}]	!==-}UI0Х─▒МЛ│м∙█и∙ял╧1IQ}5-}]	!==-}UI0│УТ(─────────│1IQ}5-}A%}-dХ─▒МЛ│м∙█и∙ял╧1IQ}5-}A%}-d│УТ(─────────│1IQ}!QAQ}!Q}UI0Х─▒МЛ│м∙█и∙ял╧1IQ}!QAQ}!Q}UI0│УТ(─────────│1IQ}1=1}!1AI}Q=-8Х─▒МЛ│м∙█и∙ял╧1IQ}1=1}!1AI}Q=-8│УТ(─────────│IeAQ=}1=I}9Y%I=959PХ│AI=UQ%=8(─────────│AI=Y%I}Y9Q}%1Х─▒МЛ│иу╧╧∙х╧я∙╣ю│УТ╫аи╫ы╔▒∙х╣∙ы∙╧п╧╘м╫╦(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│9=Q%%HТ┴аи╔ы┘я∙}╠╫²²∙х╫иЕая╪│1╫²²∙х╣Aи╔ы┘я■│I∙а╪╫ыа╧}┘уя║}и∙█╫ы∙иД╫┘╠∙ия}∙╣┘╔╟╧аД┬(─────────│╔≤│l─└─╣л─┬▒AI=Y%I}Y9Q}%1┬│tЛ│я║∙╦(───────────│∙█║╪─┴и∙еу╔и∙░У≥┘╠м■┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(───────────│∙█║╪─┴9╪│╧∙э│аи╫ы╔▒∙х│╔╧█╔▒∙╧п╫м∙ы∙и╔яД╫и∙█╫ы∙иД│∙╣┘╔╟│и∙еу╔и∙░┬(───────────│∙А╔п─ю(─────────│≥╓(─────────│∙█║╪─┴и∙еу╔и∙░Уяиу■┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│Y9Q}QeAТ┬░║╘д─╣х─°╧∙ы∙╧я}яЕа■°─┬▒AI=Y%I}Y9Q}%1┬╓┬(─────────│Y9Q}MYI%QdТ┬░║╘д─╣х─°╧м∙ы∙и╔яД°─┬▒AI=Y%I}Y9Q}%1┬╓┬(─────────│Y9Q}%Т┬░║╘д─╣х─°╧∙ы∙╧я}╔░─╪╪│∙╣аяД°─┬▒AI=Y%I}Y9Q}%1┬╓┬(─────────│Y9Q}%9IAI%9PТ┬░║╘д─╣х─°╧≥╔╧²∙иаи╔╧п─╪╪│∙╣аяД°─┬▒AI=Y%I}Y9Q}%1┬╓┬(─────────│█┘м■─┬▒Y9Q}QeA┬│╔╦(───────────│AI%}M=UI}%9%9QЯAI%}M=UI}MYI%Qe}!9ЯAI%}M=UI}I=YI╓─ЛЛ(────────────╗╓│∙█║╪─▀┼v0│U╧муаа╫ия∙░│аи╫ы╔▒∙х│∙ы∙╧п│яЕа■Х─▒МY9Q}QeAТ┬Л│∙А╔п─д─ЛЛ(─────────│∙м┘▄(─────────│█┘м■─┬▒Y9Q}MYI%Qd┬│╔╦(───────────│!1Q!eЯ]I9%9ЯI%Q%0╓─ЛЛ(────────────╗╓│∙█║╪─▀┼v0│U╧муаа╫ия∙░│аи╫ы╔▒∙х│∙ы∙╧п│м∙ы∙и╔яД┬Л│∙А╔п─д─ЛЛ(─────────│∙м┘▄(─────────│ml─┬▒Y9Q}%┬─УЬ│ylю╢Е└╣≥uЛлиТ░│ut│ЯП│Л│∙█║╪─▀┼v0│%╧ы┘╠╔░│аи╫ы╔▒∙х│∙ы∙╧п│%┬Л│∙А╔п─дЛ│Т(─────────│ml─┬▒Y9Q}%9IAI%9P┬─УЬ│ylю╢Е└╣≥uЛьяТ░│ut│ЯП│Л│∙█║╪─▀┼v0│%╧ы┘╠╔░│аи╫ы╔▒∙х│≥╔╧²∙иаи╔╧п┬Л│∙А╔п─дЛ│Т(─────────│∙█║╪─┴┘╠∙ия}яЕа■Т▒Y9Q}QeA┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│∙█║╪─┴┘╠∙ия}м∙ы∙и╔яДТ▒Y9Q}MYI%Qd┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│∙█║╪─┴∙ы∙╧я}╔░Т▒Y9Q}%┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│∙█║╪─┴≥╔╧²∙иаи╔╧пТ▒Y9Q}%9IAI%9P┬─ЬЬ─┬▒%Q!U	}=UQAUP┬(─────────│аЕя║╫╦─┬▒9=Q%%H┬─╢╣┘╠∙ип╣яЕа■─┬▒Y9Q}QeA┬((──────╢│╧┘╣■Х─┬лд╦т│█╜╧╫щ╠∙▒²■│┘╧░│а∙им╔мп│▒∙╠╔ы∙и∙░│аи╫ы╔▒∙х│∙ы∙╧п┬(───────│╔≤Х│┘╠щ┘Ел═╓─≤≤│мя∙ал╧м∙╧▒}аи╫ы╔▒∙и}┘╠∙ип╧╫уяауял╧и∙еу╔и∙░─ТТ─²яиу■°─≤≤│мя∙ал╧м∙╧▒}аи╫ы╔▒∙и}┘╠∙ип╧╫уя█╫╣■─ТТ─²му██∙мл°(───────│█╫╧я╔╧у■╣╫╦╣∙ии╫хХ│яиу■(───────│∙╧ьХ(─────────│AI%YQ}Q}Q=-8Х─▒МЛ│м∙█и∙ял╧AI%YQ}Q}]I%Q}Q=-8│ЯП│м∙█и∙ял╧AI%YQ}IA=}Q=-8│УТ(─────────│AI=Y%I}Y9Q}%1Х─▒МЛ│иу╧╧∙х╧я∙╣ю│УТ╫аи╫ы╔▒∙х╣∙ы∙╧п╧╘м╫╦(─────────│%Q}QI5%91}AI=5APХ─┬ю┬(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│=9M9MULТ┴аи╔ы┘я∙}╠╫²²∙х╫иЕая╪│1╫²²∙х╣Aи╔ы┘я■│I∙а╪╫аи╫ы╔▒∙и}█╫╧м∙╧мул╧аД┬(─────────│аЕя║╫╦─┬▒=9M9MUL┬│┘█╜╧╫щ╠∙▒²■╣▒∙╠╔ы∙иД│p(────────────╢╣мя┘я■╣≥╔╠■│аи╔ы┘я∙}╠╫²²∙х╫аи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я■╧╘м╫╦│p(────────────╢╣∙ы∙╧п╣≥╔╠■─┬▒AI=Y%I}Y9Q}%1┬(─────────│█ю─╢╢│аи╔ы┘я∙}╠╫²²∙х╫аи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я■╧╘м╫╦│аи╔ы┘я∙}▒┘я└╫аи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я■╧╘м╫╦(─────────│█░│аи╔ы┘я∙}▒┘я└(─────────│²╔п│┘▒░─╢╢│аи╫ы╔▒∙и}╔╧█╔▒∙╧я}мя┘я■╧╘м╫╦(─────────│²╔п│▒╔≥≤─╢╣█┘█║∙░─╢╣еу╔∙п─≤≤│Л│∙█║╪─┴Aи╫ы╔▒∙х│∙ы∙╧п│щ┘л│┘╠и∙┘▒Д│┘█╜╧╫щ╠∙▒²∙░┬Л│∙А╔п─юЛ│Т(─────────│²╔п│█╫╣╣╔п─╣╢─┴█╜╧╫щ╠∙▒²■│аи╫ы╔▒∙х│┘╠∙ип─▒М%Q!U	}IU9}%Т┬(─────────│M-AMLТ┬▒МIU99I}Q5AТ╫█иЕая╪╣²╔п╣┘м╜а┘мл┬(─────────│аи╔╧я≤─°∙мq╦°─°▄└╫┴╔╦╫м═°│p(────────────²█┘м■─┬░д┬│╔╦°│p(────────────°──╘Uм∙и╧┘╣■╗╓│аи╔╧я≤─┬∙мqq╦┬─┴Ю╣┘██∙мл╣я╫╜∙╦┬─ЛЛ°│p(────────────°──╘A┘ммщ╫и░╗╓│аи╔╧я≤─┬∙мqq╦┬─┬▒AI%YQ}Q}Q=-8┬─ЛЛ°│p(────────────°──╗╓│∙А╔п─д─ЛЛ°│p(────────────²∙м┘▄°─Ь─┬▒M-AML┬(─────────│█║╣╫░─эюю─┬▒M-AML┬(─────────│∙Аа╫ип│%Q}M-AMLТ┬▒M-AML┬(─────────│²╔п│≥∙я█═│╫и╔²╔╦─┬▒AI%YQ}Q}	I9 ┬(─────────│²╔п│и∙┴┘м■─┴╫и╔²╔╦╪▒AI%YQ}Q}	I9 ┬(─────────│²╔п│аум═│╫и╔²╔╦─┴!Х▒AI%YQ}Q}	I9 ┬(─────────│и╢─╣≤─┬▒M-AML┬(─────────│∙█║╪─▀┼r│Aи╫ы╔▒∙х│▒∙╠╔ы∙иД│┘█╜╧╫щ╠∙▒²∙░│┘≥я∙х│5┘╜■│┘██∙ая∙░│я║■│∙ы∙╧п┬((──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────▄│MQ%=8─лх─╢│IQ│AI=UQ%=8│MUML│MU55Id(──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────╢│╧┘╣■Х─┬лх╦д│и∙┘я■│мяиу█яуи∙░│аи╫▒у█я╔╫╦│му╣╣┘иД┬(───────│╔≤Х│му██∙мл═╓(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│MXТ┴аи╔ы┘я∙}╠╫²²∙х╫аи╔█∙}╠╫°╧█мь┬(─────────│IA=IPТ┬▒МIU99I}Q5AТ╫аи╫ы╔▒∙х╣и∙а╫ип╧╘м╫╦┬(─────────│MY}I=]LТ┬░║щ▄─╣╟─П─┬▒MX┬│П│ях─╣░─°─°╓┬(─────────│UQ!}I=YIdТ┴9╫п│╧∙∙▒∙░┬(─────────│MIQ}UAQТ┴9╫п│╧∙∙▒∙░┬((─────────│╔≤│l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘уя═╣и∙█╫ы∙и∙░┬│tЛ│я║∙╦(───────────│UQ!}I=YIdТ┴Uм∙░│му██∙мм≥у╠╠Д┬(─────────│≥╓((─────────│╔≤│l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣м∙█и∙п╣уа▒┘я■╣му██∙мл┬│tЛ│я║∙╦(───────────│MIQ}UAQТ┴Uа▒┘я∙░│му██∙мм≥у╠╠Д┬(─────────│∙╠╔≤│l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣м∙█и∙п╣уа▒┘я■╣≥┘╔╠∙░┬│tЛ│я║∙╦(───────────│MIQ}UAQТ┴┘╔╠∙░─╢│аи╔ы┘я■│┘╠∙ип│и∙еу∙мя∙░┬(─────────│≥╓((─────────│Л(───────────│∙█║╪─┬▄▄┐б~j │иЕая╪│1╫²²∙х│П│5┘╔╦│П│Aи╫▒у█я╔╫╦│Lх┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬▄▄▄─д╦│Iу╦│╔▒∙╧я╔яД┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┴П│╔∙╠░│П│Y┘╠у■│П┬(───────────│∙█║╪─┴П╢╢╣П╢╢╣П┬(───────────│∙█║╪─┴П│Iу╦│П─▄▒М%Q!U	}IU9}9U5	IТ─║┘яя∙╣ап─▒М%Q!U	}IU9}QQ5AQТ╓│П┬(───────────│∙█║╪─┴П│Aу┴╠╔▄│█╫╣╣╔п│П│q─▒М%Q!U	}M!Уq─│П┬(───────────│∙█║╪─┴П│╫╣а╠∙я∙░│UQ│П─░║▒┘я■─╣т─╛°∙d╢∙╢╢∙░─∙ Х∙4Х∙L│UQ°╓│П┬(───────────│∙█║╪─┴П│Qи╔²²∙х│П─▒М%Q!U	}Y9Q}95Т│П┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬▄▄▄─х╦│9∙ящ╫и╛│┘╧░│и∙█╫ы∙иД┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬╢─╗╘5┘╧┘²∙░│мя┘ияую│╧∙ящ╫и╛Х╗╗─▒МMQIQUA}9Q]=I,Х╣U╧╜╧╫щ╧Т┬(───────────│∙█║╪─┬╢─╗╘YA8х│█╫╠░╣мя┘╧▒┴Д│аи╫≥╔╠■Х╗╗│Y┘╠╔▒┘я∙░┬(───────────│∙█║╪─┬╢─╗╘YA9	╫╫╛│┘уя═│и∙█╫ы∙иДХ╗╗─▒МUQ!}I=YIeТ┬(───────────│∙█║╪─┬╢─╗╘╔я!у┬│YA8│м∙█и∙п│уа▒┘я■Х╗╗─▒МMIQ}UAQТ┬(───────────│∙█║╪─┬╢─╗╘Aи╫ы╔▒∙х╣яи╔²²∙и∙░│╧∙ящ╫и╛│и∙█╫ы∙иДХ╗╗│╧┘┴╠∙░┬(───────────│∙█║╪─┬╢─╗╘Mу██∙мм≥у╟│и∙█╫╧╧∙█ялХ╗╗─░║╘д─╣х─°╧╧∙ящ╫и╜}и∙█╫ы∙иД╧и∙█╫╧╧∙█я}█╫у╧п─╪╪─ю°─┬▒IA=IP┬╓┬(───────────│∙█║╪─┬╢─╗╘Mу██∙мм≥у╟│YA8х│мщ╔я█║∙лХ╗╗─░║╘д─╣х─°╧╧∙ящ╫и╜}и∙█╫ы∙иД╧мщ╔я█║}█╫у╧п─╪╪─ю°─┬▒IA=IP┬╓┬(───────────│∙█║╪─┬╢─╗╘9∙ящ╫и╛│┘≥я∙х│█╫╠╠∙█я╔╫╦Х╗╗─░║╘д─╣х─°╧╧∙ящ╫и╜}и∙█╫ы∙иД╧┘█я╔ы∙}╧∙ящ╫и╛─╪╪─┴у╧╜╧╫щ╦┬°─┬▒IA=IP┬╓┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬▄▄▄─л╦│Aи╫ы╔▒∙х│║∙┘╠я═┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┴П│Aи╫ы╔▒∙х│а┘я═│П│I∙му╠п│П┬(───────────│∙█║╪─┴П╢╢╣П╢╢╣П┬(───────────│╘д─╣х─°╧аи╫ы╔▒∙и}мя┘яум∙л│П│я╫}∙╧яи╔∙л│П│м╫ия}┴Д═╧╜∙Д╔mt│П─┴П│p═╧╜∙Д╓│П│p═╧ы┘╠у■╓│П┬°─┬▒IA=IP┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬╢─╗╘=ы∙и┘╠╟│м╫уи█■│м∙ы∙и╔яДХ╗╗─░║╘д─╣х─°╧╫ы∙и┘╠╠}м∙ы∙и╔яД°─┬▒IA=IP┬╓┬(───────────│∙█║╪─┬╢─╗╘Qи┘▒╔╧°│┘╠╠╫щ∙░Х╗╗─░║╘д─╣х─°╧яи┘▒╔╧²}┘╠╠╫щ∙░°─┬▒IA=IP┬╓┬(───────────│∙█║╪─┬╢─╗╘`│м∙╠∙█я╔╫╦Х╗╗─░║╘д─╣х─°╧≥А}мя┘яул°─┬▒IA=IP┬╓┬(───────────│∙█║╪─┬╢─╗╘≥≥∙█я∙░│мЕ╣┴╫╠лХ╗╗─░║╘д─╣х─°╧┘≥≥∙█я∙▒}мЕ╣┴╫╠л│П│╘╫╔╦═┬╟─┬╓│П│╔≤│╠∙╧²я═─ТТ─ю│я║∙╦─┴9╫╧■┬│∙╠м■─╦│∙╧░°─┬▒IA=IP┬╓┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬▄▄▄─п╦│A∙х╣мЕ╣┴╫╟│█╫╧м∙╧мул┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┴П│MЕ╣┴╫╟│П│∙█╔м╔╫╦│П│╫╧≥╔▒∙╧█■│П│M∙ы∙и╔яД│П│M╫уи█∙л│ум∙░│П┬(───────────│∙█║╪─┴П╢╢╣П╢╢╣П╢╢╣П╢╢╣П╢╢╣П┬(───────────│╘д─╣х─°╧▒∙█╔м╔╫╧л│П│я╫}∙╧яи╔∙л│П│м╫ия}┴Д═╧╜∙Д╔mt│П─┴П│p═╧╜∙Д╓│П│p═╧ы┘╠у■╧мя┘яул╓│П│p═╧ы┘╠у■╧█╫╧≥╔▒∙╧█■╓│П│p═╧ы┘╠у■╧м∙ы∙и╔яД╓│П│p═╧ы┘╠у■╧ум∙▒}м╫уи█∙л│П│╘╫╔╦═┬─╛─┬╓╓│П┬°─┬▒IA=IP┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬▄▄▄─т╦│A∙им╔мя∙╧█■│┘╧░│▒╫щ╧мяи∙┘╢│мя┘я■┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬╢─╗╘I╫щл│┘аа∙╧▒∙░│я║╔л│иу╦Х╗╗─дд┬(───────────│∙█║╪─┬╢─╗╘Aи╫▒у█я╔╫╦│MX│и╫щлХ╗╗─▒МMY}I=]MТ┬(───────────│∙█║╪─┬╢─╗╘%╧█╔▒∙╧п│мя┘я■│а∙им╔мя∙░Х╗╗│e∙л┬(───────────│∙█║╪─┬╢─╗╘9∙╫╦│║┘╧▒╫≥≤Х╗╗│Iу╧л│╫╧╠Д│┘≥я∙х│я║■│∙А┘█п│иу╧я╔╣■╣▒┘я└│█╫╣╣╔п│╔л│ы∙и╔≥╔∙░┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬▄▄▄─ь╦│9∙Ап│аи╫▒у█я╔╫╦│а║┘м■┬(───────────│∙█║╪─┬┬(───────────│∙█║╪─┬╢│Lх│щ╔╠╟│щ╔и■│█╠┘мм╔≥╔∙░│аи╫ы╔▒∙х│≥┘╔╠уи∙л│╔╧я╪│YA8х│мщ╔я█║╔╧°│┘╧░│∙Ая∙╧▒∙░│и∙яи╔∙л╦┬(───────────│∙█║╪─┬╢│у╠╟│я╔╣■╣┘щ┘и■│M╣┘ип│┘█║■│и∙╣┘╔╧л│▒∙╠╔┴∙и┘я∙╠Д│м∙а┘и┘я■│≥и╫╢│я║╔л│╔╧я∙и╔╢│яиумя∙░╣║╔мя╫иД│²у┘и░╦┬(─────────│Т─ЬЬ─┬▒%Q!U	}MQA}MU55Id┬((──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────▄│MQ%=8─лл─╢│=11P│%1UI│%9=MQ%L(──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────╢│╧┘╣■Х─┬лл╦д│╫╠╠∙█п│╧╫╦╣м∙█и∙п│аи╫▒у█я╔╫╦│▒╔┘²╧╫мя╔█л┬(───────│╔≤Х│≥┘╔╠уи■═╓(───────│иу╦Х│П(─────────│м∙п─╜■(─────────│╣╜▒╔х─╣ю│▒∙┴у°(─────────│Л(───────────│∙█║╪─²Л°(───────────│аи╔╧я≤─°──┴иу╧}╔░┬Х─┬∙л┬╠q╦°─┬▒%Q!U	}IU9}%┬(───────────│аи╔╧я≤─°──┴иу╧}┘яя∙╣ап┬Х─┬∙л┬╠q╦°─┬▒%Q!U	}IU9}QQ5AP┬(───────────│аи╔╧я≤─°──┴м╫уи█∙}█╫▒∙}м║└┬Х─┬∙л┬╠q╦°─┬▒МM=UI}=}M!Х╣у╧┘ы┘╔╠┘┴╠∙Т┬(───────────│аи╔╧я≤─°──┴ыа╧}┘уя║}и∙█╫ы∙и∙░┬Х─∙л╠q╦°─┬░║l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘уя═╣и∙█╫ы∙и∙░┬│t─≤≤│∙█║╪│яиу■│ЯП│∙█║╪│≥┘╠м■╓┬(───────────│аи╔╧я≤─°──┴ыа╧}┘уя║}и∙█╫ы∙иЕ}≥┘╔╠∙░┬Х─∙л╠q╦°─┬░║l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘уя═╣и∙█╫ы∙иД╣≥┘╔╠∙░┬│t─≤≤│∙█║╪│яиу■│ЯП│∙█║╪│≥┘╠м■╓┬(───────────│аи╔╧я≤─°──┴ыа╧}м∙█и∙я}уа▒┘я∙}≥┘╔╠∙░┬Х─∙мq╦°─┬░║l─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣м∙█и∙п╣уа▒┘я■╣≥┘╔╠∙░┬│t─≤≤│∙█║╪│яиу■│ЯП│∙█║╪│≥┘╠м■╓┬(───────────│∙█║╪─²Т°(─────────│Т─Ь│▒∙┴у°╫▒╔┘²╧╫мя╔▄╣му╣╣┘иД╧╘м╫╦(─────────│╔≤│l─╣л─┬▒МIU99I}Q5AТ╫аи╫ы╔▒∙х╣и∙а╫ип╧╘м╫╦┬│tЛ│я║∙╦(───────────│╘д─²Мы∙им╔╫╦╟│╫ы∙и┘╠╠}м∙ы∙и╔яД╟│яи┘▒╔╧²}┘╠╠╫щ∙░╟(────────────────│┘≥≥∙█я∙▒}мЕ╣┴╫╠}█╫у╧пХ─═╧┘≥≥∙█я∙▒}мЕ╣┴╫╠л│П│╠∙╧²я═╓╟(────────────────│аи╫ы╔▒∙и}мя┘яум∙мТ°─┬▒МIU99I}Q5AТ╫аи╫ы╔▒∙х╣и∙а╫ип╧╘м╫╦┬│p(──────────────Ь│▒∙┴у°╫аи╫ы╔▒∙х╣му╣╣┘иД╧╘м╫╦│ЯП│яиу■(─────────│≥╓(─────────│█║╣╫░─╣H│т╜ищ`╠²╪╣ищЮ│▒∙┴у°((──────╢│╧┘╣■Х─┬лл╦х│Uа╠╫┘░│аи╫▒у█я╔╫╦│≥┘╔╠уи■│▒╔┘²╧╫мя╔█л┬(───────│╔≤Х│≥┘╔╠уи■═╓(───────│█╫╧я╔╧у■╣╫╦╣∙ии╫хХ│яиу■(───────│ум∙лХ│┘█я╔╫╧л╫уа╠╫┘░╣┘ия╔≥┘█я юпм≥┬пы░е└Дм▄эщ┘┘■ьты■щ▄е▄ья└Юэу░е≥▄ы└а└─▄│ьэ(───────│щ╔я═Х(─────────│╧┘╣■Х│аи╫▒у█я╔╫╦╣█иЕая╪╣аи╔█■╣╠╫²²∙х╣▒∙┴у°╢▒МЛ│²╔я║у┬╧иу╧}╔░│УТ╢▒МЛ│²╔я║у┬╧иу╧}┘яя∙╣ап│УТ(─────────│а┘я═Х│▒∙┴у°╪(─────────│╔≤╣╧╪╣≥╔╠∙л╣≥╫у╧░Х│╔²╧╫и■(─────────│и∙я∙╧я╔╫╦╣▒┘ЕлХ─л((──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────▄│MQ%=8─лп─╢│%90│A!5I0│IU99H│19U@(──────▄─ТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТТ(──────╢│╧┘╣■Х─┬лп╦д│╠∙┘╧ую│я∙╣а╫и┘иД│аи╫▒у█я╔╫╦│иу╧╧∙х│▒┘я└┬(───────│╔≤Х│┘╠щ┘Ел═╓(───────│∙╧ьХ─╘╧∙ящ╫и╜}∙╧ь(───────│иу╦Х│П(─────────│м∙п─╜■(─────────│59HТ┴аи╔ы┘я∙}╠╫²²∙х╫иЕая╪│1╫²²∙х╣Aи╔ы┘я■│I∙а╪╫╧∙ящ╫и╜}╣┘╧┘²∙х╧аД┬(─────────│l─╣≤─┬▒59H┬│t─≤≤│аЕя║╫╦─┬▒59H┬│и∙м∙п─Ь╫▒∙ь╫╧у╠╟─хЬ≤д│ЯП│яиу■(─────────│и╢─╣и≤│аи╔ы┘я∙}╠╫²²∙х│аи╔ы┘я∙}▒┘я└(─────────│му▒╪│и╢─╣и≤│▒∙┴у°(─────────│и╢─╣и≤─┬▒МIU99I}Q5AТ╫╧∙ящ╫и╛╣╣┘╧┘²∙х┬(─────────│и╢─╣и≤─┬▒МIU99I}Q5AТ╫ыа╦╣иу╧я╔╣■┬(─────────│и╢─╣и≤─┬▒МIU99I}Q5AТ╫█мь╣и∙█╫ы∙иД┬(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫ыа╦╣┘╠∙ип╣яЕа■╧яАп┬(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫аи╫ы╔▒∙х╣и∙а╫ип╧╘м╫╦┬(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫аи╫ы╔▒∙х╣∙ы∙╧п╧╘м╫╦┬(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫█╫╔╧┴┘м■╣аи╫┴■╧яАп┬(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫█╫╔╧²∙█╜╪╣аи╫┴■╧яАп┬(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫┴╔╧┘╧█■╣аи╫┴■╧яАп┬(─────────│и╢─╣≤─┬▒МIU99I}Q5AТ╫█иЕая╪╣²╔п╣┘м╜а┘мл┬(─────────│∙█║╪─▀┼r│Aи╫▒у█я╔╫╦│иу╧╧∙х│█╠∙┘╧ую│█╫╣а╠∙я∙░┬((─│мЕ╧▄╣╧∙╫╦Х(───│╧┘╣■Х│MЕ╧▄│∙А┘█п│█╫╣╣╔яя∙░│┴┘я█═│я╪│9∙╫╦(───│╧∙∙▒лХ(──────╢│ы┘╠╔▒┘я■╣╔╧ы╫█┘я╔╫╦(──────╢│иу╦╣╠╫²²∙х(───│╔≤Х─Ь╢(─────│┘╠щ┘Ел═╓─≤≤(─────│╧∙∙▒л╧ы┘╠╔▒┘я■╣╔╧ы╫█┘я╔╫╦╧и∙му╠п─ТТ─²му██∙мл°─≤≤(─────│╧∙∙▒л╧ы┘╠╔▒┘я■╣╔╧ы╫█┘я╔╫╦╧╫уяауял╧╧∙╫╧}мя┘я■─ТТ─²∙╧┘┴╠∙░°─≤≤(─────│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧█╫и∙}█╫╣╣╔я}м║└─└Т─°°─≤≤(─────│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧м╫уи█∙}█╫▒∙}м║└─└Т─°°(───│иу╧л╣╫╦Х│у┴у╧ят╣╠┘я∙мп(───│я╔╣∙╫уп╣╣╔╧уя∙лХ─дю(───│а∙и╣╔мм╔╫╧лХ(─────│█╫╧я∙╧ялХ│и∙┘░(───│мя∙алХ(──────╢│╧┘╣■Х│Y┘╠╔▒┘я■│∙А┘█п│║┘╧▒╫≥≤│┘╧░│▒┘я┘┴┘м■│м∙█и∙п(───────│∙╧ьХ(─────────│AI%YQ}=}Q=-8Х─▒МЛ│м∙█и∙ял╧AI%YQ}=}I}Q=-8│ЯП│м∙█и∙ял╧AI%YQ}IA=}Q=-8│УТ(─────────│AI%YQ}Q}Q=-8Х─▒МЛ│м∙█и∙ял╧AI%YQ}Q}]I%Q}Q=-8│ЯП│м∙█и∙ял╧AI%YQ}IA=}Q=-8│УТ(─────────│9=9}Q	M}UI0Х─▒МЛ│м∙█и∙ял╧9=9}Q	M}UI0│УТ(─────────│Q}M!Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧█╫и∙}█╫╣╣╔я}м║└│УТ(─────────│M=UI}M!Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧м╫уи█∙}█╫▒∙}м║└│УТ(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│я∙мп─╣╦─┬▒AI%YQ}=}Q=-8┬(─────────│я∙мп─╣╦─┬▒AI%YQ}Q}Q=-8┬(─────────│я∙мп─╣╦─┬▒9=9}Q	M}UI0┬(─────────│ml─┬▒Q}M!┬─УЬ│ylю╢Е└╣≥uЛпаТ░│ut(─────────│ml─┬▒M=UI}M!┬─УЬ│ylю╢Е└╣≥uЛпаТ░│ut((──────╢│╧┘╣■Х│║∙█╜╫уп│∙А┘█п│█╫╣╣╔яя∙░│иу╧я╔╣■│▒┘я└(───────│ум∙лХ│┘█я╔╫╧л╫█║∙█╜╫уя░хлппе└пА■тды┬ы▄ля┘∙└я≥└пдтте└ла■ла┘≤Ююл─▄│ьь(───────│щ╔я═Х(─────────│и∙а╫м╔я╫иДХ─▒МЛ│∙╧ь╧AI%YQ}IA=M%Q=Id│УТ(─────────│я╫╜∙╦Х─▒МЛ│м∙█и∙ял╧AI%YQ}Q}]I%Q}Q=-8│ЯП│м∙█и∙ял╧AI%YQ}IA=}Q=-8│УТ(─────────│и∙≤Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧█╫и∙}█╫╣╣╔я}м║└│УТ(─────────│а┘я═Х│аи╔ы┘я∙}▒┘я└(─────────│≥∙я█═╣▒∙ая═Х─д(─────────│а∙им╔мп╣█и∙▒∙╧я╔┘╠лХ│≥┘╠м■((──────╢│╧┘╣■Х│║∙█╜╫уп│∙А┘█п│м╫уи█■│ум∙░│┴Д│я║■│╠╫²²∙х(───────│ум∙лХ│┘█я╔╫╧л╫█║∙█╜╫уя░хлппе└пА■тды┬ы▄ля┘∙└я≥└пдтте└ла■ла┘≤Ююл─▄│ьь(───────│щ╔я═Х(─────────│и∙а╫м╔я╫иДХ─▒МЛ│∙╧ь╧AI%YQ}IA=M%Q=Id│УТ(─────────│я╫╜∙╦Х─▒МЛ│м∙█и∙ял╧AI%YQ}=}I}Q=-8│ЯП│м∙█и∙ял╧AI%YQ}IA=}Q=-8│УТ(─────────│и∙≤Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧м╫уи█∙}█╫▒∙}м║└│УТ(─────────│а┘я═Х│аи╔ы┘я∙}м╫уи█■(─────────│≥∙я█═╣▒∙ая═Х─д(─────────│а∙им╔мп╣█и∙▒∙╧я╔┘╠лХ│≥┘╠м■((──────╢│╧┘╣■Х│Y∙и╔≥Д│╣┘╧╔≥∙мп│┘╧░│┘мм∙╣┴╠■│∙А┘█п│мЕ╧▄│щ╫и╜ма┘█■(───────│∙╧ьХ(─────────│Q}M!Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧█╫и∙}█╫╣╣╔я}м║└│УТ(─────────│M=UI}M!Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧м╫уи█∙}█╫▒∙}м║└│УТ(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│я∙мп─┬░║²╔п─╣│аи╔ы┘я∙}▒┘я└│и∙ь╣а┘им■│!╓┬─Т─┬▒Q}M!┬(─────────│я∙мп─┬░║²╔п─╣│аи╔ы┘я∙}м╫уи█■│и∙ь╣а┘им■│!╓┬─Т─┬▒M=UI}M!┬(─────────│я∙мп─┬░║╘д─╣х─°╧м╫уи█∙}█╫▒∙}м║└°│аи╔ы┘я∙}▒┘я└╫иу╧я╔╣∙}╣┘╧╔≥∙мп╧╘м╫╦╓┬─Т─┬▒M=UI}M!┬(─────────│я∙мп─┬░║╘д─╣х─°╧аи╫▒у█∙и}иу╧}╔░°│аи╔ы┘я∙}▒┘я└╫иу╧я╔╣∙}╣┘╧╔≥∙мп╧╘м╫╦╓┬─Т─┬▒%Q!U	}IU9}%┬(─────────│█ю─╢╢│аи╔ы┘я∙}▒┘я└╫аи╔█∙}╠╫°╧█мь│аи╔ы┘я∙}м╫уи█■╫аи╔█∙}╠╫°╧█мь(─────────│█ю─╢╢│аи╔ы┘я∙}▒┘я└╫█мы}мя┘я■╧╘м╫╦│аи╔ы┘я∙}м╫уи█■╫█мы}мя┘я■╧╘м╫╦(─────────│∙█║╪─▀┼r│1╫²²∙х│м╫уи█■│┘╧░│█╫╣╣╔яя∙░│▒┘я└│║┘╧▒╫≥≤│╣┘я█═│∙А┘█я╠Д┬((──────╢│╧┘╣■Х│M∙п│ую│AЕя║╫╦─л╦дл(───────│ум∙лХ│┘█я╔╫╧л╫м∙яую╣аЕя║╫╧∙█■щ█┬юы█┘∙≥└у≥≥≤эпдДА░ЮьпДЮюы▄пьэА▄ье└д─▄│ьь(───────│щ╔я═Х(─────────│аЕя║╫╦╣ы∙им╔╫╦Х─┬л╦дл┬(─────────│█┘█║■Х│а╔ю(─────────│█┘█║■╣▒∙а∙╧▒∙╧█Д╣а┘я═Х│аи╔ы┘я∙}м╫уи█■╫иЕая╪│1╫²²∙х╣Aи╔ы┘я■│I∙а╪╫и∙еу╔и∙╣∙╧ял╧╠╫█╛((──────╢│╧┘╣■Х│%╧мя┘╠╟│╠╫█╜∙░│аи╔ы┘я■│▒∙а∙╧▒∙╧█╔∙л(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│аЕя║╫╦─╣╢│а╔ю│╔╧мя┘╠╟─╢╣▒╔м┘┴╠■╣а╔ю╣ы∙им╔╫╦╣█║∙█╛│p(────────────╢╣и∙еу╔и■╣║┘м║∙л─╢╣╫╧╠Д╣┴╔╧┘иДТИ┘╠╟Х│p(────────────╣х─┴аи╔ы┘я∙}м╫уи█■╫иЕая╪│1╫²²∙х╣Aи╔ы┘я■│I∙а╪╫и∙еу╔и∙╣∙╧ял╧╠╫█╛┬(─────────│аЕя║╫╦─╣╢│а╔ю│█║∙█╛((──────╢│╧┘╣■Х│Iу╦│∙А┘█п│╫╧■╣щ┘Д│9∙╫╦│мЕ╧▄(───────│∙╧ьХ(─────────│9=9}Q	M}UI0Х─▒МЛ│м∙█и∙ял╧9=9}Q	M}UI0│УТ(───────│иу╦Х│П(─────────│м∙п─╣∙у╪│а╔а∙≥┘╔╟(─────────│█░│аи╔ы┘я∙}м╫уи█■(─────────│аЕя║╫╦─┴9∙╫╦│MЕ╧▄╫мЕ╧█}я╫}╧∙╫╦╧аД┬((──────╢│╧┘╣■Х│Aу┴╠╔м═│м┘╧╔я╔И∙░│9∙╫╦│║┘╧▒╫≥≤│му╣╣┘иД(───────│╔≤Х│┘╠щ┘Ел═╓(───────│∙╧ьХ(─────────│Q}M!Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧█╫и∙}█╫╣╣╔я}м║└│УТ(─────────│M=UI}M!Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧м╫уи█∙}█╫▒∙}м║└│УТ(───────│иу╦Х│П(─────────│Л(───────────│∙█║╪─┬▄▄│9∙╫╦│∙А┘█п│║┘╧▒╫≥≤┬(───────────│∙█║╪─┬╢│Iу╧я╔╣■╣▒┘я└│█╫╣╣╔пХ│q─▒Q}M!q─┬(───────────│∙█║╪─┬╢│Aи╔ы┘я■│м╫уи█■│█╫╣╣╔пХ│q─▒M=UI}M!q─┬(───────────│∙█║╪─┬╢│9╪│MX│и╫щл╟│▒┘я┘┴┘м■│UI0╟│╫х│аи╫ы╔▒∙х│█и∙▒∙╧я╔┘╠л│щ∙и■│аи╔╧я∙░│╫х│уа╠╫┘▒∙░╦┬(─────────│Т─ЬЬ─┬▒%Q!U	}MQA}MU55Id┬((──────╢│╧┘╣■Х│╠∙┘╧ую│аи╔ы┘я■│║┘╧▒╫≥≤│щ╫и╜ма┘█∙л(───────│╔≤Х│┘╠щ┘Ел═╓(───────│иу╦Х│и╢─╣и≤│аи╔ы┘я∙}▒┘я└│аи╔ы┘я∙}м╫уи█■((─│≥┘╠╠┴┘█╛╣╔мму∙лХ(───│╧┘╣■Х│Qиумя∙░│╔я!у┬│%мму■│≥┘╠╠┴┘█╛(───│╧∙∙▒лХ(──────╢│иу╦╣╠╫²²∙х(──────╢│мЕ╧▄╣╧∙╫╦(───│╔≤Х│┘╠щ┘Ел═╓(───│иу╧л╣╫╦Х│у┴у╧ят╣╠┘я∙мп(───│я╔╣∙╫уп╣╣╔╧уя∙лХ─т(───│а∙и╣╔мм╔╫╧лХ(─────│█╫╧я∙╧ялХ│и∙┘░─▄│и∙я┘╔╦│я║■│щ╫и╜≥╠╫э╣щ╔▒■│и∙┘░╣╫╧╠Д│м╫уи█■│а∙и╣╔мм╔╫╦(─────│╔мму∙лХ│щи╔я■─▄│█и∙┘я■│╫х│уа▒┘я■│м┘╧╔я╔И∙░│┘╠∙ип╣▒∙╠╔ы∙иД│≥┘╠╠┴┘█╛│╔мму∙л(───│мя∙алХ(──────╢│╧┘╣■Х─┬лд╦х│и∙┘я■│╫х│уа▒┘я■│яиумя∙░│%мму■│╔≤│щ╫и╜≥╠╫э│┘╠∙ип│▒∙╠╔ы∙иД│≥┘╔╠л┬(───────│╔≤Х─Ь╢(─────────│╧∙∙▒л╧иу╦╣╠╫²²∙х╧и∙му╠п─ТТ─²≥┘╔╠уи■°│ЯП(─────────│╧∙∙▒л╧мЕ╧▄╣╧∙╫╦╧и∙му╠п─ТТ─²≥┘╔╠уи■°│ЯП(─────────│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧┘╠∙ия}▒∙╠╔ы∙иЕ}≥┘╔╠∙░─ТТ─²яиу■°(───────│█╫╧я╔╧у■╣╫╦╣∙ии╫хХ│яиу■(───────│ум∙лХ│┘█я╔╫╧л╫²╔я║у┬╣м█и╔ая∙░тДэпде░А≤Дхпюэм≤ДА▒≥▄у▄ьу└хм└хлху≤ля█░─▄│ьЮ(───────│∙╧ьХ(─────────│1=I}1IQ}QeAХ─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧┘╠∙ия}яЕа■│УТ(─────────│1=I}IMU1PХ─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧и∙му╠п│УТ(─────────│Me9}IMU1PХ─▒МЛ│╧∙∙▒л╧мЕ╧▄╣╧∙╫╦╧и∙му╠п│УТ(───────│щ╔я═Х(─────────│²╔я║у┬╣я╫╜∙╦Х─▒МЛ│²╔я║у┬╧я╫╜∙╦│УТ(─────────│м█и╔апХ│П(───────────│█╫╧мп│█иЕая╪─Т│и∙еу╔и■═┴█иЕая╪┬╓Л(───────────│█╫╧мп│Л│╫щ╧∙х╟│и∙а╪│Т─Т│█╫╧я∙Ап╧и∙а╪Л(───────────│█╫╧мп│╠┘┴∙╟─Т─┴█иЕая╪╣┘╠∙ип╣≥┘╠╠┴┘█╛┬Л(───────────│█╫╧мп│┘╠∙ияQЕа■─Т│аи╫█∙мл╧∙╧ь╧Me9}IMU1P─ТТТ─┴≥┘╔╠уи■┬(──────────────Э─┴9=9}Me9}%1┬(──────────────Х─║аи╫█∙мл╧∙╧ь╧1=I}1IQ}QeA│ЯП─┴AI=UQ%=9}]=I-1=]}%1┬╓Л(───────────│█╫╧мп│≥╔╧²∙иаи╔╧п─Т│█иЕая╪╧█и∙┘я∙!┘м══┴м║└хть┬╓(──────────────╧уа▒┘я■║│щ╫и╜≥╠╫эХ▒М┘╠∙ияQЕа∙У─╓(──────────────╧▒╔²∙мп═┴║∙Ю┬╓╧м╠╔█■═ю╟─хп╓Л(───────────│█╫╧мп│╣┘и╜∙х─Т│─П└╢╢│█иЕая╪╣┘╠∙ип╣≥┘╠╠┴┘█╛Х▒М≥╔╧²∙иаи╔╧яТ─╢╢Ы─Л(───────────│█╫╧мп│я╔я╠■─Т─▀б~j═│иЕая╪│1╫²²∙х│┘╠∙ип│▒∙╠╔ы∙иД│≥┘╔╠∙░┬Л(───────────│яиД│Л(─────────────│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧²∙я1┘┴∙╟║Л│╫щ╧∙х╟│и∙а╪╟│╧┘╣■Х│╠┘┴∙╟│Т╓Л(───────────│Т│█┘я█═─║∙ии╫х╓│Л(─────────────│╔≤─║∙ии╫х╧мя┘яул─└ТТ─пюп╓│я║и╫э│∙ии╫хЛ(─────────────│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧█и∙┘я∙1┘┴∙╟║Л(───────────────│╫щ╧∙х╟│и∙а╪╟│╧┘╣■Х│╠┘┴∙╟╟│█╫╠╫хХ─┴┬ьюхют┬╟(───────────────│▒∙м█и╔ая╔╫╦Х─┴Qиумя∙░│≥┘╠╠┴┘█╛│█и∙┘я∙░│┴Д│я║■│аи╫▒у█я╔╫╦│┘╠∙ип│щ╫и╜≥╠╫э┬(─────────────│Т╓Л(───────────│Т(───────────│█╫╧мп│╔мму∙л─Т│┘щ┘╔п│²╔я║у┬╧а┘²╔╧┘я■║²╔я║у┬╧и∙мп╧╔мму∙л╧╠╔мя╫иI∙а╪╟│Л(─────────────│╫щ╧∙х╟│и∙а╪╟│мя┘я■Х─┴╫а∙╦┬╟│╠┘┴∙╠лХ│╠┘┴∙╟╟│а∙и}а┘²■Х─дюю(───────────│Т╓Л(───────────│█╫╧мп│яиумя∙▒уя║╫ил─Т│╧∙э│M∙п║l┴²╔я║у┬╣┘█я╔╫╧мm┴╫яt┬╟│╫щ╧∙х╧я╫1╫щ∙и┘м■═╔t╓Л(───────────│█╫╧мп│∙А╔мя╔╧°─Т│╔мму∙л╧≥╔╧░║╔мму■─ТЬ(──────────────┘╔мму■╧ау╠╠}и∙еу∙мп─≤≤(─────────────│яиумя∙▒уя║╫ил╧║┘л═║╔мму■╧ум∙хЭ╧╠╫²╔╦│ЯП─┬┬╓╧я╫1╫щ∙и┘м■═╓╓─≤≤(─────────────│╔мму■╧╠┘┴∙╠л╧м╫╣■║╔я∙╢─ТЬ─║╔я∙╢╧╧┘╣■│ЯП│╔я∙╢╓─ТТТ│╠┘┴∙╟╓─≤≤(──────────────║╔мму■╧┴╫▒Д│ЯП─┬┬╓╧╔╧█╠у▒∙л║╣┘и╜∙х╓(────────────╓Л(───────────│█╫╧мп│иу╧Uи╟─Т││║яяалХ╪╫²╔я║у┬╧█╫╢╪▒М╫щ╧∙иТ╪▒Ми∙а╫Т╫┘█я╔╫╧л╫иу╧л╪▒М█╫╧я∙Ап╧иу╧%▒У─Л(───────────│█╫╧мп│и∙╣╔╧▒∙х─Т│l(─────────────││∙╠╔ы∙иД│≥┘╔╠∙░│┘²┘╔╦│≥╫х─╗╗▒М┘╠∙ияQЕа∙Т╗╗╧─╟(─────────────││Iу╦Х─▒Миу╧Uи╠У─╟(─────────────││яя∙╣апХ─▒Маи╫█∙мл╧∙╧ь╧%Q!U	}IU9}QQ5AP│ЯП─┴у╧╜╧╫щ╦┴У─(───────────│t╧╘╫╔╦═┴q╦┬╓Л(───────────│╔≤─║∙А╔мя╔╧°╓│Л(─────────────│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧█и∙┘я∙╫╣╣∙╧п║Л(───────────────│╫щ╧∙х╟│и∙а╪╟│╔мму∙}╧у╣┴∙хХ│∙А╔мя╔╧°╧╧у╣┴∙х╟│┴╫▒ДХ│и∙╣╔╧▒∙х(─────────────│Т╓Л(─────────────│█╫и■╧щ┘и╧╔╧°║│Uа▒┘я∙░│яиумя∙░│≥┘╠╠┴┘█╛│╔мму■─▄▒М∙А╔мя╔╧°╧╧у╣┴∙иУ─╓Л(─────────────│и∙яуи╦Л(───────────│Т(───────────│█╫╧мп│┴╫▒Д─Т│l(─────────────│╣┘и╜∙х╟(──────────────┬▄▄│иЕая╪│1╫²²∙х│┘╠∙ип│▒∙╠╔ы∙иД│≥┘╔╠уи■┬╟(──────────────┬┬╟(─────────────│─╢─╗╘╠∙ип│яЕа■Х╗╗─▒М┘╠∙ияQЕа∙У─╟(─────────────│─╢─╗╘Iу╦Х╗╗─▒Миу╧Uи╠У─╟(──────────────┬┬╟(──────────────┴║∙█╛│я║■│5┘╜■│м█∙╧┘и╔╪╟│=уя╠╫╫╛│=уя═│█╫╧╧∙█я╔╫╦╟│┘╧░│5┘╜■│и∙а╫м╔я╫иД│м∙█и∙ял╦│9╪│аи╫ы╔▒∙х│╫х│█и∙▒∙╧я╔┘╟│ы┘╠у■│╔л│╔╧█╠у▒∙░│║∙и■╦┬(───────────│t╧╘╫╔╦═┴q╦┬╓Л(───────────│█╫╧мп│█и∙┘я∙░─Т│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧█и∙┘я■║Л(─────────────│╫щ╧∙х╟│и∙а╪╟│я╔я╠■╟│┴╫▒Д╟│╠┘┴∙╠лХ│m╠┘┴∙╠t(───────────│Т╓Л(───────────│█╫и■╧щ┘и╧╔╧°║│и∙┘я∙░│яиумя∙░│≥┘╠╠┴┘█╛│╔мму■─▄▒М█и∙┘я∙░╧▒┘я└╧╧у╣┴∙иУ─╓Л((──────╢│╧┘╣■Х─┬лд╦п│и∙┘я■│╫х│уа▒┘я■│яиумя∙░│%мму■│╔≤│аи╫ы╔▒∙х│▒∙╠╔ы∙иД│≥┘╔╠л┬(───────│╔≤Х│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧аи╫ы╔▒∙и}┘╠∙ия}▒∙╠╔ы∙иЕ}≥┘╔╠∙░─ТТ─²яиу■°(───────│█╫╧я╔╧у■╣╫╦╣∙ии╫хХ│яиу■(───────│ум∙лХ│┘█я╔╫╧л╫²╔я║у┬╣м█и╔ая∙░тДэпде░А≤Дхпюэм≤ДА▒≥▄у▄ьу└хм└хлху≤ля█░─▄│ьЮ(───────│∙╧ьХ(─────────│1IQ}QeAХ─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧аи╫ы╔▒∙и}┘╠∙ия}яЕа■│УТ(─────────│1IQ}MYI%QdХ─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧аи╫ы╔▒∙и}┘╠∙ия}м∙ы∙и╔яД│УТ(─────────│1IQ}Y9Q}%Х─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧аи╫ы╔▒∙и}┘╠∙ия}∙ы∙╧я}╔░│УТ(─────────│1IQ}%9IAI%9PХ─▒МЛ│╧∙∙▒л╧иу╦╣╠╫²²∙х╧╫уяауял╧аи╫ы╔▒∙и}┘╠∙ия}≥╔╧²∙иаи╔╧п│УТ(───────│щ╔я═Х(─────────│²╔я║у┬╣я╫╜∙╦Х─▒МЛ│²╔я║у┬╧я╫╜∙╦│УТ(─────────│м█и╔апХ│П(───────────│█╫╧мп│█иЕая╪─Т│и∙еу╔и■═┴█иЕая╪┬╓Л(───────────│█╫╧мп│Л│╫щ╧∙х╟│и∙а╪│Т─Т│█╫╧я∙Ап╧и∙а╪Л(───────────│█╫╧мп│╠┘┴∙╟─Т─┴█иЕая╪╣┘╠∙ип╣≥┘╠╠┴┘█╛┬Л(───────────│█╫╧мп│∙ы∙╧яQЕа■─Т│аи╫█∙мл╧∙╧ь╧1IQ}QeA│ЯП─┴у╧╜╧╫щ╦┬Л(───────────│█╫╧мп│м∙ы∙и╔яД─Т│аи╫█∙мл╧∙╧ь╧1IQ}MYI%Qd│ЯП─┴у╧╜╧╫щ╦┬Л(───────────│█╫╧мп│∙ы∙╧я%░─Т│аи╫█∙мл╧∙╧ь╧1IQ}Y9Q}%│ЯП─┴╣╔мм╔╧°╣∙ы∙╧п╣╔░┬Л(───────────│█╫╧мп│∙ы∙╧я╔╧²∙иаи╔╧п─Т│аи╫█∙мл╧∙╧ь╧1IQ}%9IAI%9P│ЯП│∙ы∙╧я%░Л(───────────│█╫╧мп│≥╔╧²∙иаи╔╧п─Т│█иЕая╪╧█и∙┘я∙!┘м══┴м║└хть┬╓(──────────────╧уа▒┘я■║│аи╫ы╔▒∙хХ▒М∙ы∙╧я╔╧²∙иаи╔╧яУ─╓(──────────────╧▒╔²∙мп═┴║∙Ю┬╓╧м╠╔█■═ю╟─хп╓Л(───────────│█╫╧мп│╣┘и╜∙х─Т│─П└╢╢│█иЕая╪╣┘╠∙ип╣≥┘╠╠┴┘█╛Х▒М≥╔╧²∙иаи╔╧яТ─╢╢Ы─Л(───────────│█╫╧мп│я╔я╠■─Т─▀б~j═│иЕая╪│1╫²²∙х│аи╫ы╔▒∙х│┘╠∙ип│▒∙╠╔ы∙иД│≥┘╔╠∙░┬Л(───────────│яиД│Л(─────────────│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧²∙я1┘┴∙╟║Л│╫щ╧∙х╟│и∙а╪╟│╧┘╣■Х│╠┘┴∙╟│Т╓Л(───────────│Т│█┘я█═─║∙ии╫х╓│Л(─────────────│╔≤─║∙ии╫х╧мя┘яул─└ТТ─пюп╓│я║и╫э│∙ии╫хЛ(─────────────│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧█и∙┘я∙1┘┴∙╟║Л(───────────────│╫щ╧∙х╟│и∙а╪╟│╧┘╣■Х│╠┘┴∙╟╟│█╫╠╫хХ─┴┬ьюхют┬╟(───────────────│▒∙м█и╔ая╔╫╦Х─┴Qиумя∙░│≥┘╠╠┴┘█╛│█и∙┘я∙░│┴Д│я║■│аи╫▒у█я╔╫╦│┘╠∙ип│щ╫и╜≥╠╫э┬(─────────────│Т╓Л(───────────│Т(───────────│█╫╧мп│╔мму∙л─Т│┘щ┘╔п│²╔я║у┬╧а┘²╔╧┘я■║²╔я║у┬╧и∙мп╧╔мму∙л╧╠╔мя╫иI∙а╪╟│Л(─────────────│╫щ╧∙х╟│и∙а╪╟│мя┘я■Х─┴╫а∙╦┬╟│╠┘┴∙╠лХ│╠┘┴∙╟╟│а∙и}а┘²■Х─дюю(───────────│Т╓Л(───────────│█╫╧мп│яиумя∙▒уя║╫ил─Т│╧∙э│M∙п║l┴²╔я║у┬╣┘█я╔╫╧мm┴╫яt┬╟│╫щ╧∙х╧я╫1╫щ∙и┘м■═╔t╓Л(───────────│█╫╧мп│∙А╔мя╔╧°─Т│╔мму∙л╧≥╔╧░║╔мму■─ТЬ(──────────────┘╔мму■╧ау╠╠}и∙еу∙мп─≤≤(─────────────│яиумя∙▒уя║╫ил╧║┘л═║╔мму■╧ум∙хЭ╧╠╫²╔╦│ЯП─┬┬╓╧я╫1╫щ∙и┘м■═╓╓─≤≤(─────────────│╔мму■╧╠┘┴∙╠л╧м╫╣■║╔я∙╢─ТЬ─║╔я∙╢╧╧┘╣■│ЯП│╔я∙╢╓─ТТТ│╠┘┴∙╟╓─≤≤(──────────────║╔мму■╧┴╫▒Д│ЯП─┬┬╓╧╔╧█╠у▒∙л║╣┘и╜∙х╓(────────────╓Л(───────────│█╫╧мп│иу╧Uи╟─Т││║яяалХ╪╫²╔я║у┬╧█╫╢╪▒М╫щ╧∙иТ╪▒Ми∙а╫Т╫┘█я╔╫╧л╫иу╧л╪▒М█╫╧я∙Ап╧иу╧%▒У─Л(───────────│█╫╧мп│и∙╣╔╧▒∙х─Т││Aи╫ы╔▒∙х│┘╠∙ип│▒∙╠╔ы∙иД│≥┘╔╠∙░│┘²┘╔╦╦│ы∙╧пХ─╗╗▒М∙ы∙╧яQЕа∙Т╗╗Л│м∙ы∙и╔яДХ─╗╗▒Мм∙ы∙и╔яЕТ╗╗Л│иу╦Х─▒Миу╧Uи╠У─Л(───────────│╔≤─║∙А╔мя╔╧°╓│Л(─────────────│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧█и∙┘я∙╫╣╣∙╧п║Л(───────────────│╫щ╧∙х╟│и∙а╪╟│╔мму∙}╧у╣┴∙хХ│∙А╔мя╔╧°╧╧у╣┴∙х╟│┴╫▒ДХ│и∙╣╔╧▒∙х(─────────────│Т╓Л(─────────────│█╫и■╧щ┘и╧╔╧°║│Uа▒┘я∙░│яиумя∙░│аи╫ы╔▒∙х│≥┘╠╠┴┘█╛│╔мму■─▄▒М∙А╔мя╔╧°╧╧у╣┴∙иУ─╓Л(─────────────│и∙яуи╦Л(───────────│Т(───────────│█╫╧мп│┴╫▒Д─Т│l(─────────────│╣┘и╜∙х╟(──────────────┬▄▄│Aи╫ы╔▒∙х│┘╠∙ип│▒∙╠╔ы∙иД│≥┘╔╠уи■┬╟(──────────────┬┬╟(─────────────│─╢─╗╘ы∙╧пХ╗╗─▒М∙ы∙╧яQЕа∙У─╟(─────────────│─╢─╗╘M∙ы∙и╔яДХ╗╗─▒Мм∙ы∙и╔яЕУ─╟(─────────────│─╢─╗╘Iу╦Х╗╗─▒Миу╧Uи╠У─╟(──────────────┬┬╟(──────────────┴Q║■│∙ы∙╧п│и∙╣┘╔╧л│а∙╧▒╔╧°│╔╦│аи╔ы┘я■│иу╧я╔╣■│мя┘я■│┘╧░│щ╔╠╟│┴■│и∙яи╔∙░╦│9╪│аи╫ы╔▒∙х│A$│м∙█и∙п│╔л│╔╧█╠у▒∙░╦┬(───────────│t╧╘╫╔╦═┴q╦┬╓Л(───────────│█╫╧мп│█и∙┘я∙░─Т│┘щ┘╔п│²╔я║у┬╧и∙мп╧╔мму∙л╧█и∙┘я■║Л(─────────────│╫щ╧∙х╟│и∙а╪╟│я╔я╠■╟│┴╫▒Д╟│╠┘┴∙╠лХ│m╠┘┴∙╠t(───────────│Т╓Л(───────────│█╫и■╧щ┘и╧╔╧°║│и∙┘я∙░│яиумя∙░│аи╫ы╔▒∙х│≥┘╠╠┴┘█╛│╔мму■─▄▒М█и∙┘я∙░╧▒┘я└╧╧у╣┴∙иУ─╓Л
