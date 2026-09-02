@@ -6,7 +6,7 @@
   "private_data_branch": "runtime-data",
   "capabilities": {
     "logger": "enabled",
-    "runtime_maintenance": "enabled",
+    "runtime_maintenance": "disabled",
     "neon": "disabled"
   }
 }
