@@ -185,7 +185,7 @@ jobs:
           test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
           for state_file in csv_state.json provider_incident_state.json; do
             test -f "private_data/$state_file" || {
-              echo "❌ runtime-data is missing $state_file; seed the branch using CSV Maintenance"
+              echo "❌ runtime-data is missing $state_file; restore it on runtime-data before activation"
               exit 1
             }
             cp -- "private_data/$state_file" "private_logger/$state_file"
@@ -947,10 +947,10 @@ jobs:
             echo "- **Incident state persisted:** Yes"
             echo "- **Neon handoff:** Runs only after the exact runtime-data commit is verified"
             echo ""
-            echo "### 6. Next production phase"
+            echo "### 6. Release status"
             echo ""
-            echo "- S2 will wire classified provider failures into VPN2 switching and extended retries."
-            echo "- Full time-aware Smart Cache remains deliberately separate from this interim trusted-history guard."
+            echo "- S2 bounded provider recovery and consensus are active in this release."
+            echo "- S3 Smart Cache work remains separate and is not enabled by this workflow."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ======================================================================

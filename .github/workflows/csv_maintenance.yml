@@ -16,9 +16,8 @@ on:
           - delete-selected-batches
           - preview-existing-deletions
           - register-existing-deletions
-          - seed-runtime-data
       confirmation:
-        description: "RESET_PRICE_LOG, DELETE_PRICE_BATCHES, REGISTER_DELETED_BATCHES, or CREATE_RUNTIME_DATA"
+        description: "RESET_PRICE_LOG, DELETE_PRICE_BATCHES, or REGISTER_DELETED_BATCHES"
         required: false
         type: string
       reason:
@@ -103,89 +102,13 @@ jobs:
               test -n "$REQUEST_REASON"
               test -n "$REQUEST_BATCH_TIMESTAMPS"
               ;;
-            seed-runtime-data)
-              test "$REQUEST_CONFIRMATION" = "CREATE_RUNTIME_DATA"
-              ;;
             validate|restore-accidental-deletion) ;;
             *) echo "Unsupported maintenance operation"; exit 1 ;;
           esac
 
-  seed-runtime-data:
-    name: Seed isolated private runtime-data branch
-    needs: validate-request
-    if: inputs.operation == 'seed-runtime-data'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      PRIVATE_CODE_SHA: ${{ needs.validate-request.outputs.private_code_sha }}
-    steps:
-      - name: Checkout exact approved private source for initial data
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ env.PRIVATE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ env.PRIVATE_CODE_SHA }}
-          path: private_seed
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Create runtime-data branch without executable source
-        env:
-          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          for required in price_log.csv csv_state.json provider_incident_state.json; do
-            test -f "private_seed/$required" || { echo "Private main is missing $required"; exit 1; }
-            cp -- "private_seed/$required" "${RUNNER_TEMP}/$required"
-          done
-          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
-          printf '%s\n' '#!/bin/sh' \
-            'case "$1" in' \
-            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
-            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
-            '  *) exit 1 ;;' \
-            'esac' > "$ASKPASS"
-          chmod 700 "$ASKPASS"
-          export GIT_ASKPASS="$ASKPASS"
-          cd private_seed
-          if git ls-remote --exit-code origin "refs/heads/$PRIVATE_DATA_BRANCH" >/dev/null 2>&1; then
-            echo "runtime-data already exists; refusing to replace it"
-            exit 1
-          fi
-          git switch --orphan "$PRIVATE_DATA_BRANCH"
-          git rm -rf --ignore-unmatch -- .
-          cp -- "${RUNNER_TEMP}/price_log.csv" price_log.csv
-          cp -- "${RUNNER_TEMP}/csv_state.json" csv_state.json
-          cp -- "${RUNNER_TEMP}/provider_incident_state.json" provider_incident_state.json
-          jq -n \
-            --arg source_code_sha "${PRIVATE_CODE_SHA,,}" \
-            --arg generated_at_utc "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            '{version: 1, source_code_sha: $source_code_sha,
-              producer_repository: "controlled-seed",
-              producer_workflow: "CSV Maintenance | Controlled",
-              producer_run_id: env.GITHUB_RUN_ID,
-              producer_run_attempt: env.GITHUB_RUN_ATTEMPT,
-              generated_at_utc: $generated_at_utc}' > runtime_manifest.json
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- price_log.csv csv_state.json provider_incident_state.json runtime_manifest.json
-          git commit -m "Seed isolated crypto logger runtime data"
-          git push origin "HEAD:refs/heads/$PRIVATE_DATA_BRANCH"
-          rm -f "$ASKPASS"
-
-      - name: Cleanup seed workspace
-        if: always()
-        run: |
-          rm -rf private_seed
-          rm -f "${RUNNER_TEMP}/crypto-git-askpass"
-          rm -f "${RUNNER_TEMP}/price_log.csv" "${RUNNER_TEMP}/csv_state.json" \
-            "${RUNNER_TEMP}/provider_incident_state.json"
-
   maintain-runtime-data:
     name: Maintain isolated private runtime data
     needs: validate-request
-    if: inputs.operation != 'seed-runtime-data'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

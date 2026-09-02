@@ -29,9 +29,13 @@ def valid_manifest():
 
 
 class ReleaseManifestTests(unittest.TestCase):
-    def test_review_accepts_complete_disabled_manifest(self):
-        result = MODULE.validate_manifest(valid_manifest(), capability=None, execute=False)
-        self.assertEqual(result["private_commit_sha"], "a" * 40)
+    def test_review_accepts_complete_manifest_states(self):
+        for state in ("disabled", "enabled"):
+            with self.subTest(state=state):
+                value = valid_manifest()
+                value["capabilities"]["logger"] = state
+                result = MODULE.validate_manifest(value, capability=None, execute=False)
+                self.assertEqual(result["private_commit_sha"], "a" * 40)
 
     def test_execution_fails_closed_while_capability_disabled(self):
         with self.assertRaisesRegex(MODULE.ReleaseManifestError, "disabled"):

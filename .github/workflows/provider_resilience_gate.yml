@@ -34,7 +34,7 @@ jobs:
           ref: staging
           persist-credentials: false
 
-      - name: "03 Validate disabled production release authority"
+      - name: "03 Validate protected production release authority"
         id: release
         run: |
           set -euo pipefail
@@ -42,9 +42,6 @@ jobs:
             --mode review \
             --github-output "$GITHUB_OUTPUT"
           python -m unittest -v tests/test_validate_release_manifest.py
-          test "$(jq -r '.capabilities.logger' config/production-release.json)" = "disabled"
-          test "$(jq -r '.capabilities.runtime_maintenance' config/production-release.json)" = "disabled"
-          test "$(jq -r '.capabilities.neon' config/production-release.json)" = "disabled"
 
       - name: "04 Validate private read credential"
         env:
