@@ -1,5 +1,5 @@
-name: "Neon Reconciliation | Controlled"
-run-name: "Neon Reconciliation | ${{ inputs.operation }}"
+name: "Neon Audit | Weekly"
+run-name: "Neon Audit | Weekly | ${{ inputs.operation }}"
 
 on:
   workflow_dispatch:

@@ -1,5 +1,5 @@
-name: "Provider Resilience | Staging Verification Gate"
-run-name: "Provider Resilience | Offline S2 Verification"
+name: "Crypto Logger | Staging"
+run-name: "Crypto Logger | Staging | Offline Safety & Regression"
 
 on:
   push:
