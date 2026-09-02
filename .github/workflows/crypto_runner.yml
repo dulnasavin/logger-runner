@@ -185,7 +185,7 @@ jobs:
           test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
           for state_file in csv_state.json provider_incident_state.json; do
             test -f "private_data/$state_file" || {
-              echo "❌ runtime-data is missing $state_file; seed the branch using CSV Maintenance"
+              echo "❌ runtime-data is missing $state_file; restore it on runtime-data before activation"
               exit 1
             }
             cp -- "private_data/$state_file" "private_logger/$state_file"
