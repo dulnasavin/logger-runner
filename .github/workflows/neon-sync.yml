@@ -1,5 +1,5 @@
-name: "Neon Sync | Manual Catch-up"
-run-name: "Neon Sync | Manual Catch-up | #${{ github.run_number }}"
+name: "Neon Sync"
+run-name: "Neon Sync | #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
