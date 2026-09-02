@@ -5,7 +5,7 @@
   "private_commit_sha": "34de37d44d420cc00351436f40317734391ef7fd",
   "private_data_branch": "runtime-data",
   "capabilities": {
-    "logger": "disabled",
+    "logger": "enabled",
     "runtime_maintenance": "disabled",
     "neon": "disabled"
   }
