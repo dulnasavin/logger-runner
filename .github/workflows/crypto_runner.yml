@@ -66,7 +66,7 @@ jobs:
           }
 
       - name: Checkout protected public release authority
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -106,7 +106,7 @@ jobs:
       # SECTION 01 - CHECK OUT THE PUBLIC PRODUCTION RUNNER
       # ======================================================================
       - name: "01.1 Checkout public production runner"
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -147,7 +147,7 @@ jobs:
       # SECTION 04 - CHECK OUT PINNED CODE + ISOLATED RUNTIME DATA
       # ======================================================================
       - name: "04.1 Checkout exact private production source"
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -170,7 +170,7 @@ jobs:
           echo "✅ Exact private production source verified and detached"
 
       - name: "04.3 Checkout isolated private runtime-data branch"
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -242,7 +242,7 @@ jobs:
       # SECTION 06 - SET UP PYTHON
       # ======================================================================
       - name: "06.1 Setup Python 3.13"
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -1053,7 +1053,7 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
 
       - name: Checkout exact committed runtime data
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -1063,7 +1063,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout exact source used by the logger
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -1087,7 +1087,7 @@ jobs:
           echo "✅ Logger source and committed data handoff match exactly"
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
           cache: pip
@@ -1144,7 +1144,7 @@ jobs:
           needs.sync-neon.result == 'failure' ||
           needs.run-logger.outputs.alert_delivery_failed == 'true'
         continue-on-error: true
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           LOGGER_ALERT_TYPE: ${{ needs.run-logger.outputs.alert_type }}
           LOGGER_RESULT: ${{ needs.run-logger.result }}
@@ -1212,7 +1212,7 @@ jobs:
       - name: "31.4 Create or update trusted Issue if provider delivery fails"
         if: needs.run-logger.outputs.provider_alert_delivery_failed == 'true'
         continue-on-error: true
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           ALERT_TYPE: ${{ needs.run-logger.outputs.provider_alert_type }}
           ALERT_SEVERITY: ${{ needs.run-logger.outputs.provider_alert_severity }}
