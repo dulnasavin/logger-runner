@@ -190,6 +190,10 @@ jobs:
             }
             cp -- "private_data/$state_file" "private_logger/$state_file"
           done
+          python scripts/manage_csv_file_lifecycle.py \
+            --mode guard-recovery \
+            --path private_data/price_log.csv \
+            --state-path private_data/csv_state.json
           if [ -f private_data/price_log.csv ]; then
             cp -- private_data/price_log.csv private_logger/price_log.csv
           else
@@ -540,6 +544,10 @@ jobs:
           INTEGRITY="private_logger/Crypto Logger-Private Repo/csv_integrity.py"
           RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
           mkdir -p "$RECOVERY_DIR"
+          python scripts/manage_csv_file_lifecycle.py \
+            --mode guard-recovery \
+            --path "$CSV" \
+            --state-path private_data/csv_state.json
           python "$INTEGRITY" \
             --path "$CSV" \
             --recovery-dir "$RECOVERY_DIR" \

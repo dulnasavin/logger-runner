@@ -12,12 +12,13 @@ on:
           - validate
           - restore-accidental-deletion
           - intentional-reset
+          - delete-empty-csv-file
           - preview-selected-batches
           - delete-selected-batches
           - preview-existing-deletions
           - register-existing-deletions
       confirmation:
-        description: "RESET_PRICE_LOG, DELETE_PRICE_BATCHES, or REGISTER_DELETED_BATCHES"
+        description: "RESET_PRICE_LOG, DELETE_EMPTY_CSV_FILE, DELETE_PRICE_BATCHES, or REGISTER_DELETED_BATCHES"
         required: false
         type: string
       reason:
@@ -82,6 +83,10 @@ jobs:
           case "$REQUESTED_OPERATION" in
             intentional-reset)
               test "$REQUEST_CONFIRMATION" = "RESET_PRICE_LOG"
+              test -n "$REQUEST_REASON"
+              ;;
+            delete-empty-csv-file)
+              test "$REQUEST_CONFIRMATION" = "DELETE_EMPTY_CSV_FILE"
               test -n "$REQUEST_REASON"
               ;;
             delete-selected-batches)
@@ -156,6 +161,10 @@ jobs:
                 --missing-policy fail
               ;;
             restore-accidental-deletion)
+              python scripts/manage_csv_file_lifecycle.py \
+                --mode guard-recovery \
+                --path private_data/price_log.csv \
+                --state-path private_data/csv_state.json
               python "$INTEGRITY" --path private_data/price_log.csv \
                 --recovery-dir "$RECOVERY_DIR" \
                 --missing-policy restore-from-git --git-repository private_data
@@ -165,6 +174,14 @@ jobs:
                 --state-path private_data/csv_state.json \
                 --intentional-reset --confirm-reset RESET_PRICE_LOG \
                 --reset-reason "$RESET_REASON"
+              ;;
+            delete-empty-csv-file)
+              python scripts/manage_csv_file_lifecycle.py \
+                --mode delete-empty \
+                --path private_data/price_log.csv \
+                --state-path private_data/csv_state.json \
+                --confirmation DELETE_EMPTY_CSV_FILE \
+                --reason "$RESET_REASON"
               ;;
             preview-selected-batches)
               python "$INTEGRITY" --path private_data/price_log.csv \
@@ -200,6 +217,7 @@ jobs:
         if: >-
           inputs.operation == 'restore-accidental-deletion' ||
           inputs.operation == 'intentional-reset' ||
+          inputs.operation == 'delete-empty-csv-file' ||
           inputs.operation == 'delete-selected-batches' ||
           inputs.operation == 'register-existing-deletions'
         env:
