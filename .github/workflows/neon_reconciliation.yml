@@ -128,6 +128,24 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: "04.5 Recover accidental CSV damage before reconciliation"
+        run: |
+          set -euo pipefail
+          INTEGRITY="private_source/Crypto Logger-Private Repo/csv_integrity.py"
+          RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
+          mkdir -p "$RECOVERY_DIR"
+          python scripts/manage_csv_file_lifecycle.py \
+            --mode guard-recovery \
+            --path private_data/price_log.csv \
+            --state-path private_data/csv_state.json
+          python "$INTEGRITY" \
+            --path private_data/price_log.csv \
+            --state-path private_data/csv_state.json \
+            --recovery-dir "$RECOVERY_DIR" \
+            --missing-policy restore-from-git \
+            --git-repository private_data \
+            | tee "${RUNNER_TEMP}/csv-preaudit-recovery.txt"
+
       - name: "05 Assemble immutable reconciliation workspace"
         env:
           EXPECTED_SOURCE_SHA: ${{ steps.manifest.outputs.source_sha }}
