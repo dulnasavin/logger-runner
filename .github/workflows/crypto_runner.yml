@@ -702,7 +702,7 @@ jobs:
           git diff --cached --quiet && { echo "❌ No production logger state change detected"; exit 1; }
           git commit -m "Update runtime data for logger run ${GITHUB_RUN_ID}"
 
-      - name: "28.2 Rebase and push private runtime-data"
+      - name: "28.2 Push only the unchanged runtime-data snapshot"
         env:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
@@ -718,11 +718,17 @@ jobs:
           chmod 700 "$ASKPASS"
           export GIT_ASKPASS="$ASKPASS"
           cd private_data
+          STARTING_DATA_SHA="$(git rev-parse HEAD^)"
           for attempt in 1 2 3; do
             echo "Production Git sync attempt ${attempt}/3"
             git fetch origin "$PRIVATE_DATA_BRANCH"
-            if ! git rebase "origin/$PRIVATE_DATA_BRANCH"; then
-              git rebase --abort || true
+            REMOTE_DATA_SHA="$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")"
+            if test "$REMOTE_DATA_SHA" = "$(git rev-parse HEAD)"; then
+              echo "Exact production commit is already present remotely"
+              rm -f "$ASKPASS"
+              exit 0
+            fi
+            if test "$REMOTE_DATA_SHA" != "$STARTING_DATA_SHA"; then
               echo "❌ Runtime-data changed concurrently; no overwrite attempted"
               exit 1
             fi
@@ -737,7 +743,7 @@ jobs:
           exit 1
 
       # ======================================================================
-      # SECTION 29 - VERIFY PRIVATE MAIN PUSH
+      # SECTION 29 - VERIFY PRIVATE RUNTIME-DATA PUSH
       # ======================================================================
       - name: "29.1 Verify remote private runtime-data SHA"
         id: verify_core
@@ -853,11 +859,12 @@ jobs:
           python "$NOTIFIER" --alert-type "$EVENT_TYPE"
 
       - name: "31.5 Acknowledge and persist delivered provider event"
-        if: always() && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success'
+        if: always() && steps.verify_core.outcome == 'success' && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success'
         continue-on-error: true
         env:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
+          VERIFIED_CORE_SHA: ${{ steps.verify_core.outputs.core_commit_sha }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
@@ -867,6 +874,7 @@ jobs:
             --event-file "$PROVIDER_EVENT_FILE"
           cp -- private_logger/provider_incident_state.json private_data/provider_incident_state.json
           cd private_data
+          test "$(git rev-parse HEAD)" = "$VERIFIED_CORE_SHA"
           git add -- provider_incident_state.json
           git diff --cached --quiet && { echo "Provider event was already acknowledged"; exit 0; }
           git commit -m "Acknowledge provider alert ${GITHUB_RUN_ID}"
@@ -880,7 +888,10 @@ jobs:
           chmod 700 "$ASKPASS"
           export GIT_ASKPASS="$ASKPASS"
           git fetch origin "$PRIVATE_DATA_BRANCH"
-          git rebase "origin/$PRIVATE_DATA_BRANCH"
+          test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$VERIFIED_CORE_SHA" || {
+            echo "Runtime data changed before alert acknowledgement; no overwrite attempted"
+            exit 1
+          }
           git push origin "HEAD:$PRIVATE_DATA_BRANCH"
           rm -f "$ASKPASS"
           echo "✅ Provider delivery acknowledged after Make accepted the event"

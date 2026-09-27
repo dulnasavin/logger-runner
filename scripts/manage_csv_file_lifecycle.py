@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,7 @@ def delete_empty_csv(
     *,
     confirmation: str,
     reason: str,
+    git_repository: Path | None = None,
 ) -> dict:
     if confirmation != DELETE_CONFIRMATION:
         raise CsvLifecycleError(
@@ -108,6 +110,9 @@ def delete_empty_csv(
             "run intentional-reset first"
         )
 
+    if git_repository is not None:
+        _verify_reset_history(git_repository, csv_path, state_path)
+
     now = datetime.now(timezone.utc).isoformat()
     state.update(
         {
@@ -124,6 +129,36 @@ def delete_empty_csv(
         "generation": int(state["generation"]),
         "rows": 0,
     }
+
+
+def _verify_reset_history(repository: Path, csv_path: Path, state_path: Path) -> None:
+    """Reject a stale reset flag after appended or manually removed CSV rows."""
+    def git(*args: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(repository), *args],
+            check=True, capture_output=True,
+        ).stdout
+
+    try:
+        root = Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve()
+        csv_name = csv_path.resolve().relative_to(root).as_posix()
+        state_name = state_path.resolve().relative_to(root).as_posix()
+        if git("rev-parse", "--is-shallow-repository").strip() != b"false":
+            raise ValueError("Complete history is required")
+        reset_commit = git("log", "-1", "--format=%H", "HEAD", "--", state_name).decode().strip()
+        if not reset_commit:
+            raise ValueError("No committed reset state")
+        if git("show", f"HEAD:{state_name}") != state_path.read_bytes():
+            raise ValueError("Uncommitted state")
+        if git("show", f"{reset_commit}:{csv_name}") != csv_path.read_bytes():
+            raise ValueError("CSV does not match reset snapshot")
+        if git("log", "--format=%H", f"{reset_commit}..HEAD", "--", csv_name).strip():
+            raise ValueError("CSV changed after reset")
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        raise CsvLifecycleError(
+            "CSV history does not prove an unchanged reset snapshot; "
+            "run intentional-reset first"
+        ) from error
 
 
 def guard_recovery(csv_path: Path, state_path: Path) -> dict:
@@ -154,14 +189,18 @@ def main() -> int:
     parser.add_argument("--state-path", required=True, type=Path)
     parser.add_argument("--confirmation", default="")
     parser.add_argument("--reason", default="")
+    parser.add_argument("--git-repository", type=Path)
     args = parser.parse_args()
     try:
         if args.mode == "delete-empty":
+            if args.git_repository is None:
+                raise CsvLifecycleError("Empty-file deletion requires --git-repository")
             report = delete_empty_csv(
                 args.path,
                 args.state_path,
                 confirmation=args.confirmation,
                 reason=args.reason,
+                git_repository=args.git_repository,
             )
         else:
             report = guard_recovery(args.path, args.state_path)
