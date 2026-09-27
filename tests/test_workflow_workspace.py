@@ -30,14 +30,22 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertIn('ref: ${{ github.sha }}', checkout)
         self.assertIn("python -m unittest discover -s tests -p 'test_*.py' -v", workflow)
 
-    def test_maintenance_and_audit_refuse_to_rebase_stale_data(self):
-        for name in ('csv_maintenance.yml', 'neon_reconciliation.yml'):
+    def test_maintenance_refuses_to_rebase_stale_data(self):
+        for name in ('csv_maintenance.yml',):
             with self.subTest(workflow=name):
                 workflow = (WORKFLOWS / name).read_text()
                 self.assertNotRegex(workflow, r'git rebase\b')
                 self.assertIn('STARTING_DATA_SHA="$(git rev-parse HEAD)"', workflow)
                 self.assertIn('test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$STARTING_DATA_SHA"', workflow)
                 self.assertLess(workflow.index('= "$STARTING_DATA_SHA"'), workflow.index('git push origin'))
+
+    def test_audit_requires_private_verified_persistence_protocol(self):
+        workflow = (WORKFLOWS / 'neon_reconciliation.yml').read_text()
+        self.assertIn('test -s "private_source/Neon Weekly Audit/neon_persistence.py"', workflow)
+        self.assertIn('--runtime-repository "${GITHUB_WORKSPACE}/private_data"', workflow)
+        self.assertNotIn('git push', workflow)
+        self.assertNotIn('git rebase', workflow)
+        self.assertIn('Verified runtime-data commit', workflow)
 
     def test_alert_acknowledgement_requires_verified_core_persistence(self):
         workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
