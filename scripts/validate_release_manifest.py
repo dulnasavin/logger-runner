@@ -11,7 +11,8 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "dulnasavin/Repository-name-crypto-tracker-Private-Yes"
 EXPECTED_DATA_BRANCH = "runtime-data"
-CAPABILITIES = frozenset({"logger", "runtime_maintenance", "neon"})
+SCHEMA_VERSION = 2
+CAPABILITIES = frozenset({"logger", "runtime_maintenance", "neon", "neon_schema"})
 STATES = frozenset({"disabled", "enabled"})
 TOP_LEVEL_KEYS = frozenset(
     {
@@ -53,7 +54,7 @@ def validate_manifest(value: dict, *, capability: str | None, execute: bool) -> 
         raise ReleaseManifestError(
             f"release manifest keys do not match schema; missing={missing}; unknown={unknown}"
         )
-    if value["schema_version"] != 1:
+    if type(value["schema_version"]) is not int or value["schema_version"] != SCHEMA_VERSION:
         raise ReleaseManifestError("unsupported release manifest schema")
     if value["environment"] != "production":
         raise ReleaseManifestError("release manifest environment must be production")
@@ -72,7 +73,8 @@ def validate_manifest(value: dict, *, capability: str | None, execute: bool) -> 
     if not isinstance(capabilities, dict) or frozenset(capabilities) != CAPABILITIES:
         raise ReleaseManifestError("release capabilities do not match the complete schema")
     invalid_states = sorted(
-        name for name, state in capabilities.items() if state not in STATES
+        name for name, state in capabilities.items()
+        if not isinstance(state, str) or state not in STATES
     )
     if invalid_states:
         raise ReleaseManifestError(
@@ -100,6 +102,7 @@ def write_github_output(path: Path, manifest: dict, digest: str) -> None:
         "logger_state": manifest["capabilities"]["logger"],
         "runtime_maintenance_state": manifest["capabilities"]["runtime_maintenance"],
         "neon_state": manifest["capabilities"]["neon"],
+        "neon_schema_state": manifest["capabilities"]["neon_schema"],
     }
     with path.open("a", encoding="utf-8", newline="\n") as output:
         for name, value in outputs.items():
