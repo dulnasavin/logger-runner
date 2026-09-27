@@ -1,5 +1,6 @@
 import csv
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,54 @@ class CsvFileLifecycleTests(unittest.TestCase):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["last_action"], "intentional_file_delete")
         self.assertEqual(state["file_status"], "intentionally_deleted")
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.root), *args],
+            check=True, capture_output=True, text=True,
+        ).stdout
+
+    def _commit(self, message):
+        self._git("add", ".")
+        self._git("commit", "-m", message)
+
+    def _init_reset_history(self):
+        self._git("init")
+        self._git("config", "user.name", "Test")
+        self._git("config", "user.email", "test@example.invalid")
+        self._commit("Intentional reset")
+
+    def _delete_with_history(self):
+        return delete_empty_csv(
+            self.csv_path, self.state_path,
+            confirmation=DELETE_CONFIRMATION, reason="Retire CSV",
+            git_repository=self.root,
+        )
+
+    def test_history_accepts_committed_reset(self):
+        self._init_reset_history()
+        self._delete_with_history()
+        self.assertFalse(self.csv_path.exists())
+
+    def test_history_rejects_manual_clearing_after_append(self):
+        self._init_reset_history()
+        self._write_csv([["2026-09-03 18:00:00", "ETH", "1", "2", "OK", "2"]])
+        self._commit("Logger appended rows")
+        self._write_csv([])
+        # Both an uncommitted and a committed manual clearing must fail.
+        for commit_clear in (False, True):
+            if commit_clear:
+                self._commit("Manual clearing")
+            with self.assertRaisesRegex(CsvLifecycleError, "unchanged reset snapshot"):
+                self._delete_with_history()
+            self.assertTrue(self.csv_path.exists())
+
+    def test_history_accepts_new_reset_even_when_csv_already_empty(self):
+        self._init_reset_history()
+        self._write_state(generation=3)
+        self._commit("New intentional reset")
+        self._delete_with_history()
+        self.assertFalse(self.csv_path.exists())
 
     def test_rejects_csv_with_data_rows(self):
         self._write_csv([["2026-09-03 18:00:00", "ETH", "1", "2", "OK", "2"]])

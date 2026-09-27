@@ -205,6 +205,7 @@ jobs:
           set -euo pipefail
           cp -- private_source/price_log.csv private_data/price_log.csv
           cd private_data
+          STARTING_DATA_SHA="$(git rev-parse HEAD)"
           if git diff --quiet -- price_log.csv; then
             echo "No Neon-only rows needed CSV restoration"
             exit 0
@@ -223,8 +224,7 @@ jobs:
           chmod 700 "$ASKPASS"
           export GIT_ASKPASS="$ASKPASS"
           git fetch origin "$PRIVATE_DATA_BRANCH"
-          git rebase "origin/$PRIVATE_DATA_BRANCH" || {
-            git rebase --abort || true
+          test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$STARTING_DATA_SHA" || {
             echo "Runtime data changed during reconciliation; no overwrite attempted"
             exit 1
           }

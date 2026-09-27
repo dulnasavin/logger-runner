@@ -119,6 +119,12 @@ jobs:
     env:
       PRIVATE_CODE_SHA: ${{ needs.validate-request.outputs.private_code_sha }}
     steps:
+      - name: Checkout exact public maintenance helpers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Checkout pinned CSV integrity source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -181,6 +187,7 @@ jobs:
                 --path private_data/price_log.csv \
                 --state-path private_data/csv_state.json \
                 --confirmation DELETE_EMPTY_CSV_FILE \
+                --git-repository private_data \
                 --reason "$RESET_REASON"
               ;;
             preview-selected-batches)
@@ -227,6 +234,7 @@ jobs:
         run: |
           set -euo pipefail
           cd private_data
+          STARTING_DATA_SHA="$(git rev-parse HEAD)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- price_log.csv csv_state.json
@@ -245,8 +253,7 @@ jobs:
           chmod 700 "$ASKPASS"
           export GIT_ASKPASS="$ASKPASS"
           git fetch origin "$PRIVATE_DATA_BRANCH"
-          git rebase "origin/$PRIVATE_DATA_BRANCH" || {
-            git rebase --abort || true
+          test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$STARTING_DATA_SHA" || {
             echo "Runtime data changed concurrently; no overwrite attempted"
             exit 1
           }
