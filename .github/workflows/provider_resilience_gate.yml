@@ -187,6 +187,7 @@ jobs:
           "$RELEASE_PYTHON" -m pip check
           "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/csv_integrity.py" --help | grep -q -- --continue-deletion
           "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" --help | grep -q -- prepare-logger
+          "$RELEASE_PYTHON" "private_release/Neon Weekly Audit/scheduled_preview.py" --help | grep -q -- --github-output
           cd private_release
           export PYTHONPATH="${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo:${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo/windows_debug_helper:${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo/vpn_auth_recovery:${GITHUB_WORKSPACE}/private_release/Neon Sync:${GITHUB_WORKSPACE}/private_release/Neon Weekly Audit"
           "$RELEASE_PYTHON" -m compileall -q \

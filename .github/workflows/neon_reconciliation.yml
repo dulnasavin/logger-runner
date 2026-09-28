@@ -12,7 +12,7 @@ on:
           - preview
           - apply-approved-plan
       approved_plan_id:
-        description: "Required for apply: exact nrp-v1-* ID from a successful preview"
+        description: "Apply only: paste the exact Plan ID from preview. Leave blank for preview."
         required: false
         type: string
       confirmation:
