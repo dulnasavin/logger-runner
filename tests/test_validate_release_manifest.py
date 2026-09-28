@@ -151,5 +151,54 @@ class ReleaseManifestTests(unittest.TestCase):
                             self.assertFalse(output.exists())
 
 
+class MaintenanceRequestTests(unittest.TestCase):
+    def run_request(self, **inputs):
+        workflow = (ROOT / ".github/workflows/csv_maintenance.yml").read_text()
+        step = workflow.split("      - name: Validate protected request\n", 1)[1]
+        block = step.split("        run: |\n", 1)[1].split("\n  maintain-runtime-data:", 1)[0]
+        script = "\n".join(line[10:] for line in block.splitlines())
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary.md"
+            env = dict(os.environ, PRIVATE_CODE_TOKEN="test-code", PRIVATE_DATA_TOKEN="test-data",
+                       REQUESTED_OPERATION="intentional-reset", REQUEST_CONFIRMATION="RESET_PRICE_LOG",
+                       REQUEST_REASON="Test reset", REQUEST_BATCH_TIMESTAMPS="",
+                       REQUEST_LARGE_RESET_CONFIRMATION="", GITHUB_STEP_SUMMARY=str(summary))
+            env.update(inputs)
+            result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+            return result, summary.read_text() if summary.exists() else ""
+
+    def test_missing_reason_wrong_confirmation_and_other_invalid_inputs_explain_next_step(self):
+        cases = (
+            ({"REQUEST_REASON": ""}, "Reason is required"),
+            ({"REQUEST_REASON": " \t "}, "Reason is required"),
+            ({"REQUEST_REASON": "x" * 201}, "200 characters"),
+            ({"REQUEST_CONFIRMATION": "DELETE_EMPTY_CSV_FILE"}, "Enter exactly RESET_PRICE_LOG"),
+            ({"REQUESTED_OPERATION": "delete-empty-csv-file"}, "Enter exactly DELETE_EMPTY_CSV_FILE"),
+            ({"REQUESTED_OPERATION": "preview-selected-batches"}, "Exact timestamp_nz values"),
+            ({"REQUEST_LARGE_RESET_CONFIRMATION": "yes"}, "Run preview-reset"),
+            ({"PRIVATE_DATA_TOKEN": ""}, "data-write token is missing"),
+        )
+        for inputs, explanation in cases:
+            with self.subTest(inputs=inputs):
+                result, summary = self.run_request(**inputs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("::error title=CSV Maintenance request rejected::", result.stdout)
+                self.assertIn(explanation, result.stdout)
+                self.assertIn(explanation, summary)
+                self.assertIn("No maintenance operation ran", summary)
+
+    def test_valid_requests_and_preview_pass_without_shell_interpolation(self):
+        for inputs in (
+            {}, {"REQUEST_LARGE_RESET_CONFIRMATION": "RESET_2002_ROWS"},
+            {"REQUESTED_OPERATION": "preview-reset", "REQUEST_CONFIRMATION": "", "REQUEST_REASON": ""},
+            {"REQUESTED_OPERATION": "delete-empty-csv-file", "REQUEST_CONFIRMATION": "DELETE_EMPTY_CSV_FILE"},
+            {"REQUEST_REASON": "$(exit 99) `exit 98`"},
+        ):
+            with self.subTest(inputs=inputs):
+                result, summary = self.run_request(**inputs)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(summary, "")
+
+
 if __name__ == "__main__":
     unittest.main()

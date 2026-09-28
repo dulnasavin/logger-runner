@@ -11,6 +11,7 @@ on:
         options:
           - validate
           - restore-accidental-deletion
+          - preview-reset
           - intentional-reset
           - delete-empty-csv-file
           - preview-selected-batches
@@ -22,11 +23,15 @@ on:
         required: false
         type: string
       reason:
-        description: "Required non-sensitive reason for reset or selected deletion"
+        description: "Reason: required for reset, file deletion, and selected batches (1-200 characters)"
+        required: false
+        type: string
+      large_reset_confirmation:
+        description: "Reset over 2000 rows: enter RESET_<row count>_ROWS from preview-reset; otherwise leave blank"
         required: false
         type: string
       batch_timestamps_nz:
-        description: "Exact timestamp_nz run(s), comma separated; each removes all 11 symbol rows"
+        description: "Selected batches only: exact timestamp_nz values, comma separated (max 100); leave blank for reset/file deletion"
         required: false
         type: string
 
@@ -52,7 +57,10 @@ jobs:
       - name: Require protected public main
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "::error title=Wrong branch::Start a new CSV Maintenance run and select branch main."
+            exit 1
+          }
 
       - name: Checkout protected public release authority
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -76,39 +84,60 @@ jobs:
           REQUEST_CONFIRMATION: ${{ inputs.confirmation }}
           REQUEST_REASON: ${{ inputs.reason }}
           REQUEST_BATCH_TIMESTAMPS: ${{ inputs.batch_timestamps_nz }}
+          REQUEST_LARGE_RESET_CONFIRMATION: ${{ inputs.large_reset_confirmation }}
         run: |
           set -euo pipefail
-          test -n "$PRIVATE_CODE_TOKEN" || { echo "No effective private code-read token is configured"; exit 1; }
-          test -n "$PRIVATE_DATA_TOKEN" || { echo "No effective private data token is configured"; exit 1; }
+          fail_request() {
+            printf '::error title=CSV Maintenance request rejected::%s\n' "$1"
+            printf '### CSV Maintenance request rejected\n\n%s\n\nNo maintenance operation ran. Start a new run with the corrected inputs.\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          require_confirmation() {
+            test "$REQUEST_CONFIRMATION" = "$1" || fail_request "Confirmation does not match the selected operation. Enter exactly $1 in Confirmation."
+          }
+          require_reason() {
+            test -n "${REQUEST_REASON//[[:space:]]/}" || fail_request 'Reason is required. Enter a short explanation, for example: Fresh dataset for end-to-end testing.'
+            test "${#REQUEST_REASON}" -le 200 || fail_request 'Reason is too long. Use 200 characters or fewer.'
+            [[ "$REQUEST_REASON" != *$'\n'* && "$REQUEST_REASON" != *$'\r'* ]] || fail_request 'Reason must be a single line. Remove line breaks and start a new run.'
+          }
+          require_batches() {
+            test -n "${REQUEST_BATCH_TIMESTAMPS//[[:space:]]/}" || fail_request 'Exact timestamp_nz values are required for selected batches. Copy the batch timestamps from price_log.csv, separated by commas; each batch contains 11 rows.'
+          }
+          test -n "$PRIVATE_CODE_TOKEN" || fail_request 'Private code-read token is missing. Configure PRIVATE_CODE_READ_TOKEN or PRIVATE_REPO_TOKEN before retrying.'
+          test -n "$PRIVATE_DATA_TOKEN" || fail_request 'Private data-write token is missing. Configure PRIVATE_DATA_WRITE_TOKEN or PRIVATE_REPO_TOKEN before retrying.'
+          if [ -n "$REQUEST_LARGE_RESET_CONFIRMATION" ]; then
+            test "$REQUESTED_OPERATION" = intentional-reset || fail_request 'Large reset confirmation is only for intentional-reset. Leave it blank for other operations.'
+            [[ "$REQUEST_LARGE_RESET_CONFIRMATION" =~ ^RESET_[0-9]+_ROWS$ ]] || fail_request 'Large reset confirmation has the wrong format. Run preview-reset, then copy its exact RESET_<row count>_ROWS value.'
+          fi
           case "$REQUESTED_OPERATION" in
             intentional-reset)
-              test "$REQUEST_CONFIRMATION" = "RESET_PRICE_LOG"
-              test -n "$REQUEST_REASON"
+              require_confirmation RESET_PRICE_LOG
+              require_reason
               ;;
             delete-empty-csv-file)
-              test "$REQUEST_CONFIRMATION" = "DELETE_EMPTY_CSV_FILE"
-              test -n "$REQUEST_REASON"
+              require_confirmation DELETE_EMPTY_CSV_FILE
+              require_reason
               ;;
             delete-selected-batches)
-              test "$REQUEST_CONFIRMATION" = "DELETE_PRICE_BATCHES"
-              test -n "$REQUEST_REASON"
-              test -n "$REQUEST_BATCH_TIMESTAMPS"
+              require_confirmation DELETE_PRICE_BATCHES
+              require_reason
+              require_batches
               ;;
             preview-selected-batches)
-              test -n "$REQUEST_REASON"
-              test -n "$REQUEST_BATCH_TIMESTAMPS"
+              require_reason
+              require_batches
               ;;
             register-existing-deletions)
-              test "$REQUEST_CONFIRMATION" = "REGISTER_DELETED_BATCHES"
-              test -n "$REQUEST_REASON"
-              test -n "$REQUEST_BATCH_TIMESTAMPS"
+              require_confirmation REGISTER_DELETED_BATCHES
+              require_reason
+              require_batches
               ;;
             preview-existing-deletions)
-              test -n "$REQUEST_REASON"
-              test -n "$REQUEST_BATCH_TIMESTAMPS"
+              require_reason
+              require_batches
               ;;
-            validate|restore-accidental-deletion) ;;
-            *) echo "Unsupported maintenance operation"; exit 1 ;;
+            validate|restore-accidental-deletion|preview-reset) ;;
+            *) fail_request 'Unsupported operation. Choose one of the operations listed in Run workflow.' ;;
           esac
 
   maintain-runtime-data:
@@ -135,6 +164,10 @@ jobs:
           test "$(git -C private_source rev-parse HEAD)" = "$PRIVATE_CODE_SHA"
           test -s "private_source/Crypto Logger-Private Repo/csv_integrity.py"
           test -s "private_source/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py"
+          python "private_source/Crypto Logger-Private Repo/csv_integrity.py" --help | grep -q -- --large-reset-confirmation || {
+            echo "::error title=Maintenance release update required::The pinned private release does not support the large-reset safeguard. Update the protected release manifest to the approved maintenance release before running this workflow."
+            exit 1
+          }
 
       - name: Checkout private runtime data
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -156,12 +189,16 @@ jobs:
           REQUESTED_OPERATION: ${{ inputs.operation }}
           RESET_REASON: ${{ inputs.reason }}
           BATCH_TIMESTAMPS_NZ: ${{ inputs.batch_timestamps_nz }}
+          LARGE_RESET_CONFIRMATION: ${{ inputs.large_reset_confirmation }}
         run: |
           set -euo pipefail
           INTEGRITY="private_source/Crypto Logger-Private Repo/csv_integrity.py"
           RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
           mkdir -p "$RECOVERY_DIR"
           case "$REQUESTED_OPERATION" in
+            preview-reset)
+              python "$INTEGRITY" --path private_data/price_log.csv --preview-reset
+              ;;
             validate)
               python "$INTEGRITY" --path private_data/price_log.csv \
                 --recovery-dir "$RECOVERY_DIR" --validate-only \
@@ -180,7 +217,8 @@ jobs:
               python "$INTEGRITY" --path private_data/price_log.csv \
                 --state-path private_data/csv_state.json \
                 --intentional-reset --confirm-reset RESET_PRICE_LOG \
-                --reset-reason "$RESET_REASON"
+                --reset-reason "$RESET_REASON" \
+                --large-reset-confirmation "$LARGE_RESET_CONFIRMATION"
               ;;
             delete-empty-csv-file)
               python "private_source/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" \
@@ -243,7 +281,9 @@ jobs:
             echo "No runtime-data change was required"
             exit 0
           fi
-          git commit -m "CSV maintenance: $REQUESTED_OPERATION"
+          git commit -m "CSV maintenance: $REQUESTED_OPERATION" \
+            -m "Requested by: $GITHUB_ACTOR" \
+            -m "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
           ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
           printf '%s\n' '#!/bin/sh' \
             'case "$1" in' \
@@ -255,10 +295,14 @@ jobs:
           export GIT_ASKPASS="$ASKPASS"
           git fetch origin "$PRIVATE_DATA_BRANCH"
           test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$STARTING_DATA_SHA" || {
-            echo "Runtime data changed concurrently; no overwrite attempted"
+            echo "::error title=Runtime data changed::Another update reached runtime-data during this run. No overwrite was attempted. Review the latest data, run preview-reset again if resetting, and start a new maintenance run."
             exit 1
           }
           git push origin "HEAD:$PRIVATE_DATA_BRANCH"
+          {
+            printf '### CSV maintenance saved\n\nOperation: `%s`\n\n' "$REQUESTED_OPERATION"
+            printf 'Runtime-data commit: `%s`\n\nThe committed CSV/state diff and earlier CSV versions are available in private repository history.\n' "$(git rev-parse HEAD)"
+          } >> "$GITHUB_STEP_SUMMARY"
           rm -f "$ASKPASS"
 
       - name: Cleanup maintenance workspaces
