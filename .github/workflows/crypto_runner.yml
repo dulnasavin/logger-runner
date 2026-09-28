@@ -183,6 +183,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
+          python "private_logger/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" \
+            --mode prepare-logger \
+            --path private_data/price_log.csv \
+            --state-path private_data/csv_state.json \
+            --git-repository private_data
           for state_file in csv_state.json provider_incident_state.json; do
             test -f "private_data/$state_file" || {
               echo "❌ runtime-data is missing $state_file; restore it on runtime-data before activation"
@@ -190,10 +195,6 @@ jobs:
             }
             cp -- "private_data/$state_file" "private_logger/$state_file"
           done
-          python "private_logger/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" \
-            --mode guard-recovery \
-            --path private_data/price_log.csv \
-            --state-path private_data/csv_state.json
           if [ -f private_data/price_log.csv ]; then
             cp -- private_data/price_log.csv private_logger/price_log.csv
           else
