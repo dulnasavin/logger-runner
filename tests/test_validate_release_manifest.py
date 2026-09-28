@@ -117,7 +117,6 @@ class ReleaseManifestTests(unittest.TestCase):
         # Execute the actual workflow gate commands against temporary policies.
         workflows = {
             "neon_schema_migrate.yml": "neon_schema",
-            "neon-sync.yml": "neon",
             "neon_reconciliation.yml": "neon",
         }
         with tempfile.TemporaryDirectory() as directory:

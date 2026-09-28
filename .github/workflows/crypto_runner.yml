@@ -38,7 +38,7 @@ env:
 # - Cached estimates are labelled and automatically disable trading eligibility.
 # - Provider alerts send only on incident start, severity change, and recovery.
 # - Neon sync is a dependent job and consumes the exact verified data/source
-#   commits after core persistence succeeds; the standalone workflow is manual.
+#   commits after core persistence succeeds. Manual repairs use Neon Audit.
 # ============================================================================
 
 concurrency:
