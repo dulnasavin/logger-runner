@@ -11,17 +11,29 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
 
 
 class WorkflowWorkspaceTests(unittest.TestCase):
-    def test_maintenance_job_checks_out_helpers_before_private_workspaces(self):
+    def test_maintenance_uses_verified_private_helpers_before_data_checkout(self):
         workflow = (WORKFLOWS / 'csv_maintenance.yml').read_text()
         job = workflow.split('  maintain-runtime-data:', 1)[1]
-        checkout = job.index('uses: actions/checkout@')
-        private_checkout = job.index('name: Checkout pinned CSV integrity source')
-        self.assertLess(checkout, private_checkout)
-        public_checkout = job[checkout:private_checkout]
-        self.assertIn('ref: ${{ github.sha }}', public_checkout)
-        self.assertIn('persist-credentials: false', public_checkout)
-        self.assertNotIn('repository:', public_checkout)
-        self.assertNotIn('path:', public_checkout)
+        source_checkout, rest = job.split('name: Checkout private runtime data', 1)
+        self.assertIn('ref: ${{ env.PRIVATE_CODE_SHA }}', source_checkout)
+        self.assertIn('path: private_source', source_checkout)
+        self.assertIn('persist-credentials: false', source_checkout)
+        self.assertIn('test "$(git -C private_source rev-parse HEAD)" = "$PRIVATE_CODE_SHA"', source_checkout)
+        self.assertIn('test -s "private_source/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py"', source_checkout)
+        self.assertIn('python "private_source/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py"', rest)
+
+    def test_every_lifecycle_caller_uses_its_job_local_pinned_private_copy(self):
+        for filename, source_dir, expected_calls in (
+            ('crypto_runner.yml', 'private_logger', 2),
+            ('csv_maintenance.yml', 'private_source', 2),
+            ('neon_reconciliation.yml', 'private_source', 1),
+        ):
+            with self.subTest(workflow=filename):
+                workflow = (WORKFLOWS / filename).read_text()
+                call = f'python "{source_dir}/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py"'
+                self.assertEqual(workflow.count(call), expected_calls)
+                self.assertNotIn('scripts/manage_csv_file_lifecycle.py', workflow)
+                self.assertLess(workflow.index(f'path: {source_dir}'), workflow.index(call))
 
     def test_staging_runs_all_public_tests_at_the_triggering_commit(self):
         workflow = (WORKFLOWS / 'provider_resilience_gate.yml').read_text()

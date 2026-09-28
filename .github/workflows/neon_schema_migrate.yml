@@ -34,12 +34,12 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Validate enabled Neon capability
+      - name: Validate independently enabled Neon schema capability
         id: release
         run: >-
           python scripts/validate_release_manifest.py
           --mode execute
-          --capability neon
+          --capability neon_schema
           --github-output "$GITHUB_OUTPUT"
 
       - name: Validate pinned source and secrets
