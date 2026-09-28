@@ -185,7 +185,7 @@ jobs:
             --require-hashes --only-binary=:all: \
             --requirement "private_release/Crypto Logger-Private Repo/requirements-dev.lock"
           "$RELEASE_PYTHON" -m pip check
-          "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/csv_integrity.py" --help | grep -q -- --large-reset-confirmation
+          "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/csv_integrity.py" --help | grep -q -- --continue-deletion
           cd private_release
           export PYTHONPATH="${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo:${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo/windows_debug_helper:${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo/vpn_auth_recovery:${GITHUB_WORKSPACE}/private_release/Neon Sync:${GITHUB_WORKSPACE}/private_release/Neon Weekly Audit"
           "$RELEASE_PYTHON" -m compileall -q \

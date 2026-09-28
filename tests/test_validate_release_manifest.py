@@ -162,7 +162,7 @@ class MaintenanceRequestTests(unittest.TestCase):
             env = dict(os.environ, PRIVATE_CODE_TOKEN="test-code", PRIVATE_DATA_TOKEN="test-data",
                        REQUESTED_OPERATION="intentional-reset", REQUEST_CONFIRMATION="RESET_PRICE_LOG",
                        REQUEST_REASON="Test reset", REQUEST_BATCH_TIMESTAMPS="",
-                       REQUEST_LARGE_RESET_CONFIRMATION="", GITHUB_STEP_SUMMARY=str(summary))
+                       REQUEST_CONTINUATION_TOKEN="", GITHUB_STEP_SUMMARY=str(summary))
             env.update(inputs)
             result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
             return result, summary.read_text() if summary.exists() else ""
@@ -175,7 +175,7 @@ class MaintenanceRequestTests(unittest.TestCase):
             ({"REQUEST_CONFIRMATION": "DELETE_EMPTY_CSV_FILE"}, "Enter exactly RESET_PRICE_LOG"),
             ({"REQUESTED_OPERATION": "delete-empty-csv-file"}, "Enter exactly DELETE_EMPTY_CSV_FILE"),
             ({"REQUESTED_OPERATION": "preview-selected-batches"}, "Exact timestamp_nz values"),
-            ({"REQUEST_LARGE_RESET_CONFIRMATION": "yes"}, "Run preview-reset"),
+            ({"REQUESTED_OPERATION": "continue-deletion", "REQUEST_CONFIRMATION": "CONTINUE_CSV_DELETION"}, "Continuation token is missing"),
             ({"PRIVATE_DATA_TOKEN": ""}, "data-write token is missing"),
         )
         for inputs, explanation in cases:
@@ -189,7 +189,8 @@ class MaintenanceRequestTests(unittest.TestCase):
 
     def test_valid_requests_and_preview_pass_without_shell_interpolation(self):
         for inputs in (
-            {}, {"REQUEST_LARGE_RESET_CONFIRMATION": "RESET_2002_ROWS"},
+            {}, {"REQUESTED_OPERATION": "continue-deletion", "REQUEST_CONFIRMATION": "CONTINUE_CSV_DELETION",
+                 "REQUEST_REASON": "", "REQUEST_CONTINUATION_TOKEN": "cdp-v1-" + "a" * 64 + "-at-181"},
             {"REQUESTED_OPERATION": "preview-reset", "REQUEST_CONFIRMATION": "", "REQUEST_REASON": ""},
             {"REQUESTED_OPERATION": "delete-empty-csv-file", "REQUEST_CONFIRMATION": "DELETE_EMPTY_CSV_FILE"},
             {"REQUEST_REASON": "$(exit 99) `exit 98`"},
