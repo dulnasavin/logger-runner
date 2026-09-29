@@ -903,7 +903,7 @@ jobs:
           set -euo pipefail
           CSV="private_logger/price_log.csv"
           REPORT="${RUNNER_TEMP}/provider-report.json"
-          CSV_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
+          CSV_ROWS="$(( $(wc -l < "$CSV") - 1 ))"
           AUTH_RECOVERY="Not needed"
           SECRET_UPDATE="Not needed"
 
@@ -960,7 +960,8 @@ jobs:
             echo "### 5. Persistence and downstream state"
             echo ""
             echo "- **Rows appended this run:** 11"
-            echo "- **Production CSV rows:** ${CSV_ROWS}"
+            echo "- **Production CSV data rows (header excluded):** ${CSV_ROWS}"
+            echo "- **Neon comparison:** Compare the active dataset generation. Archived generations are counted separately in Neon Audit."
             echo "- **Incident state persisted:** Yes"
             echo "- **Neon handoff:** Runs only after the exact runtime-data commit is verified"
             echo ""
