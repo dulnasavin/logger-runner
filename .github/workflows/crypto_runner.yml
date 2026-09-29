@@ -42,8 +42,9 @@ env:
 # ============================================================================
 
 concurrency:
-  group: crypto-runtime-data
+  group: crypto-main
   cancel-in-progress: false
+  queue: max
 
 jobs:
   validate-invocation:
@@ -542,18 +543,11 @@ jobs:
         run: |
           set -euo pipefail
           CSV="private_data/price_log.csv"
-          INTEGRITY="private_logger/Crypto Logger-Private Repo/csv_integrity.py"
           RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
           mkdir -p "$RECOVERY_DIR"
-          python "private_logger/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" \
-            --mode guard-recovery \
-            --path "$CSV" \
-            --state-path private_data/csv_state.json
-          python "$INTEGRITY" \
-            --path "$CSV" \
+          python "private_logger/Crypto Logger-Private Repo/csv_audit.py" \
+            --runtime-repository private_data \
             --recovery-dir "$RECOVERY_DIR" \
-            --missing-policy restore-from-git \
-            --git-repository private_data \
             | tee "${RUNNER_TEMP}/csv-integrity-preflight.log"
           cp -- private_data/price_log.csv private_logger/price_log.csv
           cp -- private_data/csv_state.json private_logger/csv_state.json
@@ -1048,9 +1042,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    outputs:
-      audit_due: ${{ steps.audit-schedule.outputs.due }}
-      audit_slot: ${{ steps.audit-schedule.outputs.slot }}
     steps:
       - name: Validate exact handoff and database secret
         env:
@@ -1124,19 +1115,6 @@ jobs:
           cd private_source
           python "Neon Sync/sync_to_neon.py"
 
-      - name: Check twice-weekly audit schedule
-        id: audit-schedule
-        if: needs.run-logger.result == 'success'
-        env:
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
-        run: |
-          set -euo pipefail
-          cd private_source
-          python "Neon Weekly Audit/scheduled_preview.py" --mode check \
-            --manifest ../private_data/runtime_manifest.json \
-            --github-output "$GITHUB_OUTPUT"
-
       - name: Publish sanitized Neon handoff summary
         if: always()
         env:
@@ -1154,107 +1132,11 @@ jobs:
         if: always()
         run: rm -rf private_data private_source
 
-  scheduled-neon-audit:
-    name: Twice-weekly Neon audit preview
-    needs:
-      - run-logger
-      - sync-neon
-    if: >-
-      needs.run-logger.result == 'success' &&
-      needs.sync-neon.result == 'success' &&
-      needs.sync-neon.outputs.audit_due == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - name: Validate exact handoff and database secret
-        env:
-          PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
-          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
-        run: |
-          set -euo pipefail
-          test -n "$PRIVATE_CODE_TOKEN"
-          test -n "$PRIVATE_DATA_TOKEN"
-          test -n "$NEON_DATABASE_URL"
-          [[ "$DATA_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-
-      - name: Checkout exact committed runtime data
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ env.PRIVATE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ needs.run-logger.outputs.core_commit_sha }}
-          path: private_data
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Checkout exact source used by the logger
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ env.PRIVATE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ needs.run-logger.outputs.source_code_sha }}
-          path: private_source
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Verify manifest and assemble exact audit workspace
-        env:
-          DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
-          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
-        run: |
-          set -euo pipefail
-          test "$(git -C private_data rev-parse HEAD)" = "$DATA_SHA"
-          test "$(git -C private_source rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(jq -r '.source_code_sha' private_data/runtime_manifest.json)" = "$SOURCE_SHA"
-          test "$(jq -r '.producer_run_id' private_data/runtime_manifest.json)" = "$GITHUB_RUN_ID"
-          cp -- private_data/price_log.csv private_source/price_log.csv
-          cp -- private_data/csv_state.json private_source/csv_state.json
-          echo "✅ Logger source and committed data handoff match exactly"
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: private_source/Crypto Logger-Private Repo/requirements.lock
-
-      - name: Install locked private dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check \
-            --require-hashes --only-binary=:all: \
-            -r "private_source/Crypto Logger-Private Repo/requirements.lock"
-          python -m pip check
-
-      - name: Preview the verified batch and record schedule completion
-        env:
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-          SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
-          AUDIT_SLOT: ${{ needs.sync-neon.outputs.audit_slot }}
-        run: |
-          set -euo pipefail
-          cd private_source
-          python "Neon Weekly Audit/scheduled_preview.py" --mode run \
-            --manifest ../private_data/runtime_manifest.json \
-            --slot "$AUDIT_SLOT" \
-            --github-summary "$GITHUB_STEP_SUMMARY"
-
-      - name: Cleanup private audit workspaces
-        if: always()
-        run: rm -rf private_data private_source
-
   fallback-issues:
     name: Trusted GitHub Issue fallback
     needs:
       - run-logger
       - sync-neon
-      - scheduled-neon-audit
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1266,7 +1148,6 @@ jobs:
         if: >-
           needs.run-logger.result == 'failure' ||
           needs.sync-neon.result == 'failure' ||
-          needs.scheduled-neon-audit.result == 'failure' ||
           needs.run-logger.outputs.alert_delivery_failed == 'true'
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -1274,18 +1155,15 @@ jobs:
           LOGGER_ALERT_TYPE: ${{ needs.run-logger.outputs.alert_type }}
           LOGGER_RESULT: ${{ needs.run-logger.result }}
           SYNC_RESULT: ${{ needs.sync-neon.result }}
-          AUDIT_RESULT: ${{ needs.scheduled-neon-audit.result }}
         with:
           github-token: ${{ github.token }}
           script: |
             const crypto = require("crypto");
             const { owner, repo } = context.repo;
             const label = "crypto-alert-fallback";
-            const alertType = process.env.AUDIT_RESULT === "failure"
-              ? "NEON_AUDIT_FAILED"
-              : (process.env.SYNC_RESULT === "failure"
-                ? "NEON_SYNC_FAILED"
-                : (process.env.LOGGER_ALERT_TYPE || "PRODUCTION_WORKFLOW_FAILED"));
+            const alertType = process.env.SYNC_RESULT === "failure"
+              ? "NEON_SYNC_FAILED"
+              : (process.env.LOGGER_ALERT_TYPE || "PRODUCTION_WORKFLOW_FAILED");
             const fingerprint = crypto.createHash("sha256")
               .update(`workflow:${alertType}`)
               .digest("hex").slice(0, 24);
@@ -1403,3 +1281,4 @@ jobs:
               owner, repo, title, body, labels: [label]
             });
             core.warning(`Created trusted provider fallback issue #${created.data.number}`);
+
