@@ -62,6 +62,25 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertNotIn('git rebase', workflow)
         self.assertIn('group: csv-audit', workflow)
 
+    def test_current_neon_apply_requires_explicit_confirmation_and_no_stale_plan(self):
+        workflow = (WORKFLOWS / 'neon_reconciliation.yml').read_text()
+        step = workflow.split('name: "01 Validate protected request"', 1)[1].split(
+            '      - name:', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        env = dict(os.environ, GITHUB_REF='refs/heads/main', OPERATION='check-and-apply',
+                   APPROVED_PLAN_ID='', CONFIRMATION='APPLY_NEON_RECONCILIATION',
+                   CHANGE_REASON='Check current data')
+        def request(**changes):
+            return subprocess.run(['bash', '-c', script], env={**env, **changes},
+                                  capture_output=True, text=True)
+        self.assertEqual(request().returncode, 0)
+        for changes in ({'CONFIRMATION': ''}, {'APPROVED_PLAN_ID': 'nrp-v1-' + 'a' * 64},
+                        {'CHANGE_REASON': '   '}, {'CHANGE_REASON': 'a' * 201},
+                        {'CHANGE_REASON': 'line\nbreak'}, {'GITHUB_REF': 'refs/heads/staging'}):
+            with self.subTest(changes=changes):
+                self.assertNotEqual(request(**changes).returncode, 0)
+        self.assertIn('--mode check-and-apply', workflow)
+
     def test_maintenance_refuses_to_rebase_stale_data(self):
         for name in ('csv_maintenance.yml',):
             with self.subTest(workflow=name):
