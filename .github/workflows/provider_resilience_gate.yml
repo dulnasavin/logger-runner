@@ -188,7 +188,28 @@ jobs:
           "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/csv_integrity.py" --help | grep -q -- --continue-deletion
           "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" --help | grep -q -- prepare-logger
           "$RELEASE_PYTHON" "private_release/Neon Weekly Audit/scheduled_reconciliation.py" --help | grep -q -- --runtime-repository
+          "$RELEASE_PYTHON" "private_release/Neon Weekly Audit/neon_audit.py" --help | grep -q -- check-and-apply
           "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/csv_audit.py" --help | grep -q -- --publish
+          "$RELEASE_PYTHON" - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+          import textwrap
+
+          workflow = Path('.github/workflows/crypto_runner.yml').read_text()
+          step = workflow.split('name: "08.2 Run production regression tests"', 1)[1].split('      - name:', 1)[0]
+          script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+          environment = dict(os.environ)
+          environment.pop('PYTHONPATH', None)
+          environment['PATH'] = str(Path(sys.executable).parent) + os.pathsep + environment['PATH']
+          with tempfile.TemporaryDirectory(prefix='main-regression-') as directory:
+              (Path(directory) / 'private_logger').symlink_to(Path('private_release').resolve(), target_is_directory=True)
+              subprocess.run(['bash', '-euo', 'pipefail', '-c', script], cwd=directory,
+                             env=environment, check=True)
+          print('Exact Main regression entrypoint passed against the pinned release.')
+          PY
           cd private_release
           export PYTHONPATH="${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo:${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo/windows_debug_helper:${GITHUB_WORKSPACE}/private_release/Crypto Logger-Private Repo/vpn_auth_recovery:${GITHUB_WORKSPACE}/private_release/Neon Sync:${GITHUB_WORKSPACE}/private_release/Neon Weekly Audit"
           "$RELEASE_PYTHON" -m compileall -q \

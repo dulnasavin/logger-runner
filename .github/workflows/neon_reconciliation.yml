@@ -5,15 +5,16 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Manual: preview or apply a reviewed plan. Scheduler: scheduled-apply."
+        description: "Use check-and-apply for current data; preview only inspects. Exact-plan apply is optional."
         required: true
         type: choice
         options:
           - preview
+          - check-and-apply
           - apply-approved-plan
           - scheduled-apply
       approved_plan_id:
-        description: "Plan ID — manual apply only (copy from preview summary)"
+        description: "Only apply-approved-plan needs this. Leave blank for check-and-apply."
         required: false
         type: string
       confirmation:
@@ -55,6 +56,21 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/main"
           case "$OPERATION" in
             preview) ;;
+            check-and-apply)
+              test -z "$APPROVED_PLAN_ID" || {
+                echo "::error::Leave Plan ID blank for check-and-apply; it checks the latest data in this run."
+                exit 1
+              }
+              test "$CONFIRMATION" = "APPLY_NEON_RECONCILIATION" || {
+                echo "::error::Enter APPLY_NEON_RECONCILIATION in Confirmation to check and apply current data."
+                exit 1
+              }
+              test -n "${CHANGE_REASON//[[:space:]]/}" && test "${#CHANGE_REASON}" -le 200 && \
+                [[ "$CHANGE_REASON" != *$'\n'* && "$CHANGE_REASON" != *$'\r'* ]] || {
+                echo "::error::Enter a short, non-sensitive, single-line reason (1-200 characters)."
+                exit 1
+              }
+              ;;
             scheduled-apply)
               test -z "$APPROVED_PLAN_ID$CONFIRMATION$CHANGE_REASON" || {
                 echo "Scheduled apply uses its automatic policy; leave manual approval fields blank"
@@ -203,6 +219,7 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
           OPERATION: ${{ inputs.operation }}
           APPROVED_PLAN_ID: ${{ inputs.approved_plan_id }}
+          NEON_CHANGE_REASON: ${{ inputs.change_reason }}
         run: |
           set -euo pipefail
           ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
@@ -218,6 +235,10 @@ jobs:
           cd private_source
           if test "$OPERATION" = "preview"; then
             python "Neon Weekly Audit/neon_audit.py" --mode preview \
+              | tee "${RUNNER_TEMP}/neon-reconciliation-summary.txt"
+          elif test "$OPERATION" = "check-and-apply"; then
+            python "Neon Weekly Audit/neon_audit.py" --mode check-and-apply \
+              --runtime-repository "${GITHUB_WORKSPACE}/private_data" \
               | tee "${RUNNER_TEMP}/neon-reconciliation-summary.txt"
           elif test "$OPERATION" = "scheduled-apply"; then
             python "Neon Weekly Audit/scheduled_reconciliation.py" \
@@ -245,11 +266,14 @@ jobs:
             echo "- Source commit: \`$SOURCE_SHA\`"
             echo "- Starting runtime-data commit: \`$DATA_SHA\`"
             echo "- CSV check: $CSV_AUDIT_OUTCOME"
-            echo "- Manual apply requires the preview Plan ID. Scheduled apply calculates a fresh plan under the database lock."
-            echo "- Archived generations are preserved; total Neon rows can exceed active CSV rows."
+            echo "- Check-and-apply checks current data and applies in one run; leave Plan ID blank."
+            echo "- Only apply-approved-plan requires an unchanged preview Plan ID."
+            echo "- Check-and-apply and scheduled apply retry up to twice after verified Main appends. Main stays enabled."
+            echo "- CSV line count includes one header. Compare CSV data rows with active-generation Neon rows."
+            echo "- Reset archives older generations; archived rows are retained separately and are not pending deletions."
             echo "- Reconciliation result: $RECONCILE_OUTCOME"
             echo "- Completion requires a verified remote CSV/state commit."
-            echo "- Interrupted persistence remains pending; retry or preview again if the snapshot changed."
+            echo "- Interrupted persistence remains recorded. Resets, changed old rows, or changed deletion instructions stop automatic retries."
             echo "- Same-key conflicts are never auto-overwritten."
             echo "- Neon deletion requires an exact active-generation tombstone."
             if test -s "${RUNNER_TEMP}/csv-preaudit-recovery.txt"; then
@@ -258,7 +282,7 @@ jobs:
             fi
             if test -s "${RUNNER_TEMP}/neon-reconciliation-summary.txt"; then
               echo "### Sanitized counters"
-              grep -E '^(Plan ID|Mode|Dataset generation|Missing in Neon before repair|Inserted into Neon|Missing in CSV before repair|Restored into CSV from Neon|Intentional deletion tombstones|Deleted from Neon|Conflicts|Status|Verified runtime-data commit):' \
+              grep -E '^(Plan ID|Mode|Dataset generation|CSV data rows checked|CSV lines including header|Active Neon rows before repair|Archived Neon rows retained|Total Neon rows before repair|Missing in Neon before repair|Inserted into Neon|Missing in CSV before repair|Restored into CSV from Neon|Intentional deletion tombstones|Deleted from Neon|Conflicts|Status|Verified runtime-data commit):' \
                 "${RUNNER_TEMP}/neon-reconciliation-summary.txt" || true
             fi
             echo "- Private row contents and raw database logs were not uploaded."
