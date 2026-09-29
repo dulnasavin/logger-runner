@@ -5,22 +5,23 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Preview an exact plan or apply one previously previewed plan"
+        description: "Manual: preview or apply a reviewed plan. Scheduler: scheduled-apply."
         required: true
         type: choice
         options:
           - preview
           - apply-approved-plan
+          - scheduled-apply
       approved_plan_id:
-        description: "Apply only: paste the exact Plan ID from preview. Leave blank for preview."
+        description: "Plan ID — manual apply only (copy from preview summary)"
         required: false
         type: string
       confirmation:
-        description: "Required for apply: APPLY_NEON_RECONCILIATION"
+        description: "Manual apply only: type APPLY_NEON_RECONCILIATION"
         required: false
         type: string
       change_reason:
-        description: "Required non-sensitive reason when applying a plan"
+        description: "Reason — manual apply only (no secrets)"
         required: false
         type: string
 
@@ -32,12 +33,13 @@ env:
   PRIVATE_DATA_BRANCH: runtime-data
 
 concurrency:
-  group: crypto-runtime-data
+  group: neon-audit
   cancel-in-progress: false
+  queue: max
 
 jobs:
   reconcile:
-    name: Preview or apply an immutable reconciliation plan
+    name: Check CSV, then reconcile Neon
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -53,6 +55,12 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/main"
           case "$OPERATION" in
             preview) ;;
+            scheduled-apply)
+              test -z "$APPROVED_PLAN_ID$CONFIRMATION$CHANGE_REASON" || {
+                echo "Scheduled apply uses its automatic policy; leave manual approval fields blank"
+                exit 1
+              }
+              ;;
             apply-approved-plan)
               [[ "$APPROVED_PLAN_ID" =~ ^nrp-v1-[0-9a-f]{64}$ ]] || {
                 echo "Apply requires the exact nrp-v1-* ID from preview"
@@ -111,10 +119,6 @@ jobs:
             echo "runtime_manifest.json has no valid source SHA"
             exit 1
           }
-          test "$SOURCE_SHA" = "${PRIVATE_CODE_SHA,,}" || {
-            echo "Runtime provenance does not match approved PRIVATE_CODE_SHA"
-            exit 1
-          }
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "data_sha=$(git -C private_data rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -125,30 +129,41 @@ jobs:
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ref: ${{ steps.release.outputs.private_code_sha }}
           path: private_source
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: "04.5 Recover accidental CSV damage before reconciliation"
+      - name: "04.3 Verify runtime source ancestry and scheduled request"
+        env:
+          DATA_SOURCE_SHA: ${{ steps.manifest.outputs.source_sha }}
+          OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
-          INTEGRITY="private_source/Crypto Logger-Private Repo/csv_integrity.py"
-          RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
-          mkdir -p "$RECOVERY_DIR"
-          python "private_source/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" \
-            --mode guard-recovery \
-            --path private_data/price_log.csv \
-            --state-path private_data/csv_state.json
-          python "$INTEGRITY" \
-            --path private_data/price_log.csv \
-            --state-path private_data/csv_state.json \
-            --recovery-dir "$RECOVERY_DIR" \
-            --missing-policy restore-from-git \
-            --git-repository private_data \
+          git -C private_source merge-base --is-ancestor "$DATA_SOURCE_SHA" HEAD || {
+            echo "::error::Runtime source is not an ancestor of the protected release; review provenance"
+            exit 1
+          }
+          if test "$OPERATION" = "scheduled-apply"; then
+            PYTHONPATH="private_source/Neon Weekly Audit" python - <<'PYCODE'
+          import os
+          from datetime import datetime, timezone
+          from scheduled_reconciliation import protected_slot
+          if protected_slot(os.environ, datetime.now(timezone.utc)) is None:
+              raise SystemExit("Scheduled apply runs only Monday/Thursday after 03:00 Pacific/Auckland")
+          PYCODE
+          fi
+
+      - name: "04.5 Audit CSV and recover accidental losses"
+        id: csv_audit
+        run: |
+          set -euo pipefail
+          python "private_source/Crypto Logger-Private Repo/csv_audit.py" \
+            --runtime-repository private_data \
+            --recovery-dir "${RUNNER_TEMP}/csv-recovery" \
             | tee "${RUNNER_TEMP}/csv-preaudit-recovery.txt"
 
       - name: "05 Assemble immutable reconciliation workspace"
         env:
-          EXPECTED_SOURCE_SHA: ${{ steps.manifest.outputs.source_sha }}
+          EXPECTED_SOURCE_SHA: ${{ steps.release.outputs.private_code_sha }}
         run: |
           set -euo pipefail
           test "$(git -C private_source rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
@@ -204,6 +219,10 @@ jobs:
           if test "$OPERATION" = "preview"; then
             python "Neon Weekly Audit/neon_audit.py" --mode preview \
               | tee "${RUNNER_TEMP}/neon-reconciliation-summary.txt"
+          elif test "$OPERATION" = "scheduled-apply"; then
+            python "Neon Weekly Audit/scheduled_reconciliation.py" \
+              --runtime-repository "${GITHUB_WORKSPACE}/private_data" \
+              | tee "${RUNNER_TEMP}/neon-reconciliation-summary.txt"
           else
             python "Neon Weekly Audit/neon_audit.py" --mode apply \
               --approved-plan-id "$APPROVED_PLAN_ID" \
@@ -214,9 +233,10 @@ jobs:
       - name: "10 Publish sanitized reconciliation summary"
         if: always()
         env:
-          SOURCE_SHA: ${{ steps.manifest.outputs.source_sha || 'unavailable' }}
+          SOURCE_SHA: ${{ steps.release.outputs.private_code_sha || 'unavailable' }}
           DATA_SHA: ${{ steps.manifest.outputs.data_sha || 'unavailable' }}
           OPERATION: ${{ inputs.operation }}
+          CSV_AUDIT_OUTCOME: ${{ steps.csv_audit.outcome }}
           RECONCILE_OUTCOME: ${{ steps.reconcile.outcome }}
         run: |
           {
@@ -224,12 +244,18 @@ jobs:
             echo "- Operation: \`$OPERATION\`"
             echo "- Source commit: \`$SOURCE_SHA\`"
             echo "- Starting runtime-data commit: \`$DATA_SHA\`"
-            echo "- Apply requires an exact content-addressed plan ID from preview."
+            echo "- CSV check: $CSV_AUDIT_OUTCOME"
+            echo "- Manual apply requires the preview Plan ID. Scheduled apply calculates a fresh plan under the database lock."
+            echo "- Archived generations are preserved; total Neon rows can exceed active CSV rows."
             echo "- Reconciliation result: $RECONCILE_OUTCOME"
             echo "- Completion requires a verified remote CSV/state commit."
             echo "- Interrupted persistence remains pending; retry or preview again if the snapshot changed."
             echo "- Same-key conflicts are never auto-overwritten."
             echo "- Neon deletion requires an exact active-generation tombstone."
+            if test -s "${RUNNER_TEMP}/csv-preaudit-recovery.txt"; then
+              echo '### CSV audit counters'
+              cat "${RUNNER_TEMP}/csv-preaudit-recovery.txt"
+            fi
             if test -s "${RUNNER_TEMP}/neon-reconciliation-summary.txt"; then
               echo "### Sanitized counters"
               grep -E '^(Plan ID|Mode|Dataset generation|Missing in Neon before repair|Inserted into Neon|Missing in CSV before repair|Restored into CSV from Neon|Intentional deletion tombstones|Deleted from Neon|Conflicts|Status|Verified runtime-data commit):' \

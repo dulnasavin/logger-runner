@@ -16,8 +16,9 @@ env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
 
 concurrency:
-  group: crypto-runtime-data
+  group: neon-schema
   cancel-in-progress: false
+  queue: max
 
 jobs:
   migrate:
@@ -91,6 +92,9 @@ jobs:
               with connection.cursor() as cursor:
                   cursor.execute("SET LOCAL statement_timeout = '120s'")
                   cursor.execute("SET LOCAL lock_timeout = '10s'")
+                  cursor.execute("SELECT pg_try_advisory_xact_lock(hashtext(%s))", ("crypto_logger_neon_operation",))
+                  if not cursor.fetchone()[0]:
+                      raise SystemExit("Neon sync/audit is writing; retry schema migration after it finishes")
                   cursor.execute(sql)
           print("Neon schema migration committed")
           PY

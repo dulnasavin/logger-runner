@@ -23,14 +23,15 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertIn('python "private_source/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py"', rest)
 
     def test_every_lifecycle_caller_uses_its_job_local_pinned_private_copy(self):
-        for filename, source_dir, expected_calls in (
-            ('crypto_runner.yml', 'private_logger', 2),
-            ('csv_maintenance.yml', 'private_source', 2),
-            ('neon_reconciliation.yml', 'private_source', 1),
+        for filename, source_dir, helper, expected_calls in (
+            ('crypto_runner.yml', 'private_logger', 'manage_csv_file_lifecycle.py', 1),
+            ('crypto_runner.yml', 'private_logger', 'csv_audit.py', 1),
+            ('csv_maintenance.yml', 'private_source', 'manage_csv_file_lifecycle.py', 2),
+            ('neon_reconciliation.yml', 'private_source', 'csv_audit.py', 1),
         ):
             with self.subTest(workflow=filename):
                 workflow = (WORKFLOWS / filename).read_text()
-                call = f'python "{source_dir}/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py"'
+                call = f'python "{source_dir}/Crypto Logger-Private Repo/{helper}"'
                 self.assertEqual(workflow.count(call), expected_calls)
                 self.assertNotIn('scripts/manage_csv_file_lifecycle.py', workflow)
                 self.assertLess(workflow.index(f'path: {source_dir}'), workflow.index(call))

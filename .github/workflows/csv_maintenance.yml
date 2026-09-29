@@ -44,8 +44,9 @@ env:
   PRIVATE_DATA_BRANCH: runtime-data
 
 concurrency:
-  group: crypto-runtime-data
+  group: csv-maintenance
   cancel-in-progress: false
+  queue: max
 
 jobs:
   validate-request:
