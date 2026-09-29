@@ -51,7 +51,7 @@ concurrency:
 jobs:
   validate-request:
     name: Validate controlled maintenance request
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
       private_code_sha: ${{ steps.release.outputs.private_code_sha }}
@@ -150,7 +150,7 @@ jobs:
   maintain-runtime-data:
     name: Maintain isolated private runtime data
     needs: validate-request
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       PRIVATE_CODE_SHA: ${{ needs.validate-request.outputs.private_code_sha }}
