@@ -49,7 +49,7 @@ concurrency:
 jobs:
   validate-invocation:
     name: Validate production invocation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions:
       contents: read
@@ -83,7 +83,7 @@ jobs:
   run-logger:
     name: Run, persist, and notify exact logger batch
     needs: validate-invocation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1038,7 +1038,7 @@ jobs:
       needs.validate-invocation.outputs.neon_state == 'enabled' &&
       needs.run-logger.outputs.core_commit_sha != '' &&
       needs.run-logger.outputs.source_code_sha != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1138,7 +1138,7 @@ jobs:
       - run-logger
       - sync-neon
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read # retain the workflow-wide read-only source permission
