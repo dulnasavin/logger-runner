@@ -285,6 +285,7 @@ jobs:
           echo "✅ All production Python modules compile"
 
       - name: "08.2 Run production regression tests"
+        id: production_regression
         run: |
           set -euo pipefail
           cd private_logger/"Crypto Logger-Private Repo"
@@ -787,7 +788,7 @@ jobs:
       # ======================================================================
       # SECTION 31 - SEND PRIVATE HIGH-PRIORITY ALERT THROUGH MAKE/OUTLOOK
       # ======================================================================
-      - name: "31.1 Send production VPN recovery alert"
+      - name: "31.1 Send production failure or VPN recovery alert"
         id: send_make_alert
         if: always()
         continue-on-error: true
@@ -797,13 +798,14 @@ jobs:
           ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
           ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
+          PRODUCTION_TEST_OUTCOME: ${{ steps.production_regression.outcome }}
         run: |
           set -euo pipefail
           ALERT_FILE="${RUNNER_TEMP}/vpn-alert-type.txt"
           NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
           if [ ! -f "$ALERT_FILE" ]; then
             echo "required=false" >> "$GITHUB_OUTPUT"
-            echo "No production VPN recovery alert required"
+            echo "No production failure or VPN recovery alert required"
             exit 0
           fi
           echo "required=true" >> "$GITHUB_OUTPUT"
