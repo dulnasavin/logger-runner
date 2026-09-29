@@ -43,6 +43,25 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertIn('ref: ${{ github.sha }}', checkout)
         self.assertIn("python -m unittest discover -s tests -p 'test_*.py' -v", workflow)
 
+    def test_manual_csv_audit_preserves_preview_and_private_release_boundary(self):
+        workflow = (WORKFLOWS / 'csv_audit.yml').read_text()
+        self.assertIn('workflow_dispatch:', workflow)
+        self.assertNotIn('schedule:', workflow)
+        self.assertIn('default: preview', workflow)
+        self.assertNotIn('NEON_DATABASE_URL', workflow)
+        self.assertIn('--capability runtime_maintenance', workflow)
+        self.assertIn('ref: ${{ steps.release.outputs.private_code_sha }}', workflow)
+        self.assertIn('merge-base --is-ancestor "$SOURCE_SHA" HEAD', workflow)
+        preview, repair = workflow.split('name: Preview CSV recovery without saving', 1)[1].split(
+            'name: Repair CSV and verify the saved commit', 1)
+        self.assertNotIn('--publish', preview)
+        self.assertNotIn('PRIVATE_DATA_TOKEN', preview)
+        self.assertIn('--publish --github-summary', repair)
+        self.assertNotIn('persist-credentials: true', workflow)
+        self.assertNotIn('git push', workflow)
+        self.assertNotIn('git rebase', workflow)
+        self.assertIn('group: csv-audit', workflow)
+
     def test_maintenance_refuses_to_rebase_stale_data(self):
         for name in ('csv_maintenance.yml',):
             with self.subTest(workflow=name):
