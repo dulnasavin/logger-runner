@@ -1,0 +1,153 @@
+name: "CSV Audit"
+run-name: "CSV Audit | ${{ inputs.operation }} | #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Preview checks without saving. Repair saves verified CSV recovery to runtime-data."
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - repair
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+  PRIVATE_DATA_BRANCH: runtime-data
+
+concurrency:
+  group: csv-audit
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  audit:
+    name: Verify CSV and optionally save recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require main and a supported operation
+        env:
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "::error::Start CSV Audit from branch main."
+            exit 1
+          }
+          case "$OPERATION" in
+            preview|repair) ;;
+            *) echo "::error::Choose preview or repair."; exit 1 ;;
+          esac
+
+      - name: Checkout protected public release authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate enabled runtime-maintenance capability
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability runtime_maintenance
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned private audit source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          path: private_source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify pinned helpers
+        env:
+          PRIVATE_CODE_SHA: ${{ steps.release.outputs.private_code_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C private_source rev-parse HEAD)" = "$PRIVATE_CODE_SHA"
+          test -s "private_source/Neon Weekly Audit/neon_persistence.py"
+          python "private_source/Crypto Logger-Private Repo/csv_audit.py" --help | grep -q -- --publish
+
+      - name: Checkout private runtime history without saved credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_DATA_BRANCH }}
+          path: private_data
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify runtime source ancestry
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(jq -r '.source_code_sha // empty' private_data/runtime_manifest.json)"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Runtime provenance is missing or invalid. Review the last Main checkpoint."
+            exit 1
+          }
+          git -C private_source merge-base --is-ancestor "$SOURCE_SHA" HEAD || {
+            echo "::error::Runtime source is newer than or unrelated to this pinned release. Start a fresh run after reviewing the release pin."
+            exit 1
+          }
+
+      - name: Preview CSV recovery without saving
+        if: inputs.operation == 'preview'
+        run: |
+          set -euo pipefail
+          python "private_source/Crypto Logger-Private Repo/csv_audit.py" \
+            --runtime-repository private_data \
+            --recovery-dir "${RUNNER_TEMP}/csv-audit-recovery" \
+            --github-summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Repair CSV and verify the saved commit
+        if: inputs.operation == 'repair'
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_DATA_TOKEN" || {
+            echo "::error::Configure PRIVATE_DATA_WRITE_TOKEN or PRIVATE_REPO_TOKEN before using repair."
+            exit 1
+          }
+          ASKPASS="${RUNNER_TEMP}/csv-audit-git-askpass"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          export PYTHONPATH="${GITHUB_WORKSPACE}/private_source/Neon Weekly Audit"
+          trap 'rm -f "$ASKPASS"' EXIT
+          python "private_source/Crypto Logger-Private Repo/csv_audit.py" \
+            --runtime-repository private_data \
+            --recovery-dir "${RUNNER_TEMP}/csv-audit-recovery" \
+            --publish --github-summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Explain a stopped audit
+        if: failure()
+        run: |
+          {
+            echo "## CSV Audit needs attention"
+            echo "Read the first failed step above for the cause."
+            echo "If runtime-data changed during repair, start a new run; stale data is never overwritten."
+            echo "Complete pending CSV Maintenance before auditing. Let Main recreate an intentionally deleted file."
+            echo "Conflicting prices or unverified history require review; the audit does not guess."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove private workspace and recovery copies
+        if: always()
+        run: rm -rf private_data private_source "${RUNNER_TEMP}/csv-audit-recovery" "${RUNNER_TEMP}/csv-audit-git-askpass"
