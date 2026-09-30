@@ -93,12 +93,16 @@ jobs:
       PRIVATE_CODE_SHA: ${{ needs.validate-invocation.outputs.private_code_sha }}
     outputs:
       core_commit_sha: ${{ steps.verify_core.outputs.core_commit_sha }}
+      core_verification: ${{ steps.verify_core.outcome }}
+      workflow_email_status: ${{ steps.send_make_alert.outputs.delivery_status }}
       source_code_sha: ${{ steps.verify_core.outputs.source_code_sha }}
       alert_required: ${{ steps.send_make_alert.outputs.required }}
       alert_type: ${{ steps.send_make_alert.outputs.alert_type }}
+      alert_delivery_error: ${{ steps.send_make_alert.outputs.delivery_error_code }}
       alert_delivery_failed: ${{ steps.send_make_alert.outcome == 'failure' || steps.send_make_alert.outputs.delivery_status == 'failed' || steps.send_make_alert.outputs.delivery_status == 'pending' }}
       provider_alert_required: ${{ steps.send_provider_alert.outputs.required }}
       provider_alert_type: ${{ steps.send_provider_alert.outputs.alert_type }}
+      provider_alert_delivery_error: ${{ steps.send_provider_alert.outputs.delivery_error_code }}
       provider_alert_severity: ${{ steps.send_provider_alert.outputs.alert_severity }}
       provider_alert_event_id: ${{ steps.send_provider_alert.outputs.event_id }}
       provider_alert_fingerprint: ${{ steps.send_provider_alert.outputs.fingerprint }}
@@ -389,7 +393,7 @@ jobs:
           if [ -n "$ALERT_LOCAL_HELPER_TOKEN" ] && [ "${#ALERT_LOCAL_HELPER_TOKEN}" -ge 32 ]; then
             echo "✅ Signed Windows localhost debug links enabled"
           elif [ -n "$ALERT_LOCAL_HELPER_TOKEN" ]; then
-            echo "⚠ ALERT_LOCAL_HELPER_TOKEN is too short; alert delivery will reject it"
+            echo "⚠ ALERT_LOCAL_HELPER_TOKEN is too short; the optional desktop shortcut will be omitted"
           else
             echo "ℹ Windows localhost debug links are not enabled"
           fi
@@ -858,6 +862,8 @@ jobs:
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
           ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
           ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
+          PRODUCTION_COLLECTION_OUTCOME: ${{ steps.run_price_logger.outcome }}
+          PRODUCTION_PERSISTENCE_OUTCOME: ${{ steps.verify_core.outcome }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
           PRODUCTION_TEST_OUTCOME: ${{ steps.production_regression.outcome }}
         run: |
@@ -894,6 +900,8 @@ jobs:
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
           ALERT_CHATGPT_CHAT_URL: ${{ secrets.ALERT_CHATGPT_CHAT_URL }}
           ALERT_LOCAL_HELPER_TOKEN: ${{ secrets.ALERT_LOCAL_HELPER_TOKEN }}
+          PRODUCTION_COLLECTION_OUTCOME: ${{ steps.run_price_logger.outcome }}
+          PRODUCTION_PERSISTENCE_OUTCOME: ${{ steps.verify_core.outcome }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
           PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
         run: |
@@ -959,7 +967,7 @@ jobs:
             --expected-state-file private_logger/provider_incident_state.json \
             --csv-state-file private_logger/csv_state.json \
             --acknowledge-event-file "$PROVIDER_EVENT_FILE"
-          echo "✅ Provider delivery acknowledged after Make accepted the event"
+          echo "✅ Provider delivery acknowledged after Make confirmed email-module success (mailbox receipt not verified)"
 
       - name: "31.6 Report optional notification health"
         if: always()
@@ -989,7 +997,7 @@ jobs:
             echo "## Optional notifications"
             echo "- Production/VPN email: ${WORKFLOW_EMAIL_STATUS:-unavailable}"
             echo "- Provider event email: ${PROVIDER_EMAIL_STATUS:-unavailable}"
-            echo "- accepted means Make accepted the request; it is not proof of mailbox delivery."
+            echo "- accepted means Make returned explicit email-module success; it is not proof of mailbox receipt."
             echo "- Failed events remain pending. GitHub Issue fallback is a separate best-effort job."
             echo "- Email and reporting failures do not block verified CSV persistence or Neon sync."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1269,6 +1277,10 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           LOGGER_ALERT_TYPE: ${{ needs.run-logger.outputs.alert_type }}
+          DELIVERY_ERROR: ${{ needs.run-logger.outputs.alert_delivery_error }}
+          EMAIL_FAILED: ${{ needs.run-logger.outputs.alert_delivery_failed }}
+          CORE_VERIFICATION: ${{ needs.run-logger.outputs.core_verification }}
+          WORKFLOW_EMAIL_STATUS: ${{ needs.run-logger.outputs.workflow_email_status }}
           LOGGER_RESULT: ${{ needs.run-logger.result }}
           SYNC_RESULT: ${{ needs.sync-neon.result }}
         with:
@@ -1284,7 +1296,9 @@ jobs:
               .update(`workflow:${alertType}`)
               .digest("hex").slice(0, 24);
             const marker = `<!-- crypto-alert-fallback:${fingerprint} -->`;
-            const title = "🚨 Crypto Logger alert delivery failed";
+            const title = process.env.EMAIL_FAILED === "true"
+              ? "🚨 Crypto Logger alert delivery failed"
+              : `🚨 Crypto Logger ${alertType}`;
             try {
               await github.rest.issues.getLabel({ owner, repo, name: label });
             } catch (error) {
@@ -1305,8 +1319,33 @@ jobs:
               (issue.body || "").includes(marker)
             );
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const deliveryHelp = {
+              MAKE_EMAIL_AUTH_INVALID_GRANT: "Make reported invalid_grant: reauthorize Email send connection in Credentials > Connections, then verify it.",
+              MAKE_WEBHOOK_AUTH_REJECTED: "Make rejected webhook authentication: check the configured webhook/API key without exposing either value.",
+              MAKE_DELIVERY_UNCONFIRMED: 'Make did not confirm email-module success. Put a Webhook response after the successful email module returning {"ok":true}; never return success before sending.',
+              MAKE_HTTP_ERROR: "Make returned an HTTP error. Inspect the failed scenario execution for the exact cause; HTTP 500 alone does not prove an OAuth or VPN problem.",
+              MAKE_NETWORK_ERROR: "The delivery endpoint could not be reached. Inspect Make availability and runner connectivity.",
+              MAKE_TIMEOUT: "The email scenario did not confirm success before the timeout. Check its execution before retrying to avoid duplicates."
+            };
+            const deliveryDiagnosis = process.env.EMAIL_FAILED !== "true" && process.env.WORKFLOW_EMAIL_STATUS === "accepted"
+              ? "The workflow email received an explicit success acknowledgment; this issue records a core job failure."
+              : process.env.EMAIL_FAILED !== "true" && process.env.WORKFLOW_EMAIL_STATUS === "not_required"
+                ? "No workflow email was required at the earlier notification stage; this issue records the later core job failure."
+                : deliveryHelp[process.env.DELIVERY_ERROR] || "Delivery was not confirmed. Check the notifier step and Make execution history; missing configuration or a timeout may have prevented sending.";
+            const status = value => ["success", "failure", "skipped", "cancelled"].includes(value) ? value : "unknown";
+            const evidence = [
+              `- **Logger job:** ${status(process.env.LOGGER_RESULT)}`,
+              `- **CSV commit verification:** ${status(process.env.CORE_VERIFICATION)}`,
+              `- **Neon sync job:** ${status(process.env.SYNC_RESULT)}`,
+              "- Email failure alone does not imply that CSV saving, Neon, or VPN failed.",
+              `- **Delivery diagnosis:** ${deliveryDiagnosis}`,
+              "- **Make history:** https://us2.make.com/2723330/scenarios/5967130/logs",
+              "- If Make history says invalid_grant, reauthorize Email send connection and use Verify. A GitHub restart cannot renew that OAuth grant.",
+              "- After repair, use an authorized alert test or the next real notification and confirm the email-module result and mailbox receipt before relying on email alerts."
+            ];
             const reminder = [
-              `Delivery failed again for **${alertType}**.`,
+              `Production incident requires attention: **${alertType}**.`,
+              ...evidence,
               `Run: ${runUrl}`,
               `Attempt: ${process.env.GITHUB_RUN_ATTEMPT || "unknown"}`
             ].join("\n");
@@ -1319,12 +1358,13 @@ jobs:
             }
             const body = [
               marker,
-              "## Crypto Logger alert delivery failure",
+              "## Crypto Logger incident and notification status",
               "",
               `- **Alert type:** ${alertType}`,
               `- **Run:** ${runUrl}`,
               "",
-              "Check the Make scenario, Outlook OAuth connection, and Make repository secrets. No provider or credential value is included here."
+              ...evidence,
+              "For a core job failure, open its first failed step. No credential value is included here."
             ].join("\n");
             const created = await github.rest.issues.create({
               owner, repo, title, body, labels: [label]
@@ -1340,6 +1380,11 @@ jobs:
           ALERT_SEVERITY: ${{ needs.run-logger.outputs.provider_alert_severity }}
           ALERT_EVENT_ID: ${{ needs.run-logger.outputs.provider_alert_event_id }}
           ALERT_FINGERPRINT: ${{ needs.run-logger.outputs.provider_alert_fingerprint }}
+          DELIVERY_ERROR: ${{ needs.run-logger.outputs.provider_alert_delivery_error }}
+          CORE_VERIFICATION: ${{ needs.run-logger.outputs.core_verification }}
+          WORKFLOW_EMAIL_STATUS: ${{ needs.run-logger.outputs.workflow_email_status }}
+          LOGGER_RESULT: ${{ needs.run-logger.result }}
+          SYNC_RESULT: ${{ needs.sync-neon.result }}
         with:
           github-token: ${{ github.token }}
           script: |
@@ -1375,7 +1420,27 @@ jobs:
               (issue.body || "").includes(marker)
             );
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const reminder = `Provider alert delivery failed again. Event: **${eventType}**; severity: **${severity}**; run: ${runUrl}`;
+            const deliveryHelp = {
+              MAKE_EMAIL_AUTH_INVALID_GRANT: "Make reported invalid_grant: reauthorize Email send connection in Credentials > Connections, then verify it.",
+              MAKE_WEBHOOK_AUTH_REJECTED: "Make rejected webhook authentication: check the configured webhook/API key without exposing either value.",
+              MAKE_DELIVERY_UNCONFIRMED: 'Make did not confirm email-module success. Put a Webhook response after the successful email module returning {"ok":true}; never return success before sending.',
+              MAKE_HTTP_ERROR: "Make returned an HTTP error. Inspect the failed scenario execution for the exact cause; HTTP 500 alone does not prove an OAuth or VPN problem.",
+              MAKE_NETWORK_ERROR: "The delivery endpoint could not be reached. Inspect Make availability and runner connectivity.",
+              MAKE_TIMEOUT: "The email scenario did not confirm success before the timeout. Check its execution before retrying to avoid duplicates."
+            };
+            const deliveryDiagnosis = deliveryHelp[process.env.DELIVERY_ERROR] || "Delivery was not confirmed. Check the notifier step and Make execution history; missing configuration or a timeout may have prevented sending.";
+            const status = value => ["success", "failure", "skipped", "cancelled"].includes(value) ? value : "unknown";
+            const evidence = [
+              `- **Logger job:** ${status(process.env.LOGGER_RESULT)}`,
+              `- **CSV commit verification:** ${status(process.env.CORE_VERIFICATION)}`,
+              `- **Neon sync job:** ${status(process.env.SYNC_RESULT)}`,
+              "- Email failure alone does not imply that CSV saving, Neon, or VPN failed.",
+              `- **Delivery diagnosis:** ${deliveryDiagnosis}`,
+              "- **Make history:** https://us2.make.com/2723330/scenarios/5967130/logs",
+              "- If Make history says invalid_grant, reauthorize Email send connection and use Verify. A GitHub restart cannot renew that OAuth grant.",
+              "- After repair, use an authorized alert test or the next real notification and confirm the email-module result and mailbox receipt before relying on email alerts."
+            ];
+            const reminder = [`Provider alert delivery remains unconfirmed. Event: **${eventType}**; severity: **${severity}**; run: ${runUrl}`, ...evidence].join("\n");
             if (existing) {
               await github.rest.issues.createComment({
                 owner, repo, issue_number: existing.number, body: reminder
@@ -1391,7 +1456,8 @@ jobs:
               `- **Severity:** ${severity}`,
               `- **Run:** ${runUrl}`,
               "",
-              "The event remains pending in private runtime state and will be retried. No provider API secret is included."
+              ...evidence,
+              "The event remains pending in private runtime state for a later eligible retry with the same event ID. No provider API secret is included."
             ].join("\n");
             const created = await github.rest.issues.create({
               owner, repo, title, body, labels: [label]
