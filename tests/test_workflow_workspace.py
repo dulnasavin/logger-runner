@@ -12,6 +12,34 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
 
 
 class WorkflowWorkspaceTests(unittest.TestCase):
+    def test_table_reset_selection_is_passed_as_literal_arguments(self):
+        workflow = (WORKFLOWS / 'neon_maintenance.yml').read_text()
+        self.assertIn('          - preview-tables', workflow)
+        self.assertIn('          - clear-tables', workflow)
+        self.assertIn('          - all-logger-tables', workflow)
+        self.assertIn('writers_paused:', workflow)
+        self.assertIn('secrets.PRIVATE_DATA_WRITE_TOKEN', workflow)
+        step = workflow.split('name: Execute controlled archived-data maintenance', 1)[1]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('      - name:', 1)[0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'private_source/Neon Weekly Audit'
+            source.mkdir(parents=True)
+            (source / 'neon_maintenance.py').write_text('import json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+            (source / 'neon_table_maintenance.py').write_text('# fixture\n')
+            tables = 'neon_sync_log,$(touch MUST_NOT_EXIST)'
+            env = dict(os.environ, OPERATION='clear-tables', GENERATION='', TABLE_SELECTION='custom',
+                       CUSTOM_TABLES=tables, WRITERS_PAUSED='true', RUNNER_TEMP=str(root),
+                       PRIVATE_DATA_TOKEN='fixture-token-not-real', APPROVED_PLAN_ID='ntm-v1-' + 'a'*64,
+                       CONTINUATION_TOKEN='', CONFIRMATION='CLEAR_SELECTED_NEON_TABLES', CHANGE_REASON='Reset')
+            result = subprocess.run(['bash', '-c', script], cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(result.stdout)
+            self.assertEqual(args[args.index('--tables') + 1], tables)
+            self.assertIn('--writers-paused', args)
+            self.assertFalse((root / 'MUST_NOT_EXIST').exists())
+            self.assertFalse((root / 'neon-table-git-askpass').exists())
+
     def test_neon_maintenance_is_manual_and_passes_approval_values_as_data(self):
         workflow = (WORKFLOWS / 'neon_maintenance.yml').read_text()
         self.assertIn('workflow_dispatch:', workflow)

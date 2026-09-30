@@ -1,11 +1,11 @@
 name: "Neon Maintenance"
-run-name: "Neon Maintenance | ${{ inputs.operation }} | generation ${{ inputs.generation }}"
+run-name: "Neon Maintenance | ${{ inputs.operation }} | ${{ inputs.table_selection || 'archived-prices' }} | generation ${{ inputs.generation }}"
 
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Preview or intentionally purge an archived generation. Active rows use CSV Maintenance first."
+        description: "Preview/purge archived prices, or preview/clear selected logger tables after emptying prices."
         required: true
         default: preview
         type: choice
@@ -13,12 +13,41 @@ on:
           - preview
           - purge-archived
           - continue-purge
-      generation:
-        description: "Exact archived dataset generation number; never the current CSV generation"
+          - preview-tables
+          - clear-tables
+      table_selection:
+        description: "For table modes: choose a table, all logger tables, or custom. Dependent tables appear in preview."
         required: true
+        default: archived-prices
+        type: choice
+        options:
+          - archived-prices
+          - all-logger-tables
+          - custom
+          - crypto_prices
+          - price_batches
+          - dataset_generations
+          - neon_sync_state
+          - neon_sync_log
+          - neon_audit_log
+          - neon_job_lock
+          - neon_reconciliation_items
+          - neon_reconciliation_outbox
+      custom_tables:
+        description: "Custom selection only: comma-separated logger table names. Neon Auth is excluded."
+        required: false
+        type: string
+      writers_paused:
+        description: "clear-tables only: I stopped Main/dispatcher and other database writers."
+        required: false
+        default: false
+        type: boolean
+      generation:
+        description: "Archived-price modes only: exact archived generation. Leave blank for table modes."
+        required: false
         type: string
       approved_plan_id:
-        description: "purge-archived only: nmp-v1 ID from preview"
+        description: "Plan from preview: nmp-v1 for archived purge; ntm-v1 for table reset"
         required: false
         type: string
       continuation_token:
@@ -26,7 +55,7 @@ on:
         required: false
         type: string
       confirmation:
-        description: "PURGE_ARCHIVED_NEON_GENERATION or CONTINUE_NEON_PURGE; leave blank for preview"
+        description: "PURGE_ARCHIVED_NEON_GENERATION, CONTINUE_NEON_PURGE, or CLEAR_SELECTED_NEON_TABLES"
         required: false
         type: string
       reason:
@@ -44,7 +73,7 @@ concurrency:
 
 jobs:
   maintain:
-    name: Maintain archived Neon data with deletion records
+    name: Maintain selected Neon data with intentional-deletion records
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -111,6 +140,11 @@ jobs:
       - name: Execute controlled archived-data maintenance
         env:
           OPERATION: ${{ inputs.operation }}
+          TABLE_SELECTION: ${{ inputs.table_selection }}
+          CUSTOM_TABLES: ${{ inputs.custom_tables }}
+          WRITERS_PAUSED: ${{ inputs.writers_paused }}
+          PRIVATE_DATA_TOKEN: ${{ inputs.operation == 'clear-tables' && (secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN) || (secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN) }}
+          GIT_TERMINAL_PROMPT: "0"
           GENERATION: ${{ inputs.generation }}
           APPROVED_PLAN_ID: ${{ inputs.approved_plan_id }}
           CONTINUATION_TOKEN: ${{ inputs.continuation_token }}
@@ -120,11 +154,38 @@ jobs:
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
           set -euo pipefail
+          selected_tables=""
+          case "${TABLE_SELECTION:-archived-prices}" in
+            archived-prices) ;;
+            custom) selected_tables="${CUSTOM_TABLES:-}" ;;
+            *) selected_tables="$TABLE_SELECTION" ;;
+          esac
+          extra_args=(--tables "$selected_tables")
+          if test "${WRITERS_PAUSED:-false}" = true; then
+            extra_args+=(--writers-paused)
+          fi
+          if test "$OPERATION" = preview-tables || test "$OPERATION" = clear-tables; then
+            test -s "private_source/Neon Weekly Audit/neon_table_maintenance.py" || {
+              echo "::error::Release pin must include selectable-table maintenance."
+              exit 1
+            }
+            test -n "$PRIVATE_DATA_TOKEN"
+            ASKPASS="${RUNNER_TEMP}/neon-table-git-askpass"
+            printf '%s\n' '#!/bin/sh' \
+              'case "$1" in' \
+              '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+              '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+              '  *) exit 1 ;;' \
+              'esac' > "$ASKPASS"
+            chmod 700 "$ASKPASS"
+            export GIT_ASKPASS="$ASKPASS"
+            trap 'rm -f "$ASKPASS"' EXIT
+          fi
           python "private_source/Neon Weekly Audit/neon_maintenance.py" \
             --mode "$OPERATION" --generation "$GENERATION" \
             --runtime-repository private_data --plan-id "$APPROVED_PLAN_ID" \
             --continuation-token "$CONTINUATION_TOKEN" \
-            --confirmation "$CONFIRMATION" --reason "$CHANGE_REASON"
+            --confirmation "$CONFIRMATION" --reason "$CHANGE_REASON" "${extra_args[@]}"
 
       - name: Clean up private checkouts
         if: always()
