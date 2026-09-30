@@ -37,3 +37,22 @@ An explicit success response confirms only what the configured Make scenario ass
 4. Confirm an incident email includes the actual provider/FX decision, selected price, trading gate, recorded VPN recovery attempts, event identity and timing, and action steps. Retries must retain those details.
 
 Offline tests cover delivery acknowledgment and fallback behavior without sending mail. They do not reauthorize Make or verify real inbox delivery. Keep the dispatcher paused if functioning email alerts are a prerequisite for unattended operation.
+
+## Failure coverage and limits
+
+| Failure | Result and action |
+| --- | --- |
+| Production validation fails before collection | The separate fallback job records the validation failure and skipped downstream jobs. Open the validation job's first failed step. |
+| Logger or Neon job fails or is cancelled | The fallback records each job's actual result. A failed email does not overwrite the data result. Cancellation reporting is best effort while GitHub still allows the fallback to run. |
+| Expired/revoked Outlook authorization or rejected webhook credentials | No false delivery acknowledgment. Inspect Make's exact error and repair the affected connection or credential. A restart cannot renew revoked authorization. |
+| HTTP 429 rate limit | Up to three attempts, with bounded delay (at most five seconds between attempts) and the same event ID. Make documents these requests as rejected by its rate-limit check. |
+| Timeout, connection interruption, ambiguous HTTP error, or missing success JSON | Do not immediately repeat the POST: the email may already have been sent. Trigger fallback, keep provider events pending for the existing 30-minute eligible retry, and inspect Make history. This trades rapid recovery for fewer duplicate emails. |
+| Email succeeds but the delivery checkpoint cannot be saved | Keep the accepted email result and report a separate checkpoint failure. The event can be retried later, so duplicate emails remain possible. |
+| GitHub Issues API/permission failure | Attempt both applicable fallback reports, then fail the fallback job and add a clear run summary. Completed CSV and Neon jobs keep their own results. A failed workflow can notify only through configured, working GitHub notifications. |
+| Error-code output file cannot be written | Preserve a sanitized failure in the log and return failure; the workflow's delivery status still routes to fallback. |
+
+Automatic pending-event retries apply to provider incidents; workflow/Neon failures are also recorded through their separate fallback path. A saved GitHub issue/comment confirms storage only, not that somebody received or read a notification.
+
+This is not an exactly-once or never-fail delivery system. The current three-module Make scenario has no persistent `event_id` deduplication, so a lost response or checkpoint can still produce a later duplicate. Make/Outlook outages, quotas, mailbox filtering, and revoked permissions can interrupt email. Invalid workflow YAML, a disabled dispatcher, exhausted runner capacity, forced cancellation, or a GitHub-wide outage can prevent the fallback from running at all. Detecting a system that never starts requires an independent heartbeat monitor outside GitHub and Make, with a separately authorized notification destination; that monitor is not configured by this change.
+
+Sources: [Make webhook responses, queue limits and rate limits](https://help.make.com/webhooks), [GitHub cancellation behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation), [GitHub Actions notifications](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-github-actions-notifications).

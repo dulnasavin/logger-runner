@@ -107,6 +107,7 @@ jobs:
       provider_alert_event_id: ${{ steps.send_provider_alert.outputs.event_id }}
       provider_alert_fingerprint: ${{ steps.send_provider_alert.outputs.fingerprint }}
       provider_alert_delivery_failed: ${{ steps.send_provider_alert.outcome == 'failure' || steps.send_provider_alert.outputs.delivery_status == 'failed' || steps.send_provider_alert.outputs.delivery_status == 'pending' }}
+      provider_ack_failed: ${{ steps.send_provider_alert.outputs.delivery_status == 'accepted' && steps.ack_provider_alert.outcome != 'success' }}
 
     steps:
       # ======================================================================
@@ -941,6 +942,7 @@ jobs:
           fi
 
       - name: "31.5 Acknowledge and persist delivered provider event"
+        id: ack_provider_alert
         if: always() && (steps.verify_core.outcome == 'success' || steps.persist_failed_incident.outcome == 'success') && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success' && steps.send_provider_alert.outputs.delivery_status == 'accepted'
         continue-on-error: true
         timeout-minutes: 1
@@ -978,6 +980,7 @@ jobs:
           PROVIDER_EMAIL_STATUS: ${{ steps.send_provider_alert.outputs.delivery_status }}
           WORKFLOW_EMAIL_OUTCOME: ${{ steps.send_make_alert.outcome }}
           PROVIDER_EMAIL_OUTCOME: ${{ steps.send_provider_alert.outcome }}
+          PROVIDER_ACK_OUTCOME: ${{ steps.ack_provider_alert.outcome }}
         run: |
           set -euo pipefail
           DEGRADED=false
@@ -993,10 +996,14 @@ jobs:
           if [ "$DEGRADED" = true ]; then
             echo "::warning::Optional email delivery is degraded. This does not change CSV or Neon success; see the separate data steps. Check the failed Make scenario execution to repair delivery."
           fi
+          if [ "$PROVIDER_EMAIL_STATUS" = accepted ] && [ "${PROVIDER_ACK_OUTCOME:-unavailable}" != success ]; then
+            echo "::warning::Provider email was accepted, but its delivery checkpoint was not saved. Duplicate reminders are possible; inspect the acknowledgment step before retrying."
+          fi
           {
             echo "## Optional notifications"
             echo "- Production/VPN email: ${WORKFLOW_EMAIL_STATUS:-unavailable}"
             echo "- Provider event email: ${PROVIDER_EMAIL_STATUS:-unavailable}"
+            echo "- Provider delivery checkpoint: ${PROVIDER_ACK_OUTCOME:-unavailable}"
             echo "- accepted means Make returned explicit email-module success; it is not proof of mailbox receipt."
             echo "- Failed events remain pending. GitHub Issue fallback is a separate best-effort job."
             echo "- Email and reporting failures do not block verified CSV persistence or Neon sync."
@@ -1257,8 +1264,8 @@ jobs:
 
   fallback-issues:
     name: Trusted GitHub Issue fallback
-    continue-on-error: true
     needs:
+      - validate-invocation
       - run-logger
       - sync-neon
     if: always()
@@ -1269,10 +1276,14 @@ jobs:
       issues: write # create or update sanitized alert-delivery fallback issues
     steps:
       - name: "31.2 Create or update trusted Issue if workflow alert delivery fails"
+        id: workflow_fallback
         if: >-
-          needs.run-logger.result == 'failure' ||
-          needs.sync-neon.result == 'failure' ||
-          needs.run-logger.outputs.alert_delivery_failed == 'true'
+          always() && (
+          needs.validate-invocation.result == 'failure' || needs.validate-invocation.result == 'cancelled' ||
+          needs.run-logger.result == 'failure' || needs.run-logger.result == 'cancelled' ||
+          needs.sync-neon.result == 'failure' || needs.sync-neon.result == 'cancelled' ||
+          needs.run-logger.outputs.alert_delivery_failed == 'true' ||
+          needs.run-logger.outputs.provider_ack_failed == 'true')
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
@@ -1283,15 +1294,24 @@ jobs:
           WORKFLOW_EMAIL_STATUS: ${{ needs.run-logger.outputs.workflow_email_status }}
           LOGGER_RESULT: ${{ needs.run-logger.result }}
           SYNC_RESULT: ${{ needs.sync-neon.result }}
+          VALIDATION_RESULT: ${{ needs.validate-invocation.result }}
+          PROVIDER_ACK_FAILED: ${{ needs.run-logger.outputs.provider_ack_failed }}
         with:
           github-token: ${{ github.token }}
           script: |
             const crypto = require("crypto");
             const { owner, repo } = context.repo;
             const label = "crypto-alert-fallback";
-            const alertType = process.env.SYNC_RESULT === "failure"
-              ? "NEON_SYNC_FAILED"
-              : (process.env.LOGGER_ALERT_TYPE || "PRODUCTION_WORKFLOW_FAILED");
+            const interrupted = value => ["failure", "cancelled"].includes(value);
+            const alertType = interrupted(process.env.VALIDATION_RESULT)
+              ? "PRODUCTION_VALIDATION_FAILED"
+              : interrupted(process.env.LOGGER_RESULT)
+                ? (process.env.LOGGER_ALERT_TYPE || "PRODUCTION_WORKFLOW_FAILED")
+                : interrupted(process.env.SYNC_RESULT)
+                  ? "NEON_SYNC_FAILED"
+                  : process.env.PROVIDER_ACK_FAILED === "true"
+                    ? "PROVIDER_DELIVERY_CHECKPOINT_FAILED"
+                    : (process.env.LOGGER_ALERT_TYPE || "PRODUCTION_WORKFLOW_FAILED");
             const fingerprint = crypto.createHash("sha256")
               .update(`workflow:${alertType}`)
               .digest("hex").slice(0, 24);
@@ -1327,18 +1347,24 @@ jobs:
               MAKE_NETWORK_ERROR: "The delivery endpoint could not be reached. Inspect Make availability and runner connectivity.",
               MAKE_TIMEOUT: "The email scenario did not confirm success before the timeout. Check its execution before retrying to avoid duplicates."
             };
-            const deliveryDiagnosis = process.env.EMAIL_FAILED !== "true" && process.env.WORKFLOW_EMAIL_STATUS === "accepted"
+            const deliveryDiagnosis = interrupted(process.env.VALIDATION_RESULT)
+              ? "Production validation did not complete. The logger and email steps were not reached. Inspect the validation job's first failed or cancelled step."
+              : process.env.EMAIL_FAILED !== "true" && process.env.PROVIDER_ACK_FAILED === "true"
+                ? "Provider email was accepted, but its delivery checkpoint was not saved. Inspect the acknowledgment step before retrying."
+              : process.env.EMAIL_FAILED !== "true" && process.env.WORKFLOW_EMAIL_STATUS === "accepted"
               ? "The workflow email received an explicit success acknowledgment; this issue records a core job failure."
               : process.env.EMAIL_FAILED !== "true" && process.env.WORKFLOW_EMAIL_STATUS === "not_required"
                 ? "No workflow email was required at the earlier notification stage; this issue records the later core job failure."
                 : deliveryHelp[process.env.DELIVERY_ERROR] || "Delivery was not confirmed. Check the notifier step and Make execution history; missing configuration or a timeout may have prevented sending.";
             const status = value => ["success", "failure", "skipped", "cancelled"].includes(value) ? value : "unknown";
             const evidence = [
+              `- **Production validation:** ${status(process.env.VALIDATION_RESULT)}`,
               `- **Logger job:** ${status(process.env.LOGGER_RESULT)}`,
               `- **CSV commit verification:** ${status(process.env.CORE_VERIFICATION)}`,
               `- **Neon sync job:** ${status(process.env.SYNC_RESULT)}`,
               "- Email failure alone does not imply that CSV saving, Neon, or VPN failed.",
               `- **Delivery diagnosis:** ${deliveryDiagnosis}`,
+              ...(process.env.PROVIDER_ACK_FAILED === "true" ? ["- **Provider delivery checkpoint:** Email was accepted, but the delivery record was not saved. Inspect the acknowledgment step; repeated delivery is possible."] : []),
               "- **Make history:** https://us2.make.com/2723330/scenarios/5967130/logs",
               "- If Make history says invalid_grant, reauthorize Email send connection and use Verify. A GitHub restart cannot renew that OAuth grant.",
               "- After repair, use an authorized alert test or the next real notification and confirm the email-module result and mailbox receipt before relying on email alerts."
@@ -1372,7 +1398,8 @@ jobs:
             core.warning(`Created trusted fallback issue #${created.data.number}`);
 
       - name: "31.4 Create or update trusted Issue if provider delivery fails"
-        if: needs.run-logger.outputs.provider_alert_delivery_failed == 'true'
+        id: provider_fallback
+        if: always() && needs.run-logger.outputs.provider_alert_delivery_failed == 'true'
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
@@ -1463,3 +1490,32 @@ jobs:
               owner, repo, title, body, labels: [label]
             });
             core.warning(`Created trusted provider fallback issue #${created.data.number}`);
+
+      - name: "31.7 Verify fallback reporting health"
+        if: always()
+        timeout-minutes: 1
+        env:
+          WORKFLOW_FALLBACK_OUTCOME: ${{ steps.workflow_fallback.outcome }}
+          PROVIDER_FALLBACK_OUTCOME: ${{ steps.provider_fallback.outcome }}
+        run: |
+          set -euo pipefail
+          FAILED=false
+          for OUTCOME in "$WORKFLOW_FALLBACK_OUTCOME" "$PROVIDER_FALLBACK_OUTCOME"; do
+            case "$OUTCOME" in
+              success|skipped) ;;
+              *) FAILED=true ;;
+            esac
+          done
+          {
+            echo "## Alert fallback health"
+            echo "- Workflow issue: ${WORKFLOW_FALLBACK_OUTCOME:-unavailable}"
+            echo "- Provider issue: ${PROVIDER_FALLBACK_OUTCOME:-unavailable}"
+            echo "- success means the issue/comment was saved; it does not prove a GitHub notification was received."
+            if [ "$FAILED" = true ]; then
+              echo "- ACTION REQUIRED: An incident could not be recorded in GitHub Issues. Inspect the failed fallback step and repository Issues permissions/API availability."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$FAILED" = true ]; then
+            echo "::error::Alert fallback failed. Email may also be unavailable; inspect notification and fallback steps. Completed CSV and Neon jobs retain their separate results."
+            exit 1
+          fi
