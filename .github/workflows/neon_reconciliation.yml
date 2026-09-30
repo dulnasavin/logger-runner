@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Use check-and-apply for current data; preview only inspects. Exact-plan apply is optional."
+        description: "Manual repair: check-and-apply (no Plan ID). Preview only inspects. Exact-plan apply requires unchanged preview data."
         required: true
         type: choice
         options:
@@ -14,7 +14,7 @@ on:
           - apply-approved-plan
           - scheduled-apply
       approved_plan_id:
-        description: "Only apply-approved-plan needs this. Leave blank for check-and-apply."
+        description: "Only apply-approved-plan needs this; surrounding whitespace is ignored. Leave blank for check-and-apply."
         required: false
         type: string
       confirmation:
@@ -46,6 +46,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: "01 Validate protected request"
+        id: request
         env:
           OPERATION: ${{ inputs.operation }}
           APPROVED_PLAN_ID: ${{ inputs.approved_plan_id }}
@@ -54,6 +55,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
+          RAW_PLAN_ID="$APPROVED_PLAN_ID"
+          APPROVED_PLAN_ID="$(python -c 'import os; print(os.environ.get("APPROVED_PLAN_ID", "").strip(), end="")')"
+          if test "$APPROVED_PLAN_ID" != "$RAW_PLAN_ID"; then
+            echo "::notice::Ignored surrounding whitespace in the approved Plan ID."
+          fi
           case "$OPERATION" in
             preview) ;;
             check-and-apply)
@@ -79,7 +85,7 @@ jobs:
               ;;
             apply-approved-plan)
               [[ "$APPROVED_PLAN_ID" =~ ^nrp-v1-[0-9a-f]{64}$ ]] || {
-                echo "Apply requires the exact nrp-v1-* ID from preview"
+                echo "::error::Apply requires the complete nrp-v1-* ID from preview. Surrounding whitespace is ignored; characters inside the ID must match exactly."
                 exit 1
               }
               test "$CONFIRMATION" = "APPLY_NEON_RECONCILIATION"
@@ -87,6 +93,9 @@ jobs:
               ;;
             *) echo "Unsupported reconciliation operation"; exit 1 ;;
           esac
+          if test "$OPERATION" = "apply-approved-plan"; then
+            printf 'approved_plan_id=%s\n' "$APPROVED_PLAN_ID" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: "01.2 Checkout protected public release authority"
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -218,7 +227,7 @@ jobs:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
           OPERATION: ${{ inputs.operation }}
-          APPROVED_PLAN_ID: ${{ inputs.approved_plan_id }}
+          APPROVED_PLAN_ID: ${{ steps.request.outputs.approved_plan_id }}
           NEON_CHANGE_REASON: ${{ inputs.change_reason }}
         run: |
           set -euo pipefail
@@ -267,7 +276,8 @@ jobs:
             echo "- Starting runtime-data commit: \`$DATA_SHA\`"
             echo "- CSV check: $CSV_AUDIT_OUTCOME"
             echo "- Check-and-apply checks current data and applies in one run; leave Plan ID blank."
-            echo "- Only apply-approved-plan requires an unchanged preview Plan ID."
+            echo "- Only apply-approved-plan requires an unchanged preview Plan ID; surrounding whitespace is ignored."
+            echo "- Main can append after a preview, making exact-plan approval stale. Use check-and-apply for current-data repair, or create a fresh preview."
             echo "- Check-and-apply and scheduled apply retry up to twice after verified Main appends. Main stays enabled."
             echo "- CSV line count includes one header. Compare CSV data rows with active-generation Neon rows."
             echo "- Reset archives older generations; archived rows are retained separately and are not pending deletions."
