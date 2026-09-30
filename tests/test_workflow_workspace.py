@@ -310,7 +310,7 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertNotIn('send_provider_alert', sync_gate)
         self.assertNotIn("needs.run-logger.result == 'success'", sync_gate)
         fallback = workflow.split('  fallback-issues:', 1)[1]
-        self.assertIn('continue-on-error: true', fallback.split('    steps:', 1)[0])
+        self.assertNotIn('continue-on-error: true', fallback.split('    steps:', 1)[0])
         self.assertIn("needs.run-logger.outputs.provider_alert_delivery_failed == 'true'", fallback)
 
     def test_notification_summary_reports_degraded_without_claiming_core_success(self):
@@ -321,7 +321,8 @@ class WorkflowWorkspaceTests(unittest.TestCase):
             summary = Path(directory) / 'summary'
             env = dict(os.environ, GITHUB_STEP_SUMMARY=str(summary),
                        WORKFLOW_EMAIL_STATUS='not_required', PROVIDER_EMAIL_STATUS='failed',
-                       WORKFLOW_EMAIL_OUTCOME='success', PROVIDER_EMAIL_OUTCOME='success')
+                       WORKFLOW_EMAIL_OUTCOME='success', PROVIDER_EMAIL_OUTCOME='success',
+                       PROVIDER_ACK_OUTCOME='success')
             result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('::warning::', result.stdout)
@@ -332,6 +333,12 @@ class WorkflowWorkspaceTests(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn('::warning::', result.stdout)
+            result = subprocess.run(['bash', '-c', script],
+                                    env={**env, 'PROVIDER_EMAIL_STATUS': 'accepted', 'PROVIDER_ACK_OUTCOME': 'failure'},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('delivery checkpoint was not saved', result.stdout)
+            self.assertIn('Provider event email: accepted', summary.read_text())
 
     def test_main_push_preserves_concurrent_reset_and_accepts_exact_retry(self):
         workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
