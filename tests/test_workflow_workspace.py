@@ -1,5 +1,6 @@
 """Regression checks for job-local helper availability and snapshot persistence."""
 import unittest
+import json
 import os
 import subprocess
 import tempfile
@@ -98,14 +99,67 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertNotIn('git rebase', workflow)
         self.assertIn('Verified runtime-data commit', workflow)
 
-    def test_alert_acknowledgement_requires_verified_core_persistence(self):
+    def test_alert_acknowledgement_requires_verified_incident_persistence(self):
         workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
         ack = workflow.split('31.5 Acknowledge and persist delivered provider event', 1)[1]
         ack = ack.split('SECTION 32', 1)[0]
         self.assertIn("steps.verify_core.outcome == 'success'", ack)
-        self.assertIn('test "$(git rev-parse HEAD)" = "$VERIFIED_CORE_SHA"', ack)
-        self.assertIn('test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$VERIFIED_CORE_SHA"', ack)
+        self.assertIn("steps.persist_failed_incident.outcome == 'success'", ack)
+        self.assertIn('persist-incident', ack)
+        self.assertIn('--expected-state-file private_logger/provider_incident_state.json', ack)
+        self.assertIn('--csv-state-file private_logger/csv_state.json', ack)
+        self.assertIn('--acknowledge-event-file "$PROVIDER_EVENT_FILE"', ack)
+        self.assertNotIn('git push', ack)
         self.assertNotIn('git rebase', workflow)
+
+    def test_recorded_price_failure_uses_provider_alerts_and_other_failures_still_alert(self):
+        workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
+        step = workflow.split('name: "30.1 Determine whether human attention is required"', 1)[1]
+        step = step.split('      # ===', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = dict(os.environ, RUNNER_TEMP=directory, JOB_STATUS='failure',
+                       LOGGER_OUTCOME='failure', INCIDENT_CHECKPOINT_OUTCOME='success')
+            alert = root / 'vpn-alert-type.txt'
+            def classify(**changes):
+                result = subprocess.run(['bash', '-c', script], env={**env, **changes},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            classify()
+            self.assertFalse(alert.exists())
+            classify(INCIDENT_CHECKPOINT_OUTCOME='failure')
+            self.assertEqual(alert.read_text().strip(), 'PRODUCTION_WORKFLOW_FAILED')
+            classify(LOGGER_OUTCOME='success')
+            self.assertEqual(alert.read_text().strip(), 'PRODUCTION_WORKFLOW_FAILED')
+            (root / 'vpn-auth-recovery-failed').touch()
+            classify()
+            self.assertEqual(alert.read_text().strip(), 'VPN_AUTH_RECOVERY_FAILED')
+
+    def test_recovery_notification_passes_workflow_validation_without_sending_email(self):
+        workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
+        step = workflow.split('name: "31.3 Send deduplicated price-source event alert"', 1)[1]
+        step = step.split('      - name:', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            notifier = root / 'private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py'
+            notifier.parent.mkdir(parents=True)
+            notifier.write_text('print("offline notifier reached")\n')
+            event = root / 'event.json'
+            payload = {'event_type': 'PRICE_SOURCE_RECOVERED', 'severity': 'RECOVERY',
+                       'event_id': 'a' * 32, 'fingerprint': 'b' * 64}
+            env = dict(os.environ, PROVIDER_EVENT_FILE=str(event), GITHUB_OUTPUT=str(root / 'output'))
+            event.write_text(json.dumps(payload))
+            result = subprocess.run(['bash', '-c', script], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('offline notifier reached', result.stdout)
+            event.write_text(json.dumps({**payload, 'event_type': 'PRICE_SOURCE_INCIDENT'}))
+            result = subprocess.run(['bash', '-c', script], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('offline notifier reached', result.stdout)
 
     def test_main_push_preserves_concurrent_reset_and_accepts_exact_retry(self):
         workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
