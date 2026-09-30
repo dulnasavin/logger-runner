@@ -1,0 +1,131 @@
+name: "Neon Maintenance"
+run-name: "Neon Maintenance | ${{ inputs.operation }} | generation ${{ inputs.generation }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Preview or intentionally purge an archived generation. Active rows use CSV Maintenance first."
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - purge-archived
+          - continue-purge
+      generation:
+        description: "Exact archived dataset generation number; never the current CSV generation"
+        required: true
+        type: string
+      approved_plan_id:
+        description: "purge-archived only: nmp-v1 ID from preview"
+        required: false
+        type: string
+      continuation_token:
+        description: "continue-purge only: saved token from the previous run or preview"
+        required: false
+        type: string
+      confirmation:
+        description: "PURGE_ARCHIVED_NEON_GENERATION or CONTINUE_NEON_PURGE; leave blank for preview"
+        required: false
+        type: string
+      reason:
+        description: "New purge only: non-sensitive single-line reason, 1-200 characters"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neon-maintenance
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  maintain:
+    name: Maintain archived Neon data with deletion records
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require protected main
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main || {
+            echo "::error::Start Neon Maintenance from branch main."
+            exit 1
+          }
+
+      - name: Checkout protected release authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate enabled Neon capability
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute --capability neon --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout exact private source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ steps.release.outputs.private_repository }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          path: private_source
+          persist-credentials: false
+
+      - name: Read runtime generation authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ steps.release.outputs.private_repository }}
+          ref: ${{ steps.release.outputs.private_data_branch }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          path: private_data
+          persist-credentials: false
+
+      - name: Verify source and runtime boundary
+        env:
+          SOURCE_CODE_SHA: ${{ steps.release.outputs.private_code_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C private_source rev-parse HEAD)" = "$SOURCE_CODE_SHA"
+          test "$(git -C private_data branch --show-current)" = runtime-data
+          test -s "private_source/Neon Weekly Audit/neon_maintenance.py" || {
+            echo "::error::Pinned private release does not support Neon Maintenance. Update the release pin first."
+            exit 1
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install locked dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check --require-hashes
+          --only-binary=:all: -r "private_source/Crypto Logger-Private Repo/requirements.lock"
+
+      - name: Execute controlled archived-data maintenance
+        env:
+          OPERATION: ${{ inputs.operation }}
+          GENERATION: ${{ inputs.generation }}
+          APPROVED_PLAN_ID: ${{ inputs.approved_plan_id }}
+          CONTINUATION_TOKEN: ${{ inputs.continuation_token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          CHANGE_REASON: ${{ inputs.reason }}
+          SOURCE_CODE_SHA: ${{ steps.release.outputs.private_code_sha }}
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          python "private_source/Neon Weekly Audit/neon_maintenance.py" \
+            --mode "$OPERATION" --generation "$GENERATION" \
+            --runtime-repository private_data --plan-id "$APPROVED_PLAN_ID" \
+            --continuation-token "$CONTINUATION_TOKEN" \
+            --confirmation "$CONFIRMATION" --reason "$CHANGE_REASON"
+
+      - name: Clean up private checkouts
+        if: always()
+        run: rm -rf private_source private_data

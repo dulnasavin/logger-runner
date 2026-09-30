@@ -12,6 +12,32 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
 
 
 class WorkflowWorkspaceTests(unittest.TestCase):
+    def test_neon_maintenance_is_manual_and_passes_approval_values_as_data(self):
+        workflow = (WORKFLOWS / 'neon_maintenance.yml').read_text()
+        self.assertIn('workflow_dispatch:', workflow)
+        self.assertNotIn('schedule:', workflow)
+        self.assertIn('--capability neon', workflow)
+        self.assertIn('ref: ${{ steps.release.outputs.private_code_sha }}', workflow)
+        self.assertNotIn('git push', workflow)
+        self.assertNotIn('persist-credentials: true', workflow)
+        step = workflow.split('name: Execute controlled archived-data maintenance', 1)[1]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('      - name:', 1)[0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / 'private_source/Neon Weekly Audit/neon_maintenance.py'
+            capture.parent.mkdir(parents=True)
+            capture.write_text('import json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+            reason = 'Review $(touch MUST_NOT_EXIST); literal input'
+            env = dict(os.environ, OPERATION='purge-archived', GENERATION='4',
+                       APPROVED_PLAN_ID='nmp-v1-' + 'a'*64, CONTINUATION_TOKEN='',
+                       CONFIRMATION='PURGE_ARCHIVED_NEON_GENERATION', CHANGE_REASON=reason)
+            result = subprocess.run(['bash', '-c', script], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(result.stdout)
+            self.assertEqual(args[args.index('--reason') + 1], reason)
+            self.assertFalse((root / 'MUST_NOT_EXIST').exists())
+
     def test_maintenance_uses_verified_private_helpers_before_data_checkout(self):
         workflow = (WORKFLOWS / 'csv_maintenance.yml').read_text()
         job = workflow.split('  maintain-runtime-data:', 1)[1]
