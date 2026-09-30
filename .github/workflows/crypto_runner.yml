@@ -37,6 +37,8 @@ env:
 # - Coinbase and Binance are authenticated primaries; CoinGecko validates.
 # - Cached estimates are labelled and automatically disable trading eligibility.
 # - Provider alerts send only on incident start, severity change, and recovery.
+# - Email, summaries and diagnostics are optional, bounded side effects. Their
+#   failures never replace the verified CSV/Neon result or acknowledge delivery.
 # - Neon sync is a dependent job and consumes the exact verified data/source
 #   commits after core persistence succeeds. Manual repairs use Neon Audit.
 # ============================================================================
@@ -94,13 +96,13 @@ jobs:
       source_code_sha: ${{ steps.verify_core.outputs.source_code_sha }}
       alert_required: ${{ steps.send_make_alert.outputs.required }}
       alert_type: ${{ steps.send_make_alert.outputs.alert_type }}
-      alert_delivery_failed: ${{ steps.send_make_alert.outcome == 'failure' }}
+      alert_delivery_failed: ${{ steps.send_make_alert.outcome == 'failure' || steps.send_make_alert.outputs.delivery_status == 'failed' || steps.send_make_alert.outputs.delivery_status == 'pending' }}
       provider_alert_required: ${{ steps.send_provider_alert.outputs.required }}
       provider_alert_type: ${{ steps.send_provider_alert.outputs.alert_type }}
       provider_alert_severity: ${{ steps.send_provider_alert.outputs.alert_severity }}
       provider_alert_event_id: ${{ steps.send_provider_alert.outputs.event_id }}
       provider_alert_fingerprint: ${{ steps.send_provider_alert.outputs.fingerprint }}
-      provider_alert_delivery_failed: ${{ steps.send_provider_alert.outcome == 'failure' }}
+      provider_alert_delivery_failed: ${{ steps.send_provider_alert.outcome == 'failure' || steps.send_provider_alert.outputs.delivery_status == 'failed' || steps.send_provider_alert.outputs.delivery_status == 'pending' }}
 
     steps:
       # ======================================================================
@@ -821,6 +823,8 @@ jobs:
       # ======================================================================
       - name: "30.1 Determine whether human attention is required"
         if: always()
+        continue-on-error: true
+        timeout-minutes: 1
         env:
           JOB_STATUS: ${{ job.status }}
           LOGGER_OUTCOME: ${{ steps.run_price_logger.outcome }}
@@ -848,6 +852,7 @@ jobs:
         id: send_make_alert
         if: always()
         continue-on-error: true
+        timeout-minutes: 1
         env:
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
@@ -861,21 +866,29 @@ jobs:
           NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
           if [ ! -f "$ALERT_FILE" ]; then
             echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "delivery_status=not_required" >> "$GITHUB_OUTPUT"
             echo "No production failure or VPN recovery alert required"
             exit 0
           fi
           echo "required=true" >> "$GITHUB_OUTPUT"
+          echo "delivery_status=pending" >> "$GITHUB_OUTPUT"
+          ALERT_TYPE="$(cat "$ALERT_FILE")"
+          echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
           test -s "$NOTIFIER" || { echo "❌ alert_email.py unavailable"; exit 1; }
           test -n "$ALERT_MAKE_WEBHOOK_URL" || { echo "❌ ALERT_MAKE_WEBHOOK_URL missing"; exit 1; }
           test -n "$ALERT_MAKE_API_KEY" || { echo "❌ ALERT_MAKE_API_KEY missing"; exit 1; }
-          ALERT_TYPE="$(cat "$ALERT_FILE")"
-          echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
-          python "$NOTIFIER" --alert-type "$ALERT_TYPE"
+          if timeout --kill-after=5s 45s python "$NOTIFIER" --alert-type "$ALERT_TYPE"; then
+            echo "delivery_status=accepted" >> "$GITHUB_OUTPUT"
+          else
+            echo "delivery_status=failed" >> "$GITHUB_OUTPUT"
+            echo "::warning::Production email unavailable or timed out. GitHub Issue fallback will be attempted; the core data result is unchanged."
+          fi
 
       - name: "31.3 Send deduplicated price-source event alert"
         id: send_provider_alert
         if: always()
         continue-on-error: true
+        timeout-minutes: 1
         env:
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
@@ -888,10 +901,12 @@ jobs:
           NOTIFIER="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py"
           if [ ! -s "$PROVIDER_EVENT_FILE" ]; then
             echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "delivery_status=not_required" >> "$GITHUB_OUTPUT"
             echo "No new provider incident/severity/recovery email required"
             exit 0
           fi
           echo "required=true" >> "$GITHUB_OUTPUT"
+          echo "delivery_status=pending" >> "$GITHUB_OUTPUT"
           EVENT_TYPE="$(jq -r '.event_type' "$PROVIDER_EVENT_FILE")"
           EVENT_SEVERITY="$(jq -r '.severity' "$PROVIDER_EVENT_FILE")"
           EVENT_ID="$(jq -r '.event_id // empty' "$PROVIDER_EVENT_FILE")"
@@ -910,11 +925,17 @@ jobs:
           echo "alert_severity=$EVENT_SEVERITY" >> "$GITHUB_OUTPUT"
           echo "event_id=$EVENT_ID" >> "$GITHUB_OUTPUT"
           echo "fingerprint=$EVENT_FINGERPRINT" >> "$GITHUB_OUTPUT"
-          python "$NOTIFIER" --alert-type "$EVENT_TYPE"
+          if timeout --kill-after=5s 45s python "$NOTIFIER" --alert-type "$EVENT_TYPE"; then
+            echo "delivery_status=accepted" >> "$GITHUB_OUTPUT"
+          else
+            echo "delivery_status=failed" >> "$GITHUB_OUTPUT"
+            echo "::warning::Provider email unavailable or timed out. The event remains pending for retry; GitHub Issue fallback will be attempted. CSV saving and Neon sync remain independent."
+          fi
 
       - name: "31.5 Acknowledge and persist delivered provider event"
-        if: always() && (steps.verify_core.outcome == 'success' || steps.persist_failed_incident.outcome == 'success') && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success'
+        if: always() && (steps.verify_core.outcome == 'success' || steps.persist_failed_incident.outcome == 'success') && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success' && steps.send_provider_alert.outputs.delivery_status == 'accepted'
         continue-on-error: true
+        timeout-minutes: 1
         env:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
@@ -940,11 +961,46 @@ jobs:
             --acknowledge-event-file "$PROVIDER_EVENT_FILE"
           echo "✅ Provider delivery acknowledged after Make accepted the event"
 
+      - name: "31.6 Report optional notification health"
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          WORKFLOW_EMAIL_STATUS: ${{ steps.send_make_alert.outputs.delivery_status }}
+          PROVIDER_EMAIL_STATUS: ${{ steps.send_provider_alert.outputs.delivery_status }}
+          WORKFLOW_EMAIL_OUTCOME: ${{ steps.send_make_alert.outcome }}
+          PROVIDER_EMAIL_OUTCOME: ${{ steps.send_provider_alert.outcome }}
+        run: |
+          set -euo pipefail
+          DEGRADED=false
+          for STATUS in "$WORKFLOW_EMAIL_STATUS" "$PROVIDER_EMAIL_STATUS"; do
+            case "$STATUS" in
+              accepted|not_required) ;;
+              *) DEGRADED=true ;;
+            esac
+          done
+          if [ "$WORKFLOW_EMAIL_OUTCOME" = failure ] || [ "$PROVIDER_EMAIL_OUTCOME" = failure ]; then
+            DEGRADED=true
+          fi
+          if [ "$DEGRADED" = true ]; then
+            echo "::warning::Optional email delivery is degraded. This does not change CSV or Neon success; see the separate data steps. Check the failed Make scenario execution to repair delivery."
+          fi
+          {
+            echo "## Optional notifications"
+            echo "- Production/VPN email: ${WORKFLOW_EMAIL_STATUS:-unavailable}"
+            echo "- Provider event email: ${PROVIDER_EMAIL_STATUS:-unavailable}"
+            echo "- accepted means Make accepted the request; it is not proof of mailbox delivery."
+            echo "- Failed events remain pending. GitHub Issue fallback is a separate best-effort job."
+            echo "- Email and reporting failures do not block verified CSV persistence or Neon sync."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # ======================================================================
       # SECTION 32 - CREATE PRODUCTION SUCCESS SUMMARY
       # ======================================================================
       - name: "32.1 Create structured production summary"
         if: success()
+        continue-on-error: true
+        timeout-minutes: 1
         run: |
           set -euo pipefail
           CSV="private_logger/price_log.csv"
@@ -983,7 +1039,9 @@ jobs:
             echo "- **GitHub VPN secret update:** ${SECRET_UPDATE}"
             echo "- **Provider-triggered network recovery:** Enabled"
             echo "- **Successful reconnects:** $(jq -r '.network_recovery.reconnect_count // 0' "$REPORT")"
+            echo "- **Reconnect attempts:** $(jq -r '.network_recovery.reconnect_attempt_count // 0' "$REPORT")"
             echo "- **Successful VPN2 switches:** $(jq -r '.network_recovery.switch_count // 0' "$REPORT")"
+            echo "- **VPN2 switch attempts:** $(jq -r '.network_recovery.switch_attempt_count // 0' "$REPORT")"
             echo "- **Network after collection:** $(jq -r '.network_recovery.active_network // "unknown"' "$REPORT")"
             echo ""
             echo "### 3. Provider health"
@@ -1022,6 +1080,8 @@ jobs:
       # ======================================================================
       - name: "33.1 Collect non-secret production diagnostics"
         if: failure()
+        continue-on-error: true
+        timeout-minutes: 1
         run: |
           set +e
           mkdir -p debug
@@ -1046,6 +1106,7 @@ jobs:
       - name: "33.2 Upload production failure diagnostics"
         if: failure()
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-crypto-price-logger-debug-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1169,6 +1230,8 @@ jobs:
 
       - name: Publish sanitized Neon handoff summary
         if: always()
+        continue-on-error: true
+        timeout-minutes: 1
         env:
           DATA_SHA: ${{ needs.run-logger.outputs.core_commit_sha }}
           SOURCE_SHA: ${{ needs.run-logger.outputs.source_code_sha }}
@@ -1186,6 +1249,7 @@ jobs:
 
   fallback-issues:
     name: Trusted GitHub Issue fallback
+    continue-on-error: true
     needs:
       - run-logger
       - sync-neon
