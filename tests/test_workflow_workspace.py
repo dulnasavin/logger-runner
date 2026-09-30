@@ -131,6 +131,7 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         ack = ack.split('SECTION 32', 1)[0]
         self.assertIn("steps.verify_core.outcome == 'success'", ack)
         self.assertIn("steps.persist_failed_incident.outcome == 'success'", ack)
+        self.assertIn("steps.send_provider_alert.outputs.delivery_status == 'accepted'", ack)
         self.assertIn('persist-incident', ack)
         self.assertIn('--expected-state-file private_logger/provider_incident_state.json', ack)
         self.assertIn('--csv-state-file private_logger/csv_state.json', ack)
@@ -186,6 +187,123 @@ class WorkflowWorkspaceTests(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn('offline notifier reached', result.stdout)
+
+    def test_optional_email_failure_timeout_and_success_preserve_data_and_delivery_truth(self):
+        workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
+        for name, argument in (
+            ('31.1 Send production failure or VPN recovery alert', 'ALERT_TYPE'),
+            ('31.3 Send deduplicated price-source event alert', 'EVENT_TYPE'),
+        ):
+            step = workflow.split(f'name: "{name}"', 1)[1].split('      - name:', 1)[0]
+            script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+            self.assertIn('continue-on-error: true', step)
+            self.assertIn('timeout-minutes: 1', step)
+            self.assertIn(f'timeout --kill-after=5s 45s python "$NOTIFIER" --alert-type "${argument}"', script)
+            with self.subTest(step=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                notifier = root / 'private_logger/Crypto Logger-Private Repo/vpn_auth_recovery/alert_email.py'
+                notifier.parent.mkdir(parents=True)
+                csv = root / 'private_logger/price_log.csv'
+                csv.write_text('verified committed batch stays intact\n')
+                original = csv.read_bytes()
+                event = root / 'event.json'
+                event.write_text(json.dumps({
+                    'event_type': 'PRICE_SOURCE_INCIDENT', 'severity': 'WARNING',
+                    'event_id': 'a' * 32, 'fingerprint': 'b' * 64,
+                }))
+                alert = root / 'vpn-alert-type.txt'
+                alert.write_text('PRODUCTION_WORKFLOW_FAILED\n')
+                output = root / 'output'
+                env = dict(os.environ, RUNNER_TEMP=directory, PROVIDER_EVENT_FILE=str(event),
+                           GITHUB_OUTPUT=str(output), ALERT_MAKE_WEBHOOK_URL='offline',
+                           ALERT_MAKE_API_KEY='offline')
+
+                def run(**changes):
+                    output.write_text('')
+                    result = subprocess.run(['bash', '-c', script], cwd=root,
+                                            env={**env, **changes}, capture_output=True,
+                                            text=True, timeout=5)
+                    self.assertEqual(csv.read_bytes(), original)
+                    values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                    return result, values
+
+                notifier.write_text('print("ALERT_EMAIL_ERROR: Make/Outlook delivery failed with HTTP 500")\nraise SystemExit(1)\n')
+                result, values = run()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('::warning::', result.stdout)
+                self.assertEqual(values['delivery_status'], 'failed')
+                self.assertEqual(values['required'], 'true')
+
+                # Simulate the external deadline result without waiting or sending an email.
+                commands = root / 'bin'
+                commands.mkdir()
+                deadline = commands / 'timeout'
+                deadline.write_text('#!/bin/sh\n[ "$1" = --kill-after=5s ] && [ "$2" = 45s ] || exit 99\nexit 124\n')
+                deadline.chmod(0o755)
+                result, values = run(PATH=str(commands) + os.pathsep + env['PATH'])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(values['delivery_status'], 'failed')
+
+                notifier.write_text('print("offline accepted")\n')
+                result, values = run()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(values['delivery_status'], 'accepted')
+                self.assertNotIn('::warning::', result.stdout)
+
+                event.unlink()
+                alert.unlink()
+                result, values = run()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(values['required'], 'false')
+                self.assertEqual(values['delivery_status'], 'not_required')
+                self.assertNotIn('offline accepted', result.stdout)
+
+    def test_optional_failures_cannot_relax_core_data_gates_or_hide_fallback(self):
+        workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
+        for name in ('24.1 Run price_logger.py on managed S2 network',
+                     '26.1 Validate production CSV schema and new rows',
+                     '28.2 Push only the unchanged runtime-data snapshot',
+                     '29.1 Verify remote private runtime-data SHA',
+                     'Run exact one-way Neon sync'):
+            step = workflow.split(f'name: "{name}"' if name[0].isdigit() else f'name: {name}', 1)[1]
+            step = step.split('      - name:', 1)[0]
+            self.assertNotIn('continue-on-error: true', step.split('        run:', 1)[0], name)
+        for name in ('32.1 Create structured production summary',
+                     '33.1 Collect non-secret production diagnostics',
+                     'Publish sanitized Neon handoff summary'):
+            step = workflow.split(f'name: "{name}"' if name[0].isdigit() else f'name: {name}', 1)[1]
+            step = step.split('      - name:', 1)[0]
+            self.assertIn('continue-on-error: true', step)
+            self.assertIn('timeout-minutes: 1', step)
+        for sender in ('send_make_alert', 'send_provider_alert'):
+            self.assertIn(f"steps.{sender}.outcome == 'failure' || steps.{sender}.outputs.delivery_status == 'failed' || steps.{sender}.outputs.delivery_status == 'pending'", workflow)
+        sync_gate = workflow.split('  sync-neon:', 1)[1].split('    runs-on:', 1)[0]
+        self.assertIn("needs.run-logger.outputs.core_commit_sha != ''", sync_gate)
+        self.assertNotIn('send_provider_alert', sync_gate)
+        self.assertNotIn("needs.run-logger.result == 'success'", sync_gate)
+        fallback = workflow.split('  fallback-issues:', 1)[1]
+        self.assertIn('continue-on-error: true', fallback.split('    steps:', 1)[0])
+        self.assertIn("needs.run-logger.outputs.provider_alert_delivery_failed == 'true'", fallback)
+
+    def test_notification_summary_reports_degraded_without_claiming_core_success(self):
+        workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
+        step = workflow.split('name: "31.6 Report optional notification health"', 1)[1]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('      # ===', 1)[0])
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / 'summary'
+            env = dict(os.environ, GITHUB_STEP_SUMMARY=str(summary),
+                       WORKFLOW_EMAIL_STATUS='not_required', PROVIDER_EMAIL_STATUS='failed',
+                       WORKFLOW_EMAIL_OUTCOME='success', PROVIDER_EMAIL_OUTCOME='success')
+            result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('::warning::', result.stdout)
+            self.assertIn('Provider event email: failed', summary.read_text())
+            self.assertNotIn('CSV saved successfully', summary.read_text())
+            result = subprocess.run(['bash', '-c', script],
+                                    env={**env, 'PROVIDER_EMAIL_STATUS': 'accepted'},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn('::warning::', result.stdout)
 
     def test_main_push_preserves_concurrent_reset_and_accepts_exact_retry(self):
         workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
