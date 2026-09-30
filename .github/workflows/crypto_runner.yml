@@ -1342,9 +1342,9 @@ jobs:
             const deliveryHelp = {
               MAKE_EMAIL_AUTH_INVALID_GRANT: "Make reported invalid_grant: reauthorize Email send connection in Credentials > Connections, then verify it.",
               MAKE_WEBHOOK_AUTH_REJECTED: "Make rejected webhook authentication: check the configured webhook/API key without exposing either value.",
-              MAKE_DELIVERY_UNCONFIRMED: 'Make did not confirm email-module success. Put a Webhook response after the successful email module returning {"ok":true}; never return success before sending.',
+              MAKE_DELIVERY_UNCONFIRMED: 'No explicit email-module success was received. Inspect Make history before retrying: mail may already have been sent. Verify that the final Webhook response returns {"ok":true} only after the email module succeeds.',
               MAKE_HTTP_ERROR: "Make returned an HTTP error. Inspect the failed scenario execution for the exact cause; HTTP 500 alone does not prove an OAuth or VPN problem.",
-              MAKE_NETWORK_ERROR: "The delivery endpoint could not be reached. Inspect Make availability and runner connectivity.",
+              MAKE_NETWORK_ERROR: "The delivery request could not connect or was interrupted. Inspect Make availability, runner connectivity and Make history before retrying; mail may already have been sent.",
               MAKE_TIMEOUT: "The email scenario did not confirm success before the timeout. Check its execution before retrying to avoid duplicates."
             };
             const deliveryDiagnosis = interrupted(process.env.VALIDATION_RESULT)
@@ -1450,9 +1450,9 @@ jobs:
             const deliveryHelp = {
               MAKE_EMAIL_AUTH_INVALID_GRANT: "Make reported invalid_grant: reauthorize Email send connection in Credentials > Connections, then verify it.",
               MAKE_WEBHOOK_AUTH_REJECTED: "Make rejected webhook authentication: check the configured webhook/API key without exposing either value.",
-              MAKE_DELIVERY_UNCONFIRMED: 'Make did not confirm email-module success. Put a Webhook response after the successful email module returning {"ok":true}; never return success before sending.',
+              MAKE_DELIVERY_UNCONFIRMED: 'No explicit email-module success was received. Inspect Make history before retrying: mail may already have been sent. Verify that the final Webhook response returns {"ok":true} only after the email module succeeds.',
               MAKE_HTTP_ERROR: "Make returned an HTTP error. Inspect the failed scenario execution for the exact cause; HTTP 500 alone does not prove an OAuth or VPN problem.",
-              MAKE_NETWORK_ERROR: "The delivery endpoint could not be reached. Inspect Make availability and runner connectivity.",
+              MAKE_NETWORK_ERROR: "The delivery request could not connect or was interrupted. Inspect Make availability, runner connectivity and Make history before retrying; mail may already have been sent.",
               MAKE_TIMEOUT: "The email scenario did not confirm success before the timeout. Check its execution before retrying to avoid duplicates."
             };
             const deliveryDiagnosis = deliveryHelp[process.env.DELIVERY_ERROR] || "Delivery was not confirmed. Check the notifier step and Make execution history; missing configuration or a timeout may have prevented sending.";
