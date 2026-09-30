@@ -1,0 +1,184 @@
+name: "Workflow Failure Alerts"
+
+on:
+  workflow_run:
+    workflows:
+      - "CSV Audit"
+      - "CSV Maintenance"
+      - "Neon Audit | Weekly"
+      - "Neon Maintenance"
+      - "Neon Schema | Controlled Migration"
+      - "Crypto Logger | Staging"
+      - "Workflow Security"
+      - "CodeQL Advanced"
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-alert-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  report:
+    if: >-
+      contains(fromJSON('["failure","cancelled","timed_out","action_required","startup_failure"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      # Run only this default-branch script. Never fetch artifacts, caches, code
+      # or executable commands from the triggering workflow or pull request.
+      - name: Record the failed workflow independently of email
+        id: incident
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const run = context.payload.workflow_run;
+            const {owner, repo} = context.repo;
+            const supported = new Set([
+              "CSV Audit", "CSV Maintenance", "Neon Audit | Weekly", "Neon Maintenance",
+              "Neon Schema | Controlled Migration", "Crypto Logger | Staging", "Workflow Security", "CodeQL Advanced"
+            ]);
+            const failures = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
+            if (!run || !supported.has(run.name) || !failures.has(run.conclusion) ||
+                run.repository?.full_name !== `${owner}/${repo}` ||
+                !Number.isSafeInteger(run.id) || run.id <= 0 ||
+                !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 0 ||
+                !Number.isSafeInteger(run.run_number) || run.run_number <= 0) {
+              core.setOutput("required", "false");
+              return;
+            }
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${run.id}`;
+            const clean = value => String(value || "unknown").replace(/[\r\n\x00-\x1f\x7f]/g, " ").slice(0, 160);
+            let details = ["Job details unavailable; open the original run's first failed or cancelled step."];
+            try {
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+                owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100
+              });
+              details = jobs.filter(job => failures.has(job.conclusion)).slice(0, 10).map(job => {
+                const step = (job.steps || []).find(item => failures.has(item.conclusion));
+                return `${clean(job.name)}: ${job.conclusion}` + (step ? `; first stopped step: ${clean(step.name)}` : "");
+              });
+              if (!details.length) details = ["No failed job details were returned; review the original run conclusion."];
+            } catch {
+              core.warning("Job details could not be read; retaining the original workflow failure.");
+            }
+            const body = [
+              "CRYPTO LOGGER - WORKFLOW FAILURE",
+              "", "WHAT HAPPENED",
+              `${run.name} ended with ${run.conclusion}.`,
+              `Run #${run.run_number}; attempt ${run.run_attempt}.`,
+              "", "FAILED STAGE", ...details,
+              "", "ACTION REQUIRED",
+              "Open the original run below and review its first failed or cancelled step. The step name identifies where execution stopped; it does not prove the underlying cause.",
+              "For a data conflict or changed runtime snapshot, review the current data and start a fresh preview. Never force a stale repair plan.",
+              "", "DATA AND SCHEDULING",
+              "This reports only the named workflow. It does not establish that Main, CSV persistence, Neon, or VPN failed.",
+              "CSV Audit and Neon Audit have independent cron schedules. A failure in one does not cancel the other's scheduled start. Each retains its own data safety checks.",
+              "", "ORIGINAL GITHUB ACTIONS RUN", runUrl
+            ].join("\n");
+            core.setOutput("required", "true");
+            core.setOutput("run_id", String(run.id));
+            core.setOutput("run_attempt", String(run.run_attempt));
+            core.setOutput("run_number", String(run.run_number));
+            core.setOutput("workflow_name", run.name);
+            core.setOutput("subject", `CRYPTO LOGGER | ${run.name} | ${run.conclusion.toUpperCase()} | Run #${run.run_number}`);
+            core.setOutput("body", body);
+            const marker = `<!-- crypto-workflow-failure:${run.id}:${run.run_attempt} -->`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: "all", creator: "github-actions[bot]", per_page: 100});
+            const existing = issues.find(issue => !issue.pull_request &&
+              issue.user?.login === "github-actions[bot]" && (issue.body || "").includes(marker));
+            if (existing) {
+              core.setOutput("issue_number", String(existing.number));
+              core.notice(`Incident already recorded in issue #${existing.number}`);
+              return;
+            }
+            const created = await github.rest.issues.create({owner, repo,
+              title: `Crypto Logger: ${run.name} ${run.conclusion} (run ${run.run_number})`,
+              body: `${marker}\n${body}\n\nEmail status is recorded in the separate Workflow Failure Alerts run. An issue being saved is not proof of email receipt.`});
+            core.setOutput("issue_number", String(created.data.number));
+
+      - name: Checkout trusted default-branch notification code
+        if: always() && steps.incident.outputs.required == 'true'
+        id: public_source
+        continue-on-error: true
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Read the protected notification release pin
+        if: always() && steps.public_source.outcome == 'success'
+        id: release
+        continue-on-error: true
+        run: python scripts/validate_release_manifest.py --mode review --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned private email helper
+        if: always() && steps.release.outcome == 'success'
+        id: private_source
+        continue-on-error: true
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          path: private_notifier
+          persist-credentials: false
+
+      - name: Send the workflow failure through the existing Make connection
+        if: always() && steps.private_source.outcome == 'success'
+        id: email
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
+          ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
+          FAILED_RUN_ID: ${{ steps.incident.outputs.run_id }}
+          FAILED_RUN_ATTEMPT: ${{ steps.incident.outputs.run_attempt }}
+          FAILED_RUN_NUMBER: ${{ steps.incident.outputs.run_number }}
+          FAILED_WORKFLOW_NAME: ${{ steps.incident.outputs.workflow_name }}
+          FAILURE_SUBJECT: ${{ steps.incident.outputs.subject }}
+          FAILURE_BODY: ${{ steps.incident.outputs.body }}
+        run: timeout --kill-after=5s 45s python scripts/send_workflow_failure.py
+
+      - name: Report notification delivery separately from the failed workflow
+        if: always()
+        env:
+          NOTIFICATION_REQUIRED: ${{ steps.incident.outputs.required }}
+          ISSUE_OUTCOME: ${{ steps.incident.outcome }}
+          EMAIL_OUTCOME: ${{ steps.email.outcome }}
+          ISSUE_NUMBER: ${{ steps.incident.outputs.issue_number }}
+          ORIGINAL_RUN_ID: ${{ steps.incident.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$NOTIFICATION_REQUIRED" = false ]; then
+            echo "This event is outside the configured workflow-failure coverage."
+            exit 0
+          fi
+          {
+            echo "## Workflow failure notification"
+            echo "- Original run ID: $ORIGINAL_RUN_ID"
+            echo "- Incident issue: ${ISSUE_NUMBER:-unavailable}; result: $ISSUE_OUTCOME"
+            echo "- Make email result: $EMAIL_OUTCOME"
+            echo "- Email success means explicit Make email-module acknowledgment, not verified inbox receipt."
+            echo "- Failed/cancelled audits keep their own result; no repair was triggered by this notifier."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EMAIL_OUTCOME" != success ]; then
+            echo "::warning::Workflow failure email was not confirmed. Inspect Make connection/scenario history and the notifier setup steps."
+          fi
+          if [ "$ISSUE_OUTCOME" != success ] && [ "$EMAIL_OUTCOME" != success ]; then
+            echo "::error::Both workflow failure reporting channels failed. Review this run and the original failed workflow."
+            exit 1
+          fi
+
+      - name: Remove the private notifier checkout
+        if: always()
+        run: rm -rf private_notifier

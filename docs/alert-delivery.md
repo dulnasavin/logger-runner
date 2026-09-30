@@ -56,3 +56,20 @@ Automatic pending-event retries apply to provider incidents; workflow/Neon failu
 This is not an exactly-once or never-fail delivery system. The current three-module Make scenario has no persistent `event_id` deduplication, so a lost response or checkpoint can still produce a later duplicate. Make/Outlook outages, quotas, mailbox filtering, and revoked permissions can interrupt email. Invalid workflow YAML, a disabled dispatcher, exhausted runner capacity, forced cancellation, or a GitHub-wide outage can prevent the fallback from running at all. Detecting a system that never starts requires an independent heartbeat monitor outside GitHub and Make, with a separately authorized notification destination; that monitor is not configured by this change.
 
 Sources: [Make webhook responses, queue limits and rate limits](https://help.make.com/webhooks), [GitHub cancellation behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation), [GitHub Actions notifications](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-github-actions-notifications).
+
+## Audit schedule and other workflow failures
+
+cron-job.org owns the independent audit schedules in `Pacific/Auckland`:
+
+| Job | Schedule | Dispatch operation |
+| --- | --- | --- |
+| CSV Audit | Monday and Thursday, 02:45 (`45 2 * * 1,4`) | `preview` |
+| Neon Audit | Monday and Thursday, 03:00 (`0 3 * * 1,4`) | Existing `scheduled-apply` policy |
+
+The CSV schedule is read-only preview. Recurring CSV `repair` requires explicit authorization because it can publish recovered data. The cron jobs are not chained, so Neon is still dispatched if CSV Audit fails. A 15-minute head start is not a completion guarantee: runner capacity, queued same-workflow runs and service delays can affect execution time. Different workflow concurrency groups allow overlap; shared database locks and stale-data checks still prevent unsafe concurrent changes. Neon retains its own CSV pre-audit and stops unsafe reconciliation if that check fails.
+
+Cron notification success means GitHub accepted the dispatch request, not that the workflow passed. `Workflow Failure Alerts` separately watches completed CSV Audit, CSV Maintenance, Neon Audit, Neon Maintenance, Neon Schema, Staging, Workflow Security and CodeQL runs in this runner repository. On failure, cancellation, timeout, startup failure or action-required conclusion it records a trusted GitHub issue and independently attempts email through the existing Make connection. Main keeps its existing incident emails and fallback, avoiding a second monitor email for each Main incident.
+
+The monitor reports the original run and attempt and the first stopped step in each failed job. It reads job metadata only and never downloads triggering-run artifacts, caches, raw logs or code. Public notification code comes from the default-branch `github.sha`; the email helper comes from the reviewed private release pin. Issues failure does not prevent email, and email setup/delivery failure does not remove the issue. If both channels fail, the notifier job fails visibly. Native GitHub notifications remain the backup for a failure of the notifier itself. Manual reruns can repeat an email after an uncertain prior send; event identity remains stable.
+
+This coverage becomes active only after the notifier workflow is merged into the public default branch. It does not monitor the separate private repository's CI or a workflow that never starts, and it cannot guarantee inbox receipt. Keep GitHub Actions notifications enabled for those cases and use an independent heartbeat monitor for missing starts.
