@@ -190,6 +190,8 @@ jobs:
           "$RELEASE_PYTHON" "private_release/Neon Weekly Audit/scheduled_reconciliation.py" --help | grep -q -- --runtime-repository
           "$RELEASE_PYTHON" "private_release/Neon Weekly Audit/neon_audit.py" --help | grep -q -- check-and-apply
           "$RELEASE_PYTHON" "private_release/Neon Weekly Audit/neon_maintenance.py" --help | grep -q -- continue-purge
+          "$RELEASE_PYTHON" "private_release/Neon Weekly Audit/neon_maintenance.py" --help | grep -q -- clear-tables
+          test -s "private_release/Neon Weekly Audit/neon_table_maintenance.py"
           "$RELEASE_PYTHON" "private_release/Crypto Logger-Private Repo/csv_audit.py" --help | grep -q -- --publish
           "$RELEASE_PYTHON" - <<'PY'
           import os
