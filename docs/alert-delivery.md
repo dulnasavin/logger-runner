@@ -63,10 +63,10 @@ cron-job.org owns the independent audit schedules in `Pacific/Auckland`:
 
 | Job | Schedule | Dispatch operation |
 | --- | --- | --- |
-| CSV Audit | Monday and Thursday, 02:45 (`45 2 * * 1,4`) | `preview` |
-| Neon Audit | Monday and Thursday, 03:00 (`0 3 * * 1,4`) | Existing `scheduled-apply` policy |
+| CSV Audit | Daily, 02:45 (`45 2 * * *`) | `repair` |
+| Neon Audit | Daily, 03:00 (`0 3 * * *`) | Existing `scheduled-apply` policy |
 
-The CSV schedule is read-only preview. Recurring CSV `repair` requires explicit authorization because it can publish recovered data. The cron jobs are not chained, so Neon is still dispatched if CSV Audit fails. A 15-minute head start is not a completion guarantee: runner capacity, queued same-workflow runs and service delays can affect execution time. Different workflow concurrency groups allow overlap; shared database locks and stale-data checks still prevent unsafe concurrent changes. Neon retains its own CSV pre-audit and stops unsafe reconciliation if that check fails.
+The user authorized recurring CSV `repair`, which publishes eligible verified recovery to `runtime-data`. Both audit schedules run daily. Conflicting data, changed runtime snapshots, pending maintenance or failed provenance checks stop repair rather than forcing changes. The cron jobs are not chained, so Neon is still dispatched if CSV Audit fails. A 15-minute head start is not a completion guarantee: runner capacity, queued same-workflow runs and service delays can affect execution time. Different workflow concurrency groups allow overlap; shared database locks and stale-data checks still prevent unsafe concurrent changes. Neon retains its own CSV pre-audit and stops unsafe reconciliation if that check fails.
 
 Cron notification success means GitHub accepted the dispatch request, not that the workflow passed. `Workflow Failure Alerts` separately watches completed CSV Audit, CSV Maintenance, Neon Audit, Neon Maintenance, Neon Schema, Staging, Workflow Security and CodeQL runs in this runner repository. On failure, cancellation, timeout, startup failure or action-required conclusion it records a trusted GitHub issue and independently attempts email through the existing Make connection. Main keeps its existing incident emails and fallback, avoiding a second monitor email for each Main incident.
 
