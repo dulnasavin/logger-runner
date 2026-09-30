@@ -290,6 +290,7 @@ jobs:
           set -euo pipefail
           cd private_logger/"Crypto Logger-Private Repo"
           export PYTHONPATH="$PWD:$(dirname "$PWD")/Neon Weekly Audit"
+          python provider_consensus.py persist-incident --help >/dev/null
           python -m unittest discover \
             -s tests \
             -p 'test_*.py' \
@@ -542,6 +543,7 @@ jobs:
       # SECTION 23 - RECORD PRODUCTION CSV STATE BEFORE LOGGER
       # ======================================================================
       - name: "23.1 Preflight and record production CSV state"
+        id: csv_preflight
         run: |
           set -euo pipefail
           CSV="private_data/price_log.csv"
@@ -554,6 +556,8 @@ jobs:
           cp -- private_data/price_log.csv private_logger/price_log.csv
           cp -- private_data/csv_state.json private_logger/csv_state.json
           cp -- private_data/provider_incident_state.json private_logger/provider_incident_state.json
+          cp -- private_data/provider_incident_state.json "${RUNNER_TEMP}/provider-state-before.json"
+          cp -- private_data/csv_state.json "${RUNNER_TEMP}/provider-csv-state-before.json"
           BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
           echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
           echo "Production CSV rows before logger: ${BEFORE_ROWS}"
@@ -562,6 +566,7 @@ jobs:
       # SECTION 24 - RUN THE PRODUCTION PRICE LOGGER
       # ======================================================================
       - name: "24.1 Run price_logger.py on managed S2 network"
+        id: run_price_logger
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
@@ -768,6 +773,49 @@ jobs:
           rm -f "$ASKPASS"
           echo "✅ Exact private runtime-data commit verified"
 
+      - name: "29.2 Persist incident state from an incomplete price batch"
+        id: persist_failed_incident
+        if: always() && steps.csv_preflight.outcome == 'success' && steps.run_price_logger.outcome == 'failure'
+        continue-on-error: true
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          REPORT="${RUNNER_TEMP}/provider-report.json"
+          test -s "$REPORT"
+          jq -e '.version == 1 and .overall_severity == "CRITICAL" and
+            (.decisions | type == "object" and length == 11) and
+            any(.decisions[]; .accepted_usd == null)' "$REPORT" >/dev/null
+          jq -e --slurpfile report "$REPORT" '
+            .version == 2 and .last_run_at_utc == $report[0].completed_at_utc
+          ' private_logger/provider_incident_state.json >/dev/null
+          {
+            echo "## Price batch rejected"
+            echo ""
+            echo "No CSV prices from this batch were committed; Neon sync is skipped."
+            jq -r '.decisions | to_entries[] | select(.value.accepted_usd == null) |
+              "- " + .key + ": " + .value.status + ". " + .value.reason' "$REPORT"
+            echo ""
+            echo "VPN2 switches: $(jq -r '.network_recovery.switch_count // 0' "$REPORT")."
+          } >> "$GITHUB_STEP_SUMMARY"
+          ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
+          trap 'rm -f "$ASKPASS"' EXIT
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          python "private_logger/Crypto Logger-Private Repo/provider_consensus.py" persist-incident \
+            --repository private_data \
+            --state-file private_logger/provider_incident_state.json \
+            --expected-state-file "${RUNNER_TEMP}/provider-state-before.json" \
+            --csv-state-file "${RUNNER_TEMP}/provider-csv-state-before.json"
+          echo "Incident recorded; incomplete prices were not committed and Neon remains skipped"
+
       # ======================================================================
       # SECTION 30 - CLASSIFY PRODUCTION ALERT CONDITION
       # ======================================================================
@@ -775,12 +823,20 @@ jobs:
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
+          LOGGER_OUTCOME: ${{ steps.run_price_logger.outcome }}
+          INCIDENT_CHECKPOINT_OUTCOME: ${{ steps.persist_failed_incident.outcome }}
         run: |
           set +e
           rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
           [ -f "${RUNNER_TEMP}/vpn-auth-recovery-failed" ] && echo "VPN_AUTH_RECOVERY_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
           [ ! -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] && [ -f "${RUNNER_TEMP}/vpn-secret-update-failed" ] && echo "VPN_SECRET_UPDATE_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
-          [ ! -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] && [ "$JOB_STATUS" = "failure" ] && echo "PRODUCTION_WORKFLOW_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
+          if [ ! -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] && [ "$JOB_STATUS" = "failure" ]; then
+            if [ "$LOGGER_OUTCOME" = "failure" ] && [ "$INCIDENT_CHECKPOINT_OUTCOME" = "success" ]; then
+              echo "Incomplete-price incident recorded; provider notification policy handles this failure"
+            else
+              echo "PRODUCTION_WORKFLOW_FAILED" > "${RUNNER_TEMP}/vpn-alert-type.txt"
+            fi
+          fi
           [ -f "${RUNNER_TEMP}/vpn-alert-type.txt" ] \
             && echo "⚠ Production alert required: $(cat "${RUNNER_TEMP}/vpn-alert-type.txt")" \
             || echo "✅ No production alert required"
@@ -844,8 +900,8 @@ jobs:
             PRICE_SOURCE_INCIDENT|PRICE_SOURCE_SEVERITY_CHANGED|PRICE_SOURCE_RECOVERED) ;;
             *) echo "❌ Unsupported provider event type: ${EVENT_TYPE}"; exit 1 ;;
           esac
-          case "$EVENT_SEVERITY" in
-            HEALTHY|WARNING|CRITICAL) ;;
+          case "${EVENT_TYPE}:${EVENT_SEVERITY}" in
+            PRICE_SOURCE_RECOVERED:RECOVERY|PRICE_SOURCE_INCIDENT:WARNING|PRICE_SOURCE_INCIDENT:CRITICAL|PRICE_SOURCE_SEVERITY_CHANGED:WARNING|PRICE_SOURCE_SEVERITY_CHANGED:CRITICAL) ;;
             *) echo "❌ Unsupported provider event severity"; exit 1 ;;
           esac
           [[ "$EVENT_ID" =~ ^[0-9a-f]{32}$ ]] || { echo "❌ Invalid provider event ID"; exit 1; }
@@ -857,26 +913,17 @@ jobs:
           python "$NOTIFIER" --alert-type "$EVENT_TYPE"
 
       - name: "31.5 Acknowledge and persist delivered provider event"
-        if: always() && steps.verify_core.outcome == 'success' && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success'
+        if: always() && (steps.verify_core.outcome == 'success' || steps.persist_failed_incident.outcome == 'success') && steps.send_provider_alert.outputs.required == 'true' && steps.send_provider_alert.outcome == 'success'
         continue-on-error: true
         env:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
-          VERIFIED_CORE_SHA: ${{ steps.verify_core.outputs.core_commit_sha }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           CONSENSUS="private_logger/Crypto Logger-Private Repo/provider_consensus.py"
-          python "$CONSENSUS" acknowledge-delivery \
-            --state-file private_logger/provider_incident_state.json \
-            --event-file "$PROVIDER_EVENT_FILE"
-          cp -- private_logger/provider_incident_state.json private_data/provider_incident_state.json
-          cd private_data
-          test "$(git rev-parse HEAD)" = "$VERIFIED_CORE_SHA"
-          git add -- provider_incident_state.json
-          git diff --cached --quiet && { echo "Provider event was already acknowledged"; exit 0; }
-          git commit -m "Acknowledge provider alert ${GITHUB_RUN_ID}"
           ASKPASS="${RUNNER_TEMP}/crypto-git-askpass"
+          trap 'rm -f "$ASKPASS"' EXIT
           printf '%s\n' '#!/bin/sh' \
             'case "$1" in' \
             '  *Username*) printf "%s\\n" "x-access-token" ;;' \
@@ -885,13 +932,12 @@ jobs:
             'esac' > "$ASKPASS"
           chmod 700 "$ASKPASS"
           export GIT_ASKPASS="$ASKPASS"
-          git fetch origin "$PRIVATE_DATA_BRANCH"
-          test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$VERIFIED_CORE_SHA" || {
-            echo "Runtime data changed before alert acknowledgement; no overwrite attempted"
-            exit 1
-          }
-          git push origin "HEAD:$PRIVATE_DATA_BRANCH"
-          rm -f "$ASKPASS"
+          python "$CONSENSUS" persist-incident \
+            --repository private_data \
+            --state-file private_logger/provider_incident_state.json \
+            --expected-state-file private_logger/provider_incident_state.json \
+            --csv-state-file private_logger/csv_state.json \
+            --acknowledge-event-file "$PROVIDER_EVENT_FILE"
           echo "✅ Provider delivery acknowledged after Make accepted the event"
 
       # ======================================================================
@@ -1025,6 +1071,8 @@ jobs:
           rm -f "${RUNNER_TEMP}/vpn-alert-type.txt"
           rm -f "${RUNNER_TEMP}/provider-report.json"
           rm -f "${RUNNER_TEMP}/provider-event.json"
+          rm -f "${RUNNER_TEMP}/provider-state-before.json"
+          rm -f "${RUNNER_TEMP}/provider-csv-state-before.json"
           rm -f "${RUNNER_TEMP}/coinbase-probe.txt"
           rm -f "${RUNNER_TEMP}/coingecko-probe.txt"
           rm -f "${RUNNER_TEMP}/binance-probe.txt"
