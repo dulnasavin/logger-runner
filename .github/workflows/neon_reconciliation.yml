@@ -1,5 +1,5 @@
-name: "Neon Audit | Weekly"
-run-name: "Neon Audit | Weekly | ${{ inputs.operation }}"
+name: "Neon Audit | Daily"
+run-name: "Neon Audit | Daily | ${{ inputs.operation }}"
 
 on:
   workflow_dispatch:
@@ -164,7 +164,7 @@ jobs:
           from datetime import datetime, timezone
           from scheduled_reconciliation import protected_slot
           if protected_slot(os.environ, datetime.now(timezone.utc)) is None:
-              raise SystemExit("Scheduled apply runs only Monday/Thursday after 03:00 Pacific/Auckland")
+              raise SystemExit("Scheduled apply runs daily at or after 03:00 Pacific/Auckland")
           PYCODE
           fi
 

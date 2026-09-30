@@ -6,6 +6,7 @@ on:
       - "CSV Audit"
       - "CSV Maintenance"
       - "Neon Audit | Weekly"
+      - "Neon Audit | Daily"
       - "Neon Maintenance"
       - "Neon Schema | Controlled Migration"
       - "Crypto Logger | Staging"
@@ -44,7 +45,7 @@ jobs:
             const run = context.payload.workflow_run;
             const {owner, repo} = context.repo;
             const supported = new Set([
-              "CSV Audit", "CSV Maintenance", "Neon Audit | Weekly", "Neon Maintenance",
+              "CSV Audit", "CSV Maintenance", "Neon Audit | Weekly", "Neon Audit | Daily", "Neon Maintenance",
               "Neon Schema | Controlled Migration", "Crypto Logger | Staging", "Workflow Security", "CodeQL Advanced"
             ]);
             const failures = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);

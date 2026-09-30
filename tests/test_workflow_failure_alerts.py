@@ -61,6 +61,15 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
             with self.subTest(conclusion=conclusion):
                 self.assertEqual(self.execute(conclusion=conclusion)['outputs']['required'], 'true')
 
+    def test_daily_and_inflight_legacy_neon_failures_are_reported(self):
+        for name in ('Neon Audit | Daily', 'Neon Audit | Weekly'):
+            with self.subTest(name=name):
+                result = self.execute(name=name)
+                self.assertFalse(result['error'])
+                self.assertEqual(result['outputs']['required'], 'true')
+                self.assertIn(name, result['outputs']['subject'])
+                self.assertEqual(len(result['created']), 1)
+
     def test_healthy_unknown_and_foreign_events_do_not_send(self):
         for changes in ({'conclusion':'success'}, {'conclusion':'skipped'}, {'conclusion':'neutral'},
                         {'name':'Workflow Failure Alerts'}, {'name':'Crypto Logger | Main'},
@@ -91,13 +100,13 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
 
     def test_sender_uses_original_identity_and_preserves_content(self):
         env = {'FAILED_RUN_ID':'42', 'FAILED_RUN_ATTEMPT':'2', 'FAILED_RUN_NUMBER':'123',
-               'FAILED_WORKFLOW_NAME':'Neon Audit | Weekly', 'FAILURE_SUBJECT':'audit failed',
+               'FAILED_WORKFLOW_NAME':'Neon Audit | Daily', 'FAILURE_SUBJECT':'audit failed',
                'FAILURE_BODY':'Open the failed step', 'GITHUB_RUN_ID':'999'}
         send = Mock()
         sender.send_failure(send, env)
         self.assertEqual(env['GITHUB_RUN_ID'], '42')
         self.assertEqual(env['GITHUB_RUN_ATTEMPT'], '2')
-        self.assertEqual(env['GITHUB_WORKFLOW'], 'Neon Audit | Weekly')
+        self.assertEqual(env['GITHUB_WORKFLOW'], 'Neon Audit | Daily')
         send.assert_called_once_with(subject='audit failed', body='Open the failed step',
                                      alert_type='WORKFLOW_EXECUTION_FAILED', severity='CRITICAL')
 
@@ -116,7 +125,7 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
         self.assertNotIn('download-artifact', workflow)
         self.assertNotIn('actions/cache', workflow)
         self.assertNotIn('workflow_dispatch:', workflow)
-        for name in ('CSV Audit', 'CSV Maintenance', 'Neon Audit | Weekly', 'Neon Maintenance',
+        for name in ('CSV Audit', 'CSV Maintenance', 'Neon Audit | Weekly', 'Neon Audit | Daily', 'Neon Maintenance',
                      'Neon Schema | Controlled Migration', 'Crypto Logger | Staging', 'Workflow Security', 'CodeQL Advanced'):
             self.assertIn(f'      - "{name}"', workflow)
 
