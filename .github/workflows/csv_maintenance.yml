@@ -1,5 +1,5 @@
 name: "CSV Maintenance"
-run-name: "CSV Maintenance | Weekly | ${{ inputs.operation }} | #${{ github.run_number }}"
+run-name: "CSV Maintenance | ${{ inputs.operation }} | #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
