@@ -13,6 +13,21 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
 
 
 class WorkflowWorkspaceTests(unittest.TestCase):
+    def test_main_failure_email_receives_every_prior_stage_outcome_without_outputs(self):
+        workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
+        before = workflow.split('      - name: "01.1', 1)[1].split('      - name: "30.1', 1)[0]
+        names = ['01.1' + before.split('"', 1)[0]] + re.findall(r'^      - name: "([^"\n]+)"', before, re.M)
+        ids = re.findall(r'^        id: ([a-zA-Z0-9_-]+)', before, re.M)
+        self.assertEqual(len(ids), len(names))
+        self.assertEqual(len(ids), len(set(ids)))
+        context = workflow.split('          PRODUCTION_STEP_OUTCOMES: >-\n', 1)[1].split('        run: |', 1)[0]
+        entries = json.loads(context)
+        self.assertEqual([entry['name'] for entry in entries], names)
+        self.assertEqual([entry['outcome'] for entry in entries], ['${{ steps.' + ident + '.outcome }}' for ident in ids])
+        self.assertTrue(all(set(entry) == {'name', 'outcome'} for entry in entries))
+        self.assertNotIn('${{ secrets.', context)
+        self.assertNotIn('.outputs.', context)
+
     def test_failed_batch_gate_allows_fx_outage_but_rejects_partial_or_degraded_reports(self):
         workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
         step = workflow.split('29.2 Persist incident state', 1)[1].split('      - name:', 1)[0]
