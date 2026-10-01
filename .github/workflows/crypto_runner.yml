@@ -575,6 +575,8 @@ jobs:
       - name: "24.1 Run price_logger.py on managed S2 network"
         id: run_price_logger
         env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          EXCHANGERATE_DEV_API_KEY: ${{ secrets.EXCHANGERATE_DEV_API_KEY }}
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
           COINBASE_API_KEY_NAME: ${{ secrets.COINBASE_API_KEY_NAME }}
@@ -792,8 +794,14 @@ jobs:
           REPORT="${RUNNER_TEMP}/provider-report.json"
           test -s "$REPORT"
           jq -e '.version == 1 and .overall_severity == "CRITICAL" and
-            (.decisions | type == "object" and length == 11) and
-            any(.decisions[]; .accepted_usd == null)' "$REPORT" >/dev/null
+            ((.decisions | type == "object" and length == 11) and
+             any(.decisions[]; .accepted_usd == null) or
+             (.condition_code == "FX_RATE_CRITICAL" and
+              (.decisions | type == "object" and length == 0) and
+              .fx_status == "NO_CURRENT_FX_RATE" and
+              .fx_decision.status == "NO_CURRENT_FX_RATE" and
+              .fx_decision.severity == "CRITICAL" and
+              .fx_decision.rate == null and .fx_decision.cached_estimate == false))' "$REPORT" >/dev/null
           jq -e --slurpfile report "$REPORT" '
             .version == 2 and .last_run_at_utc == $report[0].completed_at_utc
           ' private_logger/provider_incident_state.json >/dev/null
@@ -801,6 +809,9 @@ jobs:
             echo "## Price batch rejected"
             echo ""
             echo "No CSV prices from this batch were committed; Neon sync is skipped."
+            jq -r 'if .condition_code == "FX_RATE_CRITICAL" then
+              "- FX conversion stopped: " + .fx_status + ". Retry state retained."
+              else empty end' "$REPORT"
             jq -r '.decisions | to_entries[] | select(.value.accepted_usd == null) |
               "- " + .key + ": " + .value.status + ". " + .value.reason' "$REPORT"
             echo ""

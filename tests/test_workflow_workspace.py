@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import textwrap
+import re
 from pathlib import Path
 
 
@@ -12,6 +13,29 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
 
 
 class WorkflowWorkspaceTests(unittest.TestCase):
+    def test_failed_batch_gate_allows_fx_outage_but_rejects_partial_or_degraded_reports(self):
+        workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
+        step = workflow.split('29.2 Persist incident state', 1)[1].split('      - name:', 1)[0]
+        predicate = re.search(r"jq -e '(.*?)' \"\$REPORT\"", step, re.S).group(1)
+        outage = {
+            'version': 1, 'overall_severity': 'CRITICAL', 'condition_code': 'FX_RATE_CRITICAL',
+            'decisions': {}, 'fx_status': 'NO_CURRENT_FX_RATE',
+            'fx_decision': {'status': 'NO_CURRENT_FX_RATE', 'severity': 'CRITICAL',
+                            'rate': None, 'cached_estimate': False},
+        }
+        def accepted(report):
+            return subprocess.run(['jq', '-e', predicate], input=json.dumps(report),
+                                  capture_output=True, text=True).returncode == 0
+        self.assertTrue(accepted(outage))
+        for change in ({'decisions': None}, {'fx_decision': {}}, {'fx_status': 'UNKNOWN'},
+                       {'condition_code': 'UNKNOWN'}, {'overall_severity': 'WARNING'},
+                       {'fx_decision': {**outage['fx_decision'], 'rate': '1.8'}},
+                       {'fx_decision': {**outage['fx_decision'], 'cached_estimate': True}}):
+            with self.subTest(change=change):
+                self.assertFalse(accepted({**outage, **change}))
+        self.assertTrue(accepted({**outage, 'condition_code': 'PRICE_SOURCE_CRITICAL',
+                                  'decisions': {str(n): {'accepted_usd': None} for n in range(11)}}))
+
     def test_table_reset_selection_is_passed_as_literal_arguments(self):
         workflow = (WORKFLOWS / 'neon_maintenance.yml').read_text()
         self.assertIn('          - preview-tables', workflow)
