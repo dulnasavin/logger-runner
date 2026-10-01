@@ -3,6 +3,7 @@ name: "Workflow Failure Alerts"
 on:
   workflow_run:
     workflows:
+      - "Crypto Logger | Main"
       - "CSV Audit"
       - "CSV Maintenance"
       - "Neon Audit | Weekly"
@@ -49,7 +50,9 @@ jobs:
               "Neon Schema | Controlled Migration", "Crypto Logger | Staging", "Workflow Security", "CodeQL Advanced"
             ]);
             const failures = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
-            if (!run || !supported.has(run.name) || !failures.has(run.conclusion) ||
+            const isMain = run?.path === ".github/workflows/crypto_runner.yml" &&
+              /^Crypto Logger \| Main(?: \| #\d+)?$/.test(run.name);
+            if (!run || (!supported.has(run.name) && !isMain) || !failures.has(run.conclusion) ||
                 run.repository?.full_name !== `${owner}/${repo}` ||
                 !Number.isSafeInteger(run.id) || run.id <= 0 ||
                 !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 0 ||
@@ -60,11 +63,20 @@ jobs:
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${run.id}`;
             const clean = value => String(value || "unknown").replace(/[\r\n\x00-\x1f\x7f]/g, " ").slice(0, 160);
             let details = ["Job details unavailable; open the original run's first failed or cancelled step."];
+            let stoppedStage = "stage unavailable";
+            let jobOutcomes = ["Final job outcomes unavailable; inspect the original run."];
             try {
               const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
                 owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100
               });
-              details = jobs.filter(job => failures.has(job.conclusion)).slice(0, 10).map(job => {
+              const failedJobs = jobs.filter(job => failures.has(job.conclusion)).slice(0, 10);
+              jobOutcomes = jobs.slice(0, 20).map(job => `${clean(job.name)}: ${clean(job.conclusion)}`);
+              if (failedJobs.length) {
+                const firstStep = (failedJobs[0].steps || []).find(item => failures.has(item.conclusion));
+                stoppedStage = clean(firstStep?.name || failedJobs[0].name);
+                if (failedJobs.length > 1) stoppedStage += ` (+${failedJobs.length - 1} jobs)`;
+              }
+              details = failedJobs.map(job => {
                 const step = (job.steps || []).find(item => failures.has(item.conclusion));
                 return `${clean(job.name)}: ${job.conclusion}` + (step ? `; first stopped step: ${clean(step.name)}` : "");
               });
@@ -73,16 +85,19 @@ jobs:
               core.warning("Job details could not be read; retaining the original workflow failure.");
             }
             const body = [
-              "CRYPTO LOGGER - WORKFLOW FAILURE",
+              "CRYPTO LOGGER - FINAL WORKFLOW OUTCOME",
               "", "WHAT HAPPENED",
               `${run.name} ended with ${run.conclusion}.`,
               `Run #${run.run_number}; attempt ${run.run_attempt}.`,
               "", "FAILED STAGE", ...details,
+              "", "FINAL JOB OUTCOMES", ...jobOutcomes,
               "", "ACTION REQUIRED",
               "Open the original run below and review its first failed or cancelled step. The step name identifies where execution stopped; it does not prove the underlying cause.",
               "For a data conflict or changed runtime snapshot, review the current data and start a fresh preview. Never force a stale repair plan.",
               "", "DATA AND SCHEDULING",
-              "This reports only the named workflow. It does not establish that Main, CSV persistence, Neon, or VPN failed.",
+              isMain
+                ? "This is the final Main workflow result, including downstream jobs. An earlier in-run provider or failure alert may already have been sent; this message records the completed workflow outcome. A job status alone does not establish which rows were saved or prove a VPN cause."
+                : "This reports only the named workflow. It does not establish that Main, CSV persistence, Neon, or VPN failed.",
               "CSV Audit and Neon Audit have independent cron schedules. A failure in one does not cancel the other's scheduled start. Each retains its own data safety checks.",
               "", "ORIGINAL GITHUB ACTIONS RUN", runUrl
             ].join("\n");
@@ -91,7 +106,7 @@ jobs:
             core.setOutput("run_attempt", String(run.run_attempt));
             core.setOutput("run_number", String(run.run_number));
             core.setOutput("workflow_name", run.name);
-            core.setOutput("subject", `CRYPTO LOGGER | ${run.name} | ${run.conclusion.toUpperCase()} | Run #${run.run_number}`);
+            core.setOutput("subject", `CRYPTO LOGGER FINAL | ${clean(run.name)} | ${run.conclusion.toUpperCase()}: ${stoppedStage} | Run #${run.run_number}`);
             core.setOutput("body", body);
             const marker = `<!-- crypto-workflow-failure:${run.id}:${run.run_attempt} -->`;
             const issues = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: "all", creator: "github-actions[bot]", per_page: 100});

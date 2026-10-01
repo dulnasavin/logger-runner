@@ -114,6 +114,7 @@ jobs:
       # SECTION 01 - CHECK OUT THE PUBLIC PRODUCTION RUNNER
       # ======================================================================
       - name: "01.1 Checkout public production runner"
+        id: stage_01_1_checkout_public_production_runner
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -122,6 +123,7 @@ jobs:
       # SECTION 02 - IDENTIFY THIS EXACT PRODUCTION RUN
       # ======================================================================
       - name: "02.1 Display production run identity"
+        id: stage_02_1_display_production_run_identity
         run: |
           set -euo pipefail
           echo "============================================================"
@@ -142,6 +144,7 @@ jobs:
       # SECTION 03 - VALIDATE PRIVATE REPOSITORY ACCESS
       # ======================================================================
       - name: "03.1 Validate effective private repository tokens"
+        id: stage_03_1_validate_effective_private_repository_tokens
         env:
           PRIVATE_CODE_TOKEN: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -155,6 +158,7 @@ jobs:
       # SECTION 04 - CHECK OUT PINNED CODE + ISOLATED RUNTIME DATA
       # ======================================================================
       - name: "04.1 Checkout exact private production source"
+        id: stage_04_1_checkout_exact_private_production_source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
@@ -165,6 +169,7 @@ jobs:
           persist-credentials: false
 
       - name: "04.2 Verify and detach immutable private source"
+        id: stage_04_2_verify_and_detach_immutable_private_source
         run: |
           set -euo pipefail
           cd private_logger
@@ -178,6 +183,7 @@ jobs:
           echo "✅ Exact private production source verified and detached"
 
       - name: "04.3 Checkout isolated private runtime-data branch"
+        id: stage_04_3_checkout_isolated_private_runtime_data_branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
@@ -188,6 +194,7 @@ jobs:
           persist-credentials: false
 
       - name: "04.4 Verify runtime-data branch and copy named state"
+        id: stage_04_4_verify_runtime_data_branch_and_copy_named_state
         run: |
           set -euo pipefail
           test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
@@ -214,6 +221,7 @@ jobs:
       # SECTION 05 - VERIFY PRODUCTION LOGGER FILE STRUCTURE
       # ======================================================================
       - name: "05.1 Validate core production logger files"
+        id: stage_05_1_validate_core_production_logger_files
         run: |
           set -euo pipefail
           LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
@@ -234,6 +242,7 @@ jobs:
           echo "✅ Core production files validated"
 
       - name: "05.2 Validate VPN auth recovery helper files"
+        id: stage_05_2_validate_vpn_auth_recovery_helper_files
         run: |
           set -euo pipefail
           RECOVERY_DIR="private_logger/Crypto Logger-Private Repo/vpn_auth_recovery"
@@ -251,6 +260,7 @@ jobs:
       # SECTION 06 - SET UP PYTHON
       # ======================================================================
       - name: "06.1 Setup Python 3.13"
+        id: stage_06_1_setup_python_3_13
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
@@ -259,6 +269,7 @@ jobs:
       # SECTION 07 - INSTALL AND VERIFY DEPENDENCIES
       # ======================================================================
       - name: "07.1 Install production logger dependencies"
+        id: stage_07_1_install_production_logger_dependencies
         run: |
           set -euo pipefail
           cd private_logger/"Crypto Logger-Private Repo"
@@ -273,6 +284,7 @@ jobs:
       # SECTION 08 - COMPILE ALL PYTHON MODULES
       # ======================================================================
       - name: "08.1 Compile production Python modules"
+        id: stage_08_1_compile_production_python_modules
         run: |
           set -euo pipefail
           LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
@@ -308,6 +320,7 @@ jobs:
       # SECTION 09 - VALIDATE BINANCE SECRETS
       # ======================================================================
       - name: "09.1 Validate Binance API secrets"
+        id: stage_09_1_validate_binance_api_secrets
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
@@ -318,6 +331,7 @@ jobs:
           echo "✅ Binance API secrets configured"
 
       - name: "09.2 Validate Coinbase read-only API secrets"
+        id: stage_09_2_validate_coinbase_read_only_api_secrets
         env:
           COINBASE_API_KEY_NAME: ${{ secrets.COINBASE_API_KEY_NAME }}
           COINBASE_API_PRIVATE_KEY: ${{ secrets.COINBASE_API_PRIVATE_KEY }}
@@ -336,6 +350,7 @@ jobs:
       # SECTION 10 - VALIDATE VPN1 SECRETS
       # ======================================================================
       - name: "10.1 Validate VPN1 production secrets"
+        id: stage_10_1_validate_vpn1_production_secrets
         env:
           VPN1_CONFIG: ${{ secrets.VPNBOOK_CONFIG }}
           VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
@@ -351,6 +366,7 @@ jobs:
       # SECTION 11 - VALIDATE VPN2 SECRETS
       # ======================================================================
       - name: "11.1 Validate VPN2 production secrets"
+        id: stage_11_1_validate_vpn2_production_secrets
         env:
           VPN2_CONFIG: ${{ secrets.VPN2_CONFIG }}
           VPN2_USERNAME: ${{ secrets.VPN2_USERNAME }}
@@ -366,6 +382,7 @@ jobs:
       # SECTION 12 - CHECK OPTIONAL VPN SECRET UPDATE TOKEN
       # ======================================================================
       - name: "12.1 Check VPN_SECRET_UPDATE_TOKEN"
+        id: stage_12_1_check_vpn_secret_update_token
         env:
           VPN_SECRET_UPDATE_TOKEN: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
         run: |
@@ -380,6 +397,7 @@ jobs:
       # SECTION 13 - CHECK AUTHENTICATED MAKE/OUTLOOK ALERT SECRETS
       # ======================================================================
       - name: "13.1 Check Make webhook alert secrets"
+        id: stage_13_1_check_make_webhook_alert_secrets
         env:
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
@@ -403,6 +421,7 @@ jobs:
       # SECTION 14 - INSTALL OPENVPN
       # ======================================================================
       - name: "14.1 Install and verify OpenVPN"
+        id: stage_14_1_install_and_verify_openvpn
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -415,6 +434,7 @@ jobs:
       # SECTION 15 - CREATE PROTECTED VPN RUNTIME FILES
       # ======================================================================
       - name: "15.1 Create protected VPN1/VPN2 runtime files"
+        id: stage_15_1_create_protected_vpn1_vpn2_runtime_files
         env:
           VPN1_CONFIG_SECRET: ${{ secrets.VPNBOOK_CONFIG }}
           VPN1_USERNAME: ${{ secrets.VPNBOOK_USERNAME }}
@@ -454,6 +474,7 @@ jobs:
       # SECTION 16 - PREPARE S2 NETWORK MANAGER RUNTIME
       # ======================================================================
       - name: "16.1 Prepare S2 network runtime boundary"
+        id: stage_16_1_prepare_s2_network_runtime_boundary
         env: &network_env
           NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
           NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
@@ -507,6 +528,7 @@ jobs:
       # SECTION 19 - VERIFY THE MANAGED STARTUP NETWORK
       # ======================================================================
       - name: "19.1 Verify S2 bootstrap and bounded network state"
+        id: stage_19_1_verify_s2_bootstrap_and_bounded_network_state
         env: *network_env
         run: |
           set -euo pipefail
@@ -530,6 +552,7 @@ jobs:
       # SECTION 20 - REPORT AUTH RECOVERY / SECRET UPDATE OUTCOME
       # ======================================================================
       - name: "20.1 Report VPN credential recovery state"
+        id: stage_20_1_report_vpn_credential_recovery_state
         run: |
           set -euo pipefail
           if [ -f "${RUNNER_TEMP}/vpn-auth-recovered" ]; then
@@ -605,6 +628,7 @@ jobs:
           echo "✅ PRODUCTION CRYPTO PRICE LOGGER COMPLETED"
 
       - name: "24.2 Validate sanitized provider decision report"
+        id: stage_24_2_validate_sanitized_provider_decision_report
         run: |
           set -euo pipefail
           REPORT="${RUNNER_TEMP}/provider-report.json"
@@ -626,6 +650,7 @@ jobs:
       # SECTION 25 - DISCONNECT VPN BEFORE GIT/GITHUB TRAFFIC
       # ======================================================================
       - name: "25.1 Disconnect managed VPN"
+        id: stage_25_1_disconnect_managed_vpn
         if: always()
         env: *network_env
         run: |
@@ -634,6 +659,7 @@ jobs:
           [ -f "$MANAGER" ] && python "$MANAGER" reset
 
       - name: "25.2 Verify OpenVPN fully stopped"
+        id: stage_25_2_verify_openvpn_fully_stopped
         if: always()
         run: |
           set -euo pipefail
@@ -647,6 +673,7 @@ jobs:
       # SECTION 26 - VALIDATE PRODUCTION CSV OUTPUT
       # ======================================================================
       - name: "26.1 Validate production CSV schema and new rows"
+        id: stage_26_1_validate_production_csv_schema_and_new_rows
         run: |
           set -euo pipefail
           CSV="private_logger/price_log.csv"
@@ -673,6 +700,7 @@ jobs:
       # SECTION 27 - BACK UP PRICE + NON-SECRET INCIDENT STATE
       # ======================================================================
       - name: "27.1 Backup production state before Git operations"
+        id: stage_27_1_backup_production_state_before_git_operations
         run: |
           set -euo pipefail
           cp -- private_logger/price_log.csv "${RUNNER_TEMP}/price_log.csv"
@@ -685,6 +713,7 @@ jobs:
       # SECTION 28 - COMMIT ONLY ALLOWLISTED RUNTIME STATE
       # ======================================================================
       - name: "28.1 Commit production logger state locally"
+        id: stage_28_1_commit_production_logger_state_locally
         run: |
           set -euo pipefail
           cp -- private_logger/price_log.csv private_data/price_log.csv
@@ -714,6 +743,7 @@ jobs:
           git commit -m "Update runtime data for logger run ${GITHUB_RUN_ID}"
 
       - name: "28.2 Push only the unchanged runtime-data snapshot"
+        id: stage_28_2_push_only_the_unchanged_runtime_data_snapshot
         env:
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
@@ -878,6 +908,45 @@ jobs:
           PRODUCTION_PERSISTENCE_OUTCOME: ${{ steps.verify_core.outcome }}
           CRYPTO_LOGGER_ENVIRONMENT: PRODUCTION
           PRODUCTION_TEST_OUTCOME: ${{ steps.production_regression.outcome }}
+          PRODUCTION_STEP_OUTCOMES: >-
+            [
+              {"name":"01.1 Checkout public production runner","outcome":"${{ steps.stage_01_1_checkout_public_production_runner.outcome }}"},
+              {"name":"02.1 Display production run identity","outcome":"${{ steps.stage_02_1_display_production_run_identity.outcome }}"},
+              {"name":"03.1 Validate effective private repository tokens","outcome":"${{ steps.stage_03_1_validate_effective_private_repository_tokens.outcome }}"},
+              {"name":"04.1 Checkout exact private production source","outcome":"${{ steps.stage_04_1_checkout_exact_private_production_source.outcome }}"},
+              {"name":"04.2 Verify and detach immutable private source","outcome":"${{ steps.stage_04_2_verify_and_detach_immutable_private_source.outcome }}"},
+              {"name":"04.3 Checkout isolated private runtime-data branch","outcome":"${{ steps.stage_04_3_checkout_isolated_private_runtime_data_branch.outcome }}"},
+              {"name":"04.4 Verify runtime-data branch and copy named state","outcome":"${{ steps.stage_04_4_verify_runtime_data_branch_and_copy_named_state.outcome }}"},
+              {"name":"05.1 Validate core production logger files","outcome":"${{ steps.stage_05_1_validate_core_production_logger_files.outcome }}"},
+              {"name":"05.2 Validate VPN auth recovery helper files","outcome":"${{ steps.stage_05_2_validate_vpn_auth_recovery_helper_files.outcome }}"},
+              {"name":"06.1 Setup Python 3.13","outcome":"${{ steps.stage_06_1_setup_python_3_13.outcome }}"},
+              {"name":"07.1 Install production logger dependencies","outcome":"${{ steps.stage_07_1_install_production_logger_dependencies.outcome }}"},
+              {"name":"08.1 Compile production Python modules","outcome":"${{ steps.stage_08_1_compile_production_python_modules.outcome }}"},
+              {"name":"08.2 Run production regression tests","outcome":"${{ steps.production_regression.outcome }}"},
+              {"name":"09.1 Validate Binance API secrets","outcome":"${{ steps.stage_09_1_validate_binance_api_secrets.outcome }}"},
+              {"name":"09.2 Validate Coinbase read-only API secrets","outcome":"${{ steps.stage_09_2_validate_coinbase_read_only_api_secrets.outcome }}"},
+              {"name":"10.1 Validate VPN1 production secrets","outcome":"${{ steps.stage_10_1_validate_vpn1_production_secrets.outcome }}"},
+              {"name":"11.1 Validate VPN2 production secrets","outcome":"${{ steps.stage_11_1_validate_vpn2_production_secrets.outcome }}"},
+              {"name":"12.1 Check VPN_SECRET_UPDATE_TOKEN","outcome":"${{ steps.stage_12_1_check_vpn_secret_update_token.outcome }}"},
+              {"name":"13.1 Check Make webhook alert secrets","outcome":"${{ steps.stage_13_1_check_make_webhook_alert_secrets.outcome }}"},
+              {"name":"14.1 Install and verify OpenVPN","outcome":"${{ steps.stage_14_1_install_and_verify_openvpn.outcome }}"},
+              {"name":"15.1 Create protected VPN1/VPN2 runtime files","outcome":"${{ steps.stage_15_1_create_protected_vpn1_vpn2_runtime_files.outcome }}"},
+              {"name":"16.1 Prepare S2 network runtime boundary","outcome":"${{ steps.stage_16_1_prepare_s2_network_runtime_boundary.outcome }}"},
+              {"name":"18.1 Bootstrap managed network and recover VPNBook auth if required","outcome":"${{ steps.vpn_auth_recovery.outcome }}"},
+              {"name":"19.1 Verify S2 bootstrap and bounded network state","outcome":"${{ steps.stage_19_1_verify_s2_bootstrap_and_bounded_network_state.outcome }}"},
+              {"name":"20.1 Report VPN credential recovery state","outcome":"${{ steps.stage_20_1_report_vpn_credential_recovery_state.outcome }}"},
+              {"name":"23.1 Preflight and record production CSV state","outcome":"${{ steps.csv_preflight.outcome }}"},
+              {"name":"24.1 Run price_logger.py on managed S2 network","outcome":"${{ steps.run_price_logger.outcome }}"},
+              {"name":"24.2 Validate sanitized provider decision report","outcome":"${{ steps.stage_24_2_validate_sanitized_provider_decision_report.outcome }}"},
+              {"name":"25.1 Disconnect managed VPN","outcome":"${{ steps.stage_25_1_disconnect_managed_vpn.outcome }}"},
+              {"name":"25.2 Verify OpenVPN fully stopped","outcome":"${{ steps.stage_25_2_verify_openvpn_fully_stopped.outcome }}"},
+              {"name":"26.1 Validate production CSV schema and new rows","outcome":"${{ steps.stage_26_1_validate_production_csv_schema_and_new_rows.outcome }}"},
+              {"name":"27.1 Backup production state before Git operations","outcome":"${{ steps.stage_27_1_backup_production_state_before_git_operations.outcome }}"},
+              {"name":"28.1 Commit production logger state locally","outcome":"${{ steps.stage_28_1_commit_production_logger_state_locally.outcome }}"},
+              {"name":"28.2 Push only the unchanged runtime-data snapshot","outcome":"${{ steps.stage_28_2_push_only_the_unchanged_runtime_data_snapshot.outcome }}"},
+              {"name":"29.1 Verify remote private runtime-data SHA","outcome":"${{ steps.verify_core.outcome }}"},
+              {"name":"29.2 Persist incident state from an incomplete price batch","outcome":"${{ steps.persist_failed_incident.outcome }}"}
+            ]
         run: |
           set -euo pipefail
           ALERT_FILE="${RUNNER_TEMP}/vpn-alert-type.txt"

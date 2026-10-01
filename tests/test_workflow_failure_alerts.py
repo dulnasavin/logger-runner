@@ -16,11 +16,11 @@ spec.loader.exec_module(sender)
 
 
 class WorkflowFailureAlertsTests(unittest.TestCase):
-    def execute(self, *, conclusion='failure', name='CSV Audit', repository='example/logger', jobs_error=False, issues_error=False, existing=False):
+    def execute(self, *, conclusion='failure', name='CSV Audit', repository='example/logger', jobs_error=False, issues_error=False, existing=False, path=None):
         step = WORKFLOW.read_text().split('      - name: Record the failed workflow independently of email', 1)[1].split('      - name:', 1)[0]
         script = textwrap.dedent(step.split('          script: |\n', 1)[1])
         fixture = {'conclusion':conclusion, 'name':name, 'repository':{'full_name':repository},
-                   'id':42, 'run_attempt':2, 'run_number':123}
+                   'id':42, 'run_attempt':2, 'run_number':123, 'path':path}
         harness = '''
 const outputs={}, created=[];
 const context={repo:{owner:'example',repo:'logger'},payload:{workflow_run:FIXTURE}};
@@ -53,6 +53,7 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
         self.assertIn('Verify CSV: failure; first stopped step: Check generation', body)
         self.assertIn('/actions/runs/42', body)
         self.assertIn('attempt 2', body)
+        self.assertIn('FAILURE: Check generation', result['outputs']['subject'])
         self.assertIn('does not establish that Main', body)
         self.assertEqual(len(result['created']), 1)
 
@@ -70,6 +71,18 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
                 self.assertIn(name, result['outputs']['subject'])
                 self.assertEqual(len(result['created']), 1)
 
+    def test_main_final_failures_are_reported_even_after_an_earlier_alert(self):
+        for name in ('Crypto Logger | Main', 'Crypto Logger | Main | #123'):
+            result = self.execute(name=name, path='.github/workflows/crypto_runner.yml')
+            self.assertEqual(result['outputs']['required'], 'true')
+            self.assertIn('CRYPTO LOGGER FINAL', result['outputs']['subject'])
+            self.assertIn('Check generation', result['outputs']['subject'])
+            self.assertIn('earlier in-run', result['outputs']['body'])
+            self.assertIn('FINAL JOB OUTCOMES', result['outputs']['body'])
+        self.assertEqual(self.execute(name='Crypto Logger | Main', path='foreign.yml')['outputs']['required'], 'false')
+        self.assertEqual(self.execute(name='Crypto Logger | Main', path='.github/workflows/crypto_runner.yml',
+                                      conclusion='success')['outputs']['required'], 'false')
+
     def test_healthy_unknown_and_foreign_events_do_not_send(self):
         for changes in ({'conclusion':'success'}, {'conclusion':'skipped'}, {'conclusion':'neutral'},
                         {'name':'Workflow Failure Alerts'}, {'name':'Crypto Logger | Main'},
@@ -83,6 +96,7 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
         result = self.execute(jobs_error=True)
         self.assertFalse(result['error'])
         self.assertIn('Job details unavailable', result['outputs']['body'])
+        self.assertIn('stage unavailable', result['outputs']['subject'])
         self.assertEqual(len(result['created']), 1)
 
     def test_issue_outage_still_prepares_independent_email(self):
