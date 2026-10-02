@@ -13,6 +13,7 @@ on:
       - "Crypto Logger | Staging"
       - "Workflow Security"
       - "CodeQL Advanced"
+      - "Binance History | 100 Markets"
     types: [completed]
 
 permissions:
@@ -52,7 +53,10 @@ jobs:
             const failures = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
             const isMain = run?.path === ".github/workflows/crypto_runner.yml" &&
               /^Crypto Logger \| Main(?: \| #\d+)?$/.test(run.name);
-            if (!run || (!supported.has(run.name) && !isMain) || !failures.has(run.conclusion) ||
+            const isHistory = run?.path === ".github/workflows/binance_history_100.yml" &&
+              run.name === "Binance History | 100 Markets" &&
+              run.event === "workflow_dispatch" && run.head_branch === "main";
+            if (!run || (!supported.has(run.name) && !isMain && !isHistory) || !failures.has(run.conclusion) ||
                 run.repository?.full_name !== `${owner}/${repo}` ||
                 !Number.isSafeInteger(run.id) || run.id <= 0 ||
                 !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 0 ||
@@ -69,6 +73,12 @@ jobs:
               const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
                 owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100
               });
+              if (isHistory && jobs.some(job => (job.steps || []).some(step =>
+                  step.name === "Send history batch email" && step.conclusion === "success"))) {
+                core.setOutput("required", "false");
+                core.notice("Detailed history outcome email already acknowledged; skipping duplicate fallback.");
+                return;
+              }
               const failedJobs = jobs.filter(job => failures.has(job.conclusion)).slice(0, 10);
               jobOutcomes = jobs.slice(0, 20).map(job => `${clean(job.name)}: ${clean(job.conclusion)}`);
               if (failedJobs.length) {
@@ -93,12 +103,18 @@ jobs:
               "", "FINAL JOB OUTCOMES", ...jobOutcomes,
               "", "ACTION REQUIRED",
               "Open the original run below and review its first failed or cancelled step. The step name identifies where execution stopped; it does not prove the underlying cause.",
-              "For a data conflict or changed runtime snapshot, review the current data and start a fresh preview. Never force a stale repair plan.",
+              isHistory
+                ? "The detailed history email was not confirmed or could not run. Check Make notification settings as well as the download step. After resolving the failure, run download again; verified files are reused."
+                : "For a data conflict or changed runtime snapshot, review the current data and start a fresh preview. Never force a stale repair plan.",
               "", "DATA AND SCHEDULING",
-              isMain
+              isHistory
+                ? "This is the independent history-download fallback. Progress counts are unavailable here; inspect the private release manifests. A run failure does not prove a VPN cause, and partial uploads may already be safely stored."
+                : isMain
                 ? "This is the final Main workflow result, including downstream jobs. An earlier in-run provider or failure alert may already have been sent; this message records the completed workflow outcome. A job status alone does not establish which rows were saved or prove a VPN cause."
                 : "This reports only the named workflow. It does not establish that Main, CSV persistence, Neon, or VPN failed.",
-              "CSV Audit and Neon Audit have independent cron schedules. A failure in one does not cancel the other's scheduled start. Each retains its own data safety checks.",
+              isHistory
+                ? "History runs are manual. This alert does not automatically restart a batch or download more files."
+                : "CSV Audit and Neon Audit have independent cron schedules. A failure in one does not cancel the other's scheduled start. Each retains its own data safety checks.",
               "", "ORIGINAL GITHUB ACTIONS RUN", runUrl
             ].join("\n");
             core.setOutput("required", "true");
