@@ -11,9 +11,9 @@ on:
         default: plan
         required: true
       max_files:
-        description: Maximum new file uploads (raw archives and daily-CSV bundles) in this batch (1 to 1000)
+        description: Maximum new file uploads (raw archives and daily-CSV bundles) in this batch (1 to 10000)
         type: string
-        default: '200'
+        default: '10000'
         required: true
 
 permissions:
@@ -25,7 +25,7 @@ concurrency:
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  HISTORY_CODE_SHA: ab66d4a034ee5ceb1a6d0bd9c6f7e1ccd43eed9b
+  HISTORY_CODE_SHA: 9a8593946bf1496a0c025300ddff703afa658ad4
 
 jobs:
   history:
