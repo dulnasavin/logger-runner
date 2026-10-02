@@ -1,7 +1,10 @@
 name: Binance History | 100 Markets
-run-name: Binance History | ${{ inputs.mode }} | batch ${{ github.run_number }}
+run-name: Binance History | ${{ github.event_name == 'schedule' && 'scheduled download' || inputs.mode }} | batch ${{ github.run_number }}
 
 on:
+  schedule:
+    # Every five hours until 5 Oct 2026 at 12:00 a.m. New Zealand time.
+    - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -26,6 +29,7 @@ concurrency:
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
   HISTORY_CODE_SHA: 9a8593946bf1496a0c025300ddff703afa658ad4
+  HISTORY_SCHEDULE_END_UTC: '2026-10-04T12:00:00Z'
 
 jobs:
   history:
@@ -33,8 +37,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     steps:
+      - name: Enforce scheduled end date
+        id: schedule_gate
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]] || \
+             (( $(date -u +%s) < $(date -u -d "$HISTORY_SCHEDULE_END_UTC" +%s) )); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Scheduled downloads ended at $HISTORY_SCHEDULE_END_UTC."
+          fi
+
       - name: Checkout pinned private history code
         id: private_code
+        if: steps.schedule_gate.outputs.run == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
@@ -48,20 +65,22 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
+        if: steps.schedule_gate.outputs.run == 'true'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
 
       - name: Plan or resume private dataset releases
+        if: steps.schedule_gate.outputs.run == 'true'
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
-          HISTORY_MODE: ${{ inputs.mode }}
-          HISTORY_MAX_FILES: ${{ inputs.max_files }}
+          HISTORY_MODE: ${{ github.event_name == 'schedule' && 'download' || inputs.mode }}
+          HISTORY_MAX_FILES: ${{ github.event_name == 'schedule' && '5000' || inputs.max_files }}
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: python private_source/binance_history/run.py
 
       - name: Send history batch email
-        if: always() && steps.private_code.outcome == 'success'
+        if: always() && steps.schedule_gate.outputs.run == 'true' && steps.private_code.outcome == 'success'
         timeout-minutes: 1
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
@@ -70,7 +89,7 @@ jobs:
         run: timeout --kill-after=5s 45s python private_source/binance_history/notify.py
 
       - name: Remove private source and temporary report
-        if: always()
+        if: always() && steps.schedule_gate.outputs.run == 'true'
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
         run: |
