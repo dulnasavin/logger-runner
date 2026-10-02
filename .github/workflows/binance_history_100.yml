@@ -32,8 +32,6 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 330
-    env:
-      HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
     steps:
       - name: Checkout pinned private history code
         id: private_code
@@ -56,6 +54,7 @@ jobs:
 
       - name: Plan or resume private dataset releases
         env:
+          HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
           HISTORY_MODE: ${{ inputs.mode }}
           HISTORY_MAX_FILES: ${{ inputs.max_files }}
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -65,12 +64,15 @@ jobs:
         if: always() && steps.private_code.outcome == 'success'
         timeout-minutes: 1
         env:
+          HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
           ALERT_MAKE_WEBHOOK_URL: ${{ secrets.ALERT_MAKE_WEBHOOK_URL }}
           ALERT_MAKE_API_KEY: ${{ secrets.ALERT_MAKE_API_KEY }}
         run: timeout --kill-after=5s 45s python private_source/binance_history/notify.py
 
       - name: Remove private source and temporary report
         if: always()
+        env:
+          HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
         run: |
           rm -rf private_source
           rm -f "$HISTORY_REPORT_PATH"
