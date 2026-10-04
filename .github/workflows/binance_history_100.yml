@@ -35,7 +35,7 @@ jobs:
     steps:
       - name: Checkout pinned private history code
         id: private_code
-                uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           ref: ${{ env.HISTORY_CODE_SHA }}
@@ -48,12 +48,12 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-                uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
 
       - name: Plan or resume private dataset releases
-                env:
+        env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
           HISTORY_MODE: ${{ inputs.mode }}
           HISTORY_MAX_FILES: ${{ inputs.max_files }}
