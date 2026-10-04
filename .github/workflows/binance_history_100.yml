@@ -1,7 +1,9 @@
 name: Binance History | 100 Markets
-run-name: Binance History | ${{ inputs.mode }} | batch ${{ github.run_number }}
+run-name: History | ${{ github.event_name == 'schedule' && 'Binance scheduled download' || inputs.mode }} | batch ${{ github.run_number }}
 
 on:
+  schedule:
+    - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -55,8 +57,8 @@ jobs:
       - name: Plan or resume private dataset releases
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
-          HISTORY_MODE: ${{ inputs.mode }}
-          HISTORY_MAX_FILES: ${{ inputs.max_files }}
+          HISTORY_MODE: ${{ github.event_name == 'schedule' && 'download' || inputs.mode }}
+          HISTORY_MAX_FILES: ${{ github.event_name == 'schedule' && '10000' || inputs.max_files }}
           HISTORY_MAX_MINUTES: '340'
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: python private_source/binance_history/run.py
