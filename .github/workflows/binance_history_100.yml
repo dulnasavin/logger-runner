@@ -1,9 +1,7 @@
 name: Binance History | 100 Markets
-run-name: History | ${{ github.event_name == 'schedule' && 'Binance scheduled download' || inputs.exchange }} | ${{ inputs.mode || 'download' }} | batch ${{ github.run_number }}
+run-name: History | ${{ inputs.exchange || 'binance' }} | ${{ inputs.mode || 'download' }} | batch ${{ github.run_number }}
 
 on:
-  schedule:
-    - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
       exchange:
@@ -16,7 +14,7 @@ on:
         description: Plan only, or download/resume verified one-minute archives
         type: choice
         options: [plan, download]
-        default: plan
+        default: download
         required: true
       max_files:
         description: Maximum new private file uploads in this batch (1 to 10000)
@@ -63,9 +61,9 @@ jobs:
       - name: Plan or resume private dataset releases
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
-          HISTORY_EXCHANGE: ${{ github.event_name == 'schedule' && 'binance' || inputs.exchange }}
-          HISTORY_MODE: ${{ github.event_name == 'schedule' && 'download' || inputs.mode }}
-          HISTORY_MAX_FILES: ${{ github.event_name == 'schedule' && '10000' || inputs.max_files }}
+          HISTORY_EXCHANGE: ${{ inputs.exchange || 'binance' }}
+          HISTORY_MODE: ${{ inputs.mode || 'download' }}
+          HISTORY_MAX_FILES: ${{ inputs.max_files || '10000' }}
           HISTORY_MAX_MINUTES: '340'
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         shell: bash
