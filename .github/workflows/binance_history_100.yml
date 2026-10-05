@@ -1,11 +1,17 @@
 name: Binance History | 100 Markets
-run-name: History | ${{ github.event_name == 'schedule' && 'Binance scheduled download' || inputs.mode }} | batch ${{ github.run_number }}
+run-name: History | ${{ github.event_name == 'schedule' && 'Binance scheduled download' || inputs.exchange }} | ${{ inputs.mode || 'download' }} | batch ${{ github.run_number }}
 
 on:
   schedule:
     - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
+      exchange:
+        description: Binance trading history, or Kraken reference history after Binance completes
+        type: choice
+        options: [binance, kraken]
+        default: binance
+        required: true
       mode:
         description: Plan only, or download/resume verified one-minute archives
         type: choice
@@ -27,7 +33,7 @@ concurrency:
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  HISTORY_CODE_SHA: 9a5dd4e53595d039e585d3bcd7f4f0b7fb091170
+  HISTORY_CODE_SHA: e340f69aee7024af79e5278dc22c05482c01e38e
 
 jobs:
   history:
@@ -57,11 +63,21 @@ jobs:
       - name: Plan or resume private dataset releases
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
+          HISTORY_EXCHANGE: ${{ github.event_name == 'schedule' && 'binance' || inputs.exchange }}
           HISTORY_MODE: ${{ github.event_name == 'schedule' && 'download' || inputs.mode }}
           HISTORY_MAX_FILES: ${{ github.event_name == 'schedule' && '10000' || inputs.max_files }}
           HISTORY_MAX_MINUTES: '340'
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-        run: python private_source/binance_history/run.py
+        shell: bash
+        run: |
+          if [[ "$HISTORY_EXCHANGE" == 'binance' ]]; then
+            python private_source/binance_history/run.py
+          elif [[ "$HISTORY_EXCHANGE" == 'kraken' ]]; then
+            python private_source/binance_history/kraken_run.py
+          else
+            echo 'Invalid exchange selection.' >&2
+            exit 2
+          fi
 
       - name: Send history batch email
         if: always() && steps.private_code.outcome == 'success'
