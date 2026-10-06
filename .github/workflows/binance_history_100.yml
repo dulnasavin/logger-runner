@@ -4,6 +4,12 @@ run-name: Binance History | ${{ inputs.mode || 'download' }} | batch ${{ github.
 on:
   workflow_dispatch:
     inputs:
+      exchange:
+        description: Binance only while Kraken collection is paused
+        type: choice
+        options: [binance]
+        default: binance
+        required: true
       mode:
         description: Plan only, or download/resume verified one-minute archives
         type: choice
@@ -55,12 +61,18 @@ jobs:
       - name: Plan or resume private dataset releases
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
+          HISTORY_EXCHANGE: ${{ inputs.exchange || 'binance' }}
           HISTORY_MODE: ${{ inputs.mode || 'download' }}
           HISTORY_MAX_FILES: ${{ inputs.max_files || '10000' }}
           HISTORY_MAX_MINUTES: '340'
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         shell: bash
-        run: python private_source/binance_history/run.py
+        run: |
+          if [[ "$HISTORY_EXCHANGE" != 'binance' ]]; then
+            echo 'Kraken history is paused; Binance is the only permitted exchange.' >&2
+            exit 2
+          fi
+          python private_source/binance_history/run.py
 
       - name: Send history batch email
         if: always() && steps.private_code.outcome == 'success'
