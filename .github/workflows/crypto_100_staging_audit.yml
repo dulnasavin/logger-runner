@@ -1,0 +1,97 @@
+name: Crypto Logger 100 | Staging Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-100-staging-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout pinned private staging source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+          ref: 4d27d0cabb0348104cf9fa2e211ac3f8eb506255
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          path: private_staging
+          sparse-checkout: |
+            binance_history
+            Crypto Logger-Private Repo
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Test 100-market logger and staging downloader
+        run: |
+          python -m unittest discover -s 'private_staging/Crypto Logger-Private Repo/tests' -p 'test_ohlc_100.py' -q
+          python -m unittest discover -s private_staging/binance_history -p 'test_history.py' -q
+          python -m unittest discover -s private_staging/binance_history -p 'test_daily_bundle.py' -q
+          python -m unittest discover -s private_staging/binance_history -p 'test_reporting.py' -q
+        env:
+          PYTHONPATH: private_staging/Crypto Logger-Private Repo:private_staging/binance_history
+
+      - name: Plan staging history without any storage token
+        env:
+          HISTORY_MODE: plan
+        run: python private_staging/binance_history/run.py
+
+      - name: Check current Binance spot status
+        id: spot
+        continue-on-error: true
+        run: |
+          python - 'private_staging/Crypto Logger-Private Repo' <<'PY'
+          import sys
+          sys.path.insert(0, sys.argv[1])
+          from coverage_audit import MARKETS, fetch_live_exchange_info, verify_binance_exchange_info
+          issues = verify_binance_exchange_info(fetch_live_exchange_info())
+          print(f'Live spot pairs verified: {len(MARKETS) - len(issues)}/{len(MARKETS)}')
+          for issue in issues:
+              print(issue)
+          raise SystemExit(bool(issues))
+          PY
+
+      - name: Check first official IMX and RSR daily archives
+        id: first_archives
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import re
+          import urllib.request
+          for pair, date in [('IMXUSDT', '2022-01-10'), ('RSRUSDT', '2020-08-27')]:
+              name = f'{pair}-1m-{date}.zip'
+              url = f'https://data.binance.vision/data/spot/daily/klines/{pair}/1m/{name}.CHECKSUM'
+              with urllib.request.urlopen(url, timeout=20) as response:
+                  body = response.read(512).decode('ascii')
+              parts = body.split()
+              if len(parts) != 2 or not re.fullmatch('[0-9a-fA-F]{64}', parts[0]) or parts[1].lstrip('*') != name:
+                  raise ValueError(f'{pair}: invalid official daily checksum')
+              print(f'{pair} {date}: official daily archive checksum published')
+          PY
+
+      - name: Record staging gate outcome
+        if: always()
+        env:
+          SPOT_OUTCOME: ${{ steps.spot.outcome }}
+          ARCHIVE_OUTCOME: ${{ steps.first_archives.outcome }}
+        run: |
+          {
+            echo '## 100-market staging audit'
+            echo
+            echo "- Live Binance spot check: $SPOT_OUTCOME"
+            echo "- First IMX/RSR archives: $ARCHIVE_OUTCOME"
+            echo '- No history data was downloaded or uploaded.'
+            echo '- Coinbase product identity review and durable OHLC archival remain required before production.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$SPOT_OUTCOME" = success && test "$ARCHIVE_OUTCOME" = success
