@@ -122,7 +122,7 @@ jobs:
                       raise ValueError('Unexpected Binance candle response size')
                   return json.loads(body)
 
-          pairs = {market['symbol']: market['pair'] for market in MARKETS}
+          pairs = {market['pair'][:-4]: market['pair'] for market in MARKETS}
           assert len(pairs) == 100
           started = time.monotonic()
           rows = collect(ReadOnlySpotClient(), pairs)
