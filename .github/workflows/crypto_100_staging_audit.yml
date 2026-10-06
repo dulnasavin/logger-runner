@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-          ref: d428334083525bbee75ba79f8243ad790e41cef6
+          ref: 559845bdb9bb33373eb79b8bc866165133878b98
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           path: private_staging
           sparse-checkout: |
@@ -43,6 +43,17 @@ jobs:
           python -m unittest discover -s 'private_staging/Neon Sync' -p 'test_sync_to_neon.py' -q
         env:
           PYTHONPATH: private_staging/Crypto Logger-Private Repo:private_staging/binance_history
+
+      - name: Report staged Coinbase coverage
+        run: |
+          python - 'private_staging/Crypto Logger-Private Repo' <<'PY'
+          import sys
+          sys.path.insert(0, sys.argv[1])
+          from market_catalog import COINBASE_MAP, COINBASE_UNVERIFIED
+          assert 'RUNE' not in COINBASE_MAP
+          assert len(COINBASE_MAP) == 10 and len(COINBASE_UNVERIFIED) == 89
+          print('Coinbase USD products mapped: 10/100; RUNE explicitly not listed; 89 require review')
+          PY
 
       - name: Plan staging history without any storage token
         env:
@@ -94,6 +105,7 @@ jobs:
             echo "- Live Binance spot check: $SPOT_OUTCOME"
             echo "- First IMX/RSR archives: $ARCHIVE_OUTCOME"
             echo '- No history data was downloaded or uploaded.'
-            echo '- Coinbase product identity review and durable OHLC archival remain required before production.'
+            echo '- Coinbase products mapped: 10/100; RUNE explicitly not listed; 89 require review.'
+            echo '- Durable OHLC archival and a live full-batch timing check remain required before production.'
           } >> "$GITHUB_STEP_SUMMARY"
           test "$SPOT_OUTCOME" = success && test "$ARCHIVE_OUTCOME" = success
