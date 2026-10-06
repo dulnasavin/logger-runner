@@ -129,7 +129,7 @@ jobs:
           elapsed = time.monotonic() - started
           print(f'Validated closed five-minute candles: {len(rows)}/100 in {elapsed:.1f}s')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write(f'seconds={elapsed:.1f}\\n')
+              output.write(f'seconds={elapsed:.1f}\n')
           if elapsed >= 180:
               raise TimeoutError('100-market batch exceeds the three-minute staging budget')
           PY
