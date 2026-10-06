@@ -93,19 +93,63 @@ jobs:
               print(f'{pair} {date}: official daily archive checksum published')
           PY
 
+      - name: Time one full 100-market closed-candle fetch
+        id: batch
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          python - 'private_staging/Crypto Logger-Private Repo' <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.parse
+          import urllib.request
+
+          sys.path.insert(0, sys.argv[1])
+          from market_catalog import MARKETS
+          from ohlc_5m import collect
+
+          class ReadOnlySpotClient:
+              def get_klines(self, **params):
+                  query = urllib.parse.urlencode(params)
+                  request = urllib.request.Request(
+                      'https://data-api.binance.vision/api/v3/klines?' + query,
+                      headers={'User-Agent': 'crypto-logger-staging-timing/1'})
+                  with urllib.request.urlopen(request, timeout=5) as response:
+                      body = response.read(20_001)
+                  if len(body) > 20_000:
+                      raise ValueError('Unexpected Binance candle response size')
+                  return json.loads(body)
+
+          pairs = {market['symbol']: market['pair'] for market in MARKETS}
+          assert len(pairs) == 100
+          started = time.monotonic()
+          rows = collect(ReadOnlySpotClient(), pairs)
+          elapsed = time.monotonic() - started
+          print(f'Validated closed five-minute candles: {len(rows)}/100 in {elapsed:.1f}s')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'seconds={elapsed:.1f}\\n')
+          if elapsed >= 180:
+              raise TimeoutError('100-market batch exceeds the three-minute staging budget')
+          PY
+
       - name: Record staging gate outcome
         if: always()
         env:
           SPOT_OUTCOME: ${{ steps.spot.outcome }}
           ARCHIVE_OUTCOME: ${{ steps.first_archives.outcome }}
+          BATCH_OUTCOME: ${{ steps.batch.outcome }}
+          BATCH_SECONDS: ${{ steps.batch.outputs.seconds }}
         run: |
           {
             echo '## 100-market staging audit'
             echo
             echo "- Live Binance spot check: $SPOT_OUTCOME"
             echo "- First IMX/RSR archives: $ARCHIVE_OUTCOME"
+            echo "- Full 100-market candle batch: $BATCH_OUTCOME (${BATCH_SECONDS:-no time}s)"
             echo '- No history data was downloaded or uploaded.'
             echo '- Coinbase products mapped: 10/100; RUNE explicitly not listed; 89 require review.'
-            echo '- Durable OHLC archival and a live full-batch timing check remain required before production.'
+            echo '- Durable OHLC archival remains required before production.'
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$SPOT_OUTCOME" = success && test "$ARCHIVE_OUTCOME" = success
+          test "$SPOT_OUTCOME" = success && test "$ARCHIVE_OUTCOME" = success && test "$BATCH_OUTCOME" = success
