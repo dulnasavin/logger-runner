@@ -1,6 +1,9 @@
 name: One-time history ref cleanup
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/cleanup_history_refs_20261006.yml]
 
 permissions:
   contents: write
