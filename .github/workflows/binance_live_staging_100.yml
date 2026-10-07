@@ -41,7 +41,7 @@ jobs:
       - name: Checkpoint closed minutes for selected markets
         env:
           HISTORY_STAGING: '1'
-          HISTORY_LIVE_PAIR: ${{ github.event_name == 'push' && 'BTCUSDT' || inputs.pair || '' }}
+          HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
           HISTORY_LIVE_MAX_MINUTES: '55'
           HISTORY_CODE_SHA: 886efc69612b0e4443edc99e398b0da7634e4ca1
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
