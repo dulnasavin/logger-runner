@@ -1,9 +1,11 @@
 name: Binance Live | Staging 100-Market Batch
 on:
-  push:
-    branches: [staging]
-    paths: [.github/workflows/binance_live_staging_100.yml]
   workflow_dispatch:
+    inputs:
+      pair:
+        description: Optional one-market staging test; blank checks all 100
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -22,7 +24,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-          ref: 7f29cee08a4731e36c9dc42e7f9fff91d0e0b82e
+          ref: 886efc69612b0e4443edc99e398b0da7634e4ca1
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           path: private_source
           sparse-checkout: binance_history
@@ -34,8 +36,9 @@ jobs:
       - name: Checkpoint closed minutes for all 100 markets
         env:
           HISTORY_STAGING: '1'
+          HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
           HISTORY_LIVE_MAX_MINUTES: '55'
-          HISTORY_CODE_SHA: 7f29cee08a4731e36c9dc42e7f9fff91d0e0b82e
+          HISTORY_CODE_SHA: 886efc69612b0e4443edc99e398b0da7634e4ca1
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: python private_source/binance_history/live.py
       - name: Remove private source
