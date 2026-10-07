@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-          ref: 886efc69612b0e4443edc99e398b0da7634e4ca1
+          ref: 849e98c827fb59e4d813bb641e021ed9b0a4c7b0
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           path: private_source
           sparse-checkout: binance_history
@@ -41,9 +41,9 @@ jobs:
       - name: Checkpoint closed minutes for selected markets
         env:
           HISTORY_STAGING: '1'
-          HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
+          HISTORY_LIVE_PAIR: ${{ github.event_name == 'push' && 'BTCUSDT' || inputs.pair || '' }}
           HISTORY_LIVE_MAX_MINUTES: '55'
-          HISTORY_CODE_SHA: 886efc69612b0e4443edc99e398b0da7634e4ca1
+          HISTORY_CODE_SHA: 849e98c827fb59e4d813bb641e021ed9b0a4c7b0
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: python private_source/binance_history/live.py
       - name: Remove private source
