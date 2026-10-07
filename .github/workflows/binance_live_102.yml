@@ -1,0 +1,57 @@
+name: Binance Live | 102 Markets
+run-name: Binance Live | manual batch ${{ github.run_number }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pair:
+        description: Optional one-market check; blank processes all 102
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binance-live-102
+  cancel-in-progress: false
+
+env:
+  PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+  HISTORY_CODE_SHA: bc871912faa02210adce994f197c9ea10fb3f255
+
+jobs:
+  live:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Checkout pinned private collector
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          ref: ${{ env.HISTORY_CODE_SHA }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          path: private_source
+          sparse-checkout: binance_history
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Verify history and live regression tests
+        run: python -m unittest discover -s private_source/binance_history -p 'test_*.py' -q
+
+      - name: Check verified history gate and collect closed minutes
+        env:
+          HISTORY_LIVE_PRODUCTION: 'YES'
+          HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
+          HISTORY_LIVE_MAX_MINUTES: '55'
+          HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+        run: python private_source/binance_history/live.py
+
+      - name: Remove private source
+        if: always()
+        run: rm -rf private_source
