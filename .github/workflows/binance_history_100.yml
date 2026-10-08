@@ -31,7 +31,7 @@ concurrency:
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  HISTORY_CODE_SHA: bc871912faa02210adce994f197c9ea10fb3f255
+  HISTORY_CODE_SHA: 67286a3072bc9a6528e616bbc7cdb3b062e0df65
 
 jobs:
   history:
