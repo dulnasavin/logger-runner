@@ -13,7 +13,8 @@ on:
       - "Crypto Logger | Staging"
       - "Workflow Security"
       - "CodeQL Advanced"
-      - "Binance History | 100 Markets"
+      - "Binance History | 102 Markets"
+      - "Binance Live | 102 Markets"
     types: [completed]
 
 permissions:
@@ -54,9 +55,12 @@ jobs:
             const isMain = run?.path === ".github/workflows/crypto_runner.yml" &&
               /^Crypto Logger \| Main(?: \| #\d+)?$/.test(run.name);
             const isHistory = run?.path === ".github/workflows/binance_history_100.yml" &&
-              run.name === "Binance History | 100 Markets" &&
+              run.name === "Binance History | 102 Markets" &&
               run.event === "workflow_dispatch" && run.head_branch === "main";
-            if (!run || (!supported.has(run.name) && !isMain && !isHistory) || !failures.has(run.conclusion) ||
+            const isLive = run?.path === ".github/workflows/binance_live_102.yml" &&
+              run.name === "Binance Live | 102 Markets" &&
+              run.event === "workflow_dispatch" && run.head_branch === "main";
+            if (!run || (!supported.has(run.name) && !isMain && !isHistory && !isLive) || !failures.has(run.conclusion) ||
                 run.repository?.full_name !== `${owner}/${repo}` ||
                 !Number.isSafeInteger(run.id) || run.id <= 0 ||
                 !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 0 ||
@@ -105,15 +109,21 @@ jobs:
               "Open the original run below and review its first failed or cancelled step. The step name identifies where execution stopped; it does not prove the underlying cause.",
               isHistory
                 ? "The detailed history email was not confirmed or could not run. Check Make notification settings as well as the download step. After resolving the failure, run download again; verified files are reused."
+                : isLive
+                ? "The live collector failed. Inspect the first failed step and the history gate before retrying. Check the private manifests for any committed minutes."
                 : "For a data conflict or changed runtime snapshot, review the current data and start a fresh preview. Never force a stale repair plan.",
               "", "DATA AND SCHEDULING",
               isHistory
                 ? "This is the independent history-download fallback. Progress counts are unavailable here; inspect the private release manifests. A run failure does not prove a VPN cause, and partial uploads may already be safely stored."
+                : isLive
+                ? "This is the independent live-collector result. A failed job alone does not establish which closed minutes were stored."
                 : isMain
                 ? "This is the final Main workflow result, including downstream jobs. An earlier in-run provider or failure alert may already have been sent; this message records the completed workflow outcome. A job status alone does not establish which rows were saved or prove a VPN cause."
                 : "This reports only the named workflow. It does not establish that Main, CSV persistence, Neon, or VPN failed.",
               isHistory
                 ? "History runs are manual. This alert does not automatically restart a batch or download more files."
+                : isLive
+                ? "Live runs are manual at present. This alert does not automatically restart collection or bypass the history gate."
                 : "CSV Audit and Neon Audit have independent cron schedules. A failure in one does not cancel the other's scheduled start. Each retains its own data safety checks.",
               "", "ORIGINAL GITHUB ACTIONS RUN", runUrl
             ].join("\n");
