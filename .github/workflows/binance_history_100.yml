@@ -75,7 +75,9 @@ jobs:
           python private_source/binance_history/run.py
 
       - name: Send history batch email
+        id: history_email
         if: always() && steps.private_code.outcome == 'success'
+        continue-on-error: true
         timeout-minutes: 1
         env:
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
@@ -86,11 +88,14 @@ jobs:
       - name: Show history checkpoint
         if: always() && steps.private_code.outcome == 'success'
         env:
+          HISTORY_EMAIL_OUTCOME: ${{ steps.history_email.outcome }}
           HISTORY_REPORT_PATH: ${{ runner.temp }}/history-status.json
         run: |
           python - <<'PY'
           import json, os
           from pathlib import Path
+          if os.environ.get('HISTORY_EMAIL_OUTCOME') == 'failure':
+              print('::warning::History email was not acknowledged; inspect Make separately. Dataset status is in the checkpoint below.')
           path=Path(os.environ['HISTORY_REPORT_PATH'])
           summary=Path(os.environ['GITHUB_STEP_SUMMARY'])
           if path.exists():
