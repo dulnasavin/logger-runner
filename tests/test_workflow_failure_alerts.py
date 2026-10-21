@@ -135,6 +135,8 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
         self.assertFalse(result['error'])
         self.assertEqual(result['outputs']['email_required'], 'false')
         self.assertEqual(len(result['updated']), 1)
+        self.assertNotIn('#15494', result['updated'][0]['title'])
+        self.assertIn('Crypto Logger | Main failure', result['updated'][0]['title'])
 
     def test_recovered_gap_and_daily_reminder_send_again(self):
         for options in ({'previous_run': 120}, {'age_days': 2}):
