@@ -162,6 +162,8 @@ jobs:
             const shouldEmail = !recurring || !contiguous || !Number.isFinite(lastMailAt) ||
               Date.now() - lastMailAt >= 24 * 60 * 60 * 1000;
             const mailAt = shouldEmail ? new Date().toISOString() : previousAttempt[1];
+            const workflowLabel = clean(run.name).replace(/ \| #\d+$/, "");
+            const issueTitle = `Crypto Logger: ${workflowLabel} ${run.conclusion} (${stoppedStage})`.slice(0, 240);
             const issueBody = [
               groupMarker, runMarker,
               `<!-- crypto-workflow-latest-run:${run.run_number} -->`,
@@ -172,13 +174,13 @@ jobs:
               "Email status is recorded in the separate Workflow Failure Alerts run."
             ].join("\n");
             if (recurring) {
-              await github.rest.issues.update({owner, repo, issue_number: recurring.number, body: issueBody});
+              await github.rest.issues.update({owner, repo, issue_number: recurring.number, title: issueTitle, body: issueBody});
               core.setOutput("issue_number", String(recurring.number));
               core.setOutput("email_required", String(shouldEmail));
               return;
             }
             const created = await github.rest.issues.create({owner, repo,
-              title: `Crypto Logger: ${run.name} ${run.conclusion} (${stoppedStage})`,
+              title: issueTitle,
               body: issueBody});
             core.setOutput("issue_number", String(created.data.number));
 
