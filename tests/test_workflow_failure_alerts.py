@@ -39,7 +39,7 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
     if(EXISTING) return [{number:9,user:{login:'github-actions[bot]'},body:'<!-- crypto-workflow-failure:42:2 -->'}];
     if(EXISTING_GROUP){
       const crypto=require('crypto');
-      const signature=crypto.createHash('sha256').update(JSON.stringify([FIXTURE.path,FIXTURE.name,FIXTURE.conclusion,'Check generation'])).digest('hex').slice(0,24);
+      const signature=crypto.createHash('sha256').update(JSON.stringify([FIXTURE.path,FIXTURE.conclusion,'Check generation'])).digest('hex').slice(0,24);
       const last=new Date(Date.now()-AGE_DAYS*24*60*60*1000).toISOString();
       return [{number:9,user:{login:'github-actions[bot]'},body:`<!-- crypto-workflow-group:${signature} -->\n<!-- crypto-workflow-latest-run:${PREVIOUS_RUN} -->\n<!-- crypto-workflow-last-mail-at:${last} -->`}];
     }
@@ -128,6 +128,13 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
         self.assertEqual(result['outputs']['issue_number'], '9')
         self.assertEqual(result['outputs']['email_required'], 'false')
         self.assertIn('/actions/runs/42', result['updated'][0]['body'])
+
+    def test_numbered_main_run_names_share_one_incident_group(self):
+        result = self.execute(name='Crypto Logger | Main | #15494', existing_group=True,
+                              path='.github/workflows/crypto_runner.yml')
+        self.assertFalse(result['error'])
+        self.assertEqual(result['outputs']['email_required'], 'false')
+        self.assertEqual(len(result['updated']), 1)
 
     def test_recovered_gap_and_daily_reminder_send_again(self):
         for options in ({'previous_run': 120}, {'age_days': 2}):
