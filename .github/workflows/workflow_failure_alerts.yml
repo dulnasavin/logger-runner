@@ -134,22 +134,56 @@ jobs:
             core.setOutput("workflow_name", run.name);
             core.setOutput("subject", `CRYPTO LOGGER FINAL | ${clean(run.name)} | ${run.conclusion.toUpperCase()}: ${stoppedStage} | Run #${run.run_number}`);
             core.setOutput("body", body);
-            const marker = `<!-- crypto-workflow-failure:${run.id}:${run.run_attempt} -->`;
-            const issues = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: "all", creator: "github-actions[bot]", per_page: 100});
-            const existing = issues.find(issue => !issue.pull_request &&
-              issue.user?.login === "github-actions[bot]" && (issue.body || "").includes(marker));
-            if (existing) {
-              core.setOutput("issue_number", String(existing.number));
-              core.notice(`Incident already recorded in issue #${existing.number}`);
+            // One open issue per workflow/stage/outcome. Keep each new run visible
+            // in that issue while limiting Make mail to incident start and daily reminders.
+            const crypto = require("crypto");
+            const signature = crypto.createHash("sha256")
+              .update(JSON.stringify([run.path, run.conclusion, stoppedStage]))
+              .digest("hex").slice(0, 24);
+            const groupMarker = `<!-- crypto-workflow-group:${signature} -->`;
+            const runMarker = `<!-- crypto-workflow-failure:${run.id}:${run.run_attempt} -->`;
+            core.setOutput("email_required", "true"); // Issue API failure keeps email as fallback.
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", creator: "github-actions[bot]", per_page: 100
+            });
+            const trusted = issue => !issue.pull_request &&
+              issue.user?.login === "github-actions[bot]";
+            const sameRun = issues.find(issue => trusted(issue) && (issue.body || "").includes(runMarker));
+            if (sameRun) {
+              core.setOutput("issue_number", String(sameRun.number));
+              core.notice(`Incident already recorded in issue #${sameRun.number}`);
+              return;
+            }
+            const recurring = issues.find(issue => trusted(issue) && (issue.body || "").includes(groupMarker));
+            const previousRun = recurring?.body?.match(/<!-- crypto-workflow-latest-run:(\d+) -->/);
+            const previousAttempt = recurring?.body?.match(/<!-- crypto-workflow-last-mail-at:([^<>]+) -->/);
+            const lastMailAt = previousAttempt ? Date.parse(previousAttempt[1]) : NaN;
+            const contiguous = previousRun && Number(previousRun[1]) === run.run_number - 1;
+            const shouldEmail = !recurring || !contiguous || !Number.isFinite(lastMailAt) ||
+              Date.now() - lastMailAt >= 24 * 60 * 60 * 1000;
+            const mailAt = shouldEmail ? new Date().toISOString() : previousAttempt[1];
+            const issueBody = [
+              groupMarker, runMarker,
+              `<!-- crypto-workflow-latest-run:${run.run_number} -->`,
+              `<!-- crypto-workflow-last-mail-at:${mailAt} -->`,
+              body,
+              "",
+              "This issue tracks the latest matching failure. Earlier runs remain in Actions.",
+              "Email status is recorded in the separate Workflow Failure Alerts run."
+            ].join("\n");
+            if (recurring) {
+              await github.rest.issues.update({owner, repo, issue_number: recurring.number, body: issueBody});
+              core.setOutput("issue_number", String(recurring.number));
+              core.setOutput("email_required", String(shouldEmail));
               return;
             }
             const created = await github.rest.issues.create({owner, repo,
-              title: `Crypto Logger: ${run.name} ${run.conclusion} (run ${run.run_number})`,
-              body: `${marker}\n${body}\n\nEmail status is recorded in the separate Workflow Failure Alerts run. An issue being saved is not proof of email receipt.`});
+              title: `Crypto Logger: ${run.name} ${run.conclusion} (${stoppedStage})`,
+              body: issueBody});
             core.setOutput("issue_number", String(created.data.number));
 
       - name: Checkout trusted default-branch notification code
-        if: always() && steps.incident.outputs.required == 'true'
+        if: always() && steps.incident.outputs.required == 'true' && steps.incident.outputs.email_required == 'true'
         id: public_source
         continue-on-error: true
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -176,7 +210,7 @@ jobs:
           persist-credentials: false
 
       - name: Send the workflow failure through the existing Make connection
-        if: always() && steps.private_source.outcome == 'success'
+        if: always() && steps.private_source.outcome == 'success' && steps.incident.outputs.email_required == 'true'
         id: email
         continue-on-error: true
         timeout-minutes: 1
@@ -195,6 +229,7 @@ jobs:
         if: always()
         env:
           NOTIFICATION_REQUIRED: ${{ steps.incident.outputs.required }}
+          EMAIL_REQUIRED: ${{ steps.incident.outputs.email_required }}
           ISSUE_OUTCOME: ${{ steps.incident.outcome }}
           EMAIL_OUTCOME: ${{ steps.email.outcome }}
           ISSUE_NUMBER: ${{ steps.incident.outputs.issue_number }}
@@ -213,7 +248,9 @@ jobs:
             echo "- Email success means explicit Make email-module acknowledgment, not verified inbox receipt."
             echo "- Failed/cancelled audits keep their own result; no repair was triggered by this notifier."
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$EMAIL_OUTCOME" != success ]; then
+          if [ "$EMAIL_REQUIRED" = false ]; then
+            echo "Matching outage is already recorded; next email is due on a new incident or after 24 hours."
+          elif [ "$EMAIL_OUTCOME" != success ]; then
             echo "::warning::Workflow failure email was not confirmed. Inspect Make connection/scenario history and the notifier setup steps."
           fi
           if [ "$ISSUE_OUTCOME" != success ] && [ "$EMAIL_OUTCOME" != success ]; then
