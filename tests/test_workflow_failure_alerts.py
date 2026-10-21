@@ -16,17 +16,18 @@ spec.loader.exec_module(sender)
 
 
 class WorkflowFailureAlertsTests(unittest.TestCase):
-    def execute(self, *, conclusion='failure', name='CSV Audit', repository='example/logger', jobs_error=False, issues_error=False, existing=False, path=None):
+    def execute(self, *, conclusion='failure', name='CSV Audit', repository='example/logger', jobs_error=False, issues_error=False, existing=False, existing_group=False, previous_run=122, age_days=0, path=None):
         step = WORKFLOW.read_text().split('      - name: Record the failed workflow independently of email', 1)[1].split('      - name:', 1)[0]
         script = textwrap.dedent(step.split('          script: |\n', 1)[1])
         fixture = {'conclusion':conclusion, 'name':name, 'repository':{'full_name':repository},
                    'id':42, 'run_attempt':2, 'run_number':123, 'path':path}
         harness = '''
-const outputs={}, created=[];
+const outputs={}, created=[], updated=[];
 const context={repo:{owner:'example',repo:'logger'},payload:{workflow_run:FIXTURE}};
 const core={setOutput:(k,v)=>outputs[k]=v,warning:()=>{},notice:()=>{}};
 const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listForRepo:()=>{},
-  create:async data=>{if(ISSUES_ERROR) throw Error('issues unavailable');created.push(data);return {data:{number:9}};}}},
+  create:async data=>{if(ISSUES_ERROR) throw Error('issues unavailable');created.push(data);return {data:{number:9}};},
+  update:async data=>{if(ISSUES_ERROR) throw Error('issues unavailable');updated.push(data);return {data:{number:9}};}}},
   paginate:async (method,args)=>{
     if(method===github.rest.actions.listJobsForWorkflowRunAttempt){
       if(JOBS_ERROR) throw Error('jobs unavailable');
@@ -35,12 +36,19 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
               {name:'Check generation',conclusion:'failure'}]}];
     }
     if(ISSUES_ERROR) throw Error('issues unavailable');
-    return EXISTING ? [{number:9,user:{login:'github-actions[bot]'},body:'<!-- crypto-workflow-failure:42:2 -->'}] : [];
+    if(EXISTING) return [{number:9,user:{login:'github-actions[bot]'},body:'<!-- crypto-workflow-failure:42:2 -->'}];
+    if(EXISTING_GROUP){
+      const crypto=require('crypto');
+      const signature=crypto.createHash('sha256').update(JSON.stringify([FIXTURE.path,FIXTURE.name,FIXTURE.conclusion,'Check generation'])).digest('hex').slice(0,24);
+      const last=new Date(Date.now()-AGE_DAYS*24*60*60*1000).toISOString();
+      return [{number:9,user:{login:'github-actions[bot]'},body:`<!-- crypto-workflow-group:${signature} -->\n<!-- crypto-workflow-latest-run:${PREVIOUS_RUN} -->\n<!-- crypto-workflow-last-mail-at:${last} -->`}];
+    }
+    return [];
   }};
-(async()=>{SCRIPT})().then(()=>console.log(JSON.stringify({outputs,created,error:false})))
-.catch(()=>console.log(JSON.stringify({outputs,created,error:true})));
+(async()=>{SCRIPT})().then(()=>console.log(JSON.stringify({outputs,created,updated,error:false})))
+.catch(()=>console.log(JSON.stringify({outputs,created,updated,error:true})));
 '''
-        harness = harness.replace('FIXTURE', json.dumps(fixture)).replace('ISSUES_ERROR', str(issues_error).lower()).replace('JOBS_ERROR', str(jobs_error).lower()).replace('EXISTING', str(existing).lower()).replace('SCRIPT', script)
+        harness = harness.replace('FIXTURE', json.dumps(fixture)).replace('ISSUES_ERROR', str(issues_error).lower()).replace('JOBS_ERROR', str(jobs_error).lower()).replace('EXISTING_GROUP', str(existing_group).lower()).replace('EXISTING', str(existing).lower()).replace('PREVIOUS_RUN', str(previous_run)).replace('AGE_DAYS', str(age_days)).replace('SCRIPT', script)
         result = subprocess.run(['node', '-e', harness], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -112,6 +120,23 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
         self.assertEqual(result['created'], [])
         self.assertEqual(result['outputs']['issue_number'], '9')
 
+    def test_recurring_failure_updates_one_issue_and_suppresses_five_minute_email(self):
+        result = self.execute(existing_group=True)
+        self.assertFalse(result['error'])
+        self.assertEqual(result['created'], [])
+        self.assertEqual(len(result['updated']), 1)
+        self.assertEqual(result['outputs']['issue_number'], '9')
+        self.assertEqual(result['outputs']['email_required'], 'false')
+        self.assertIn('/actions/runs/42', result['updated'][0]['body'])
+
+    def test_recovered_gap_and_daily_reminder_send_again(self):
+        for options in ({'previous_run': 120}, {'age_days': 2}):
+            with self.subTest(options=options):
+                result = self.execute(existing_group=True, **options)
+                self.assertFalse(result['error'])
+                self.assertEqual(result['outputs']['email_required'], 'true')
+                self.assertEqual(len(result['updated']), 1)
+
     def test_sender_uses_original_identity_and_preserves_content(self):
         env = {'FAILED_RUN_ID':'42', 'FAILED_RUN_ATTEMPT':'2', 'FAILED_RUN_NUMBER':'123',
                'FAILED_WORKFLOW_NAME':'Neon Audit | Daily', 'FAILURE_SUBJECT':'audit failed',
@@ -153,9 +178,13 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
                 with self.subTest(issue=issue,email=email):
                     env={**os.environ, 'GITHUB_STEP_SUMMARY':str(Path(directory)/'summary'),
                          'ISSUE_OUTCOME':issue,'EMAIL_OUTCOME':email,'ISSUE_NUMBER':'','ORIGINAL_RUN_ID':'42',
-                         'NOTIFICATION_REQUIRED':'true'}
+                         'NOTIFICATION_REQUIRED':'true','EMAIL_REQUIRED':'true'}
                     result = subprocess.run(['bash','-c',script],env=env,text=True,capture_output=True)
                     self.assertEqual(result.returncode, int(issue!='success' and email!='success'), result.stderr)
+            # A known recurring outage is safe with the trusted issue channel.
+            quiet = subprocess.run(['bash','-c',script], env={**env, 'ISSUE_OUTCOME':'success',
+                'EMAIL_OUTCOME':'skipped', 'EMAIL_REQUIRED':'false'}, text=True, capture_output=True)
+            self.assertEqual(quiet.returncode, 0, quiet.stderr)
             # An early exception before the incident outputs exist must not look healthy.
             result = subprocess.run(['bash','-c',script],env={**env, 'NOTIFICATION_REQUIRED':'',
                 'ISSUE_OUTCOME':'failure','EMAIL_OUTCOME':'skipped'},text=True,capture_output=True)
