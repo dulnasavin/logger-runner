@@ -138,7 +138,7 @@ jobs:
             // in that issue while limiting Make mail to incident start and daily reminders.
             const crypto = require("crypto");
             const signature = crypto.createHash("sha256")
-              .update(JSON.stringify([run.path, run.name, run.conclusion, stoppedStage]))
+              .update(JSON.stringify([run.path, run.conclusion, stoppedStage]))
               .digest("hex").slice(0, 24);
             const groupMarker = `<!-- crypto-workflow-group:${signature} -->`;
             const runMarker = `<!-- crypto-workflow-failure:${run.id}:${run.run_attempt} -->`;
