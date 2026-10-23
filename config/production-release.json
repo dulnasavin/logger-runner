@@ -2,12 +2,12 @@
   "schema_version": 2,
   "environment": "production",
   "private_repository": "dulnasavin/Repository-name-crypto-tracker-Private-Yes",
-  "private_commit_sha": "1d2e228fd21d77e8815e5d195754d8565edd31e6",
+  "private_commit_sha": "3314287440d935ec43d6ccadb993f92e25dc2494",
   "private_data_branch": "runtime-data",
   "capabilities": {
     "logger": "enabled",
     "runtime_maintenance": "enabled",
-    "neon": "enabled",
-    "neon_schema": "enabled"
+    "neon": "disabled",
+    "neon_schema": "disabled"
   }
 }

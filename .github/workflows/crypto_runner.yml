@@ -639,7 +639,7 @@ jobs:
             (.trading_allowed | type == "boolean") and
             (.network_recovery.enabled == true) and
             (.network_recovery.switch_count <= 1) and
-            (.decisions | type == "object" and length == 11)
+            (.decisions | type == "object" and length == 102)
           ' "$REPORT" >/dev/null
           echo "Provider severity: $(jq -r '.overall_severity' "$REPORT")"
           echo "Trading allowed:   $(jq -r '.trading_allowed' "$REPORT")"
@@ -693,7 +693,7 @@ jobs:
           echo "Rows before: ${BEFORE_ROWS}"
           echo "Rows after:  ${AFTER_ROWS}"
           echo "Rows added:  ${ADDED_ROWS}"
-          test "$ADDED_ROWS" -eq 11 || { echo "❌ Expected exactly 11 new symbol rows, got ${ADDED_ROWS}"; exit 1; }
+          test "$ADDED_ROWS" -eq 102 || { echo "❌ Expected exactly 102 new symbol rows, got ${ADDED_ROWS}"; exit 1; }
           echo "✅ Production CSV validated"
 
       # ======================================================================
@@ -824,7 +824,7 @@ jobs:
           REPORT="${RUNNER_TEMP}/provider-report.json"
           test -s "$REPORT"
           jq -e '.version == 1 and .overall_severity == "CRITICAL" and
-            ((.decisions | type == "object" and length == 11) and
+            ((.decisions | type == "object" and length == 102) and
              any(.decisions[]; .accepted_usd == null) or
              (.condition_code == "FX_RATE_CRITICAL" and
               (.decisions | type == "object" and length == 0) and
@@ -1158,11 +1158,11 @@ jobs:
             echo ""
             echo "### 5. Persistence and downstream state"
             echo ""
-            echo "- **Rows appended this run:** 11"
+            echo "- **Rows appended this run:** 102"
             echo "- **Production CSV data rows (header excluded):** ${CSV_ROWS}"
             echo "- **Neon comparison:** Compare the active dataset generation. Archived generations are counted separately in Neon Audit."
             echo "- **Incident state persisted:** Yes"
-            echo "- **Neon handoff:** Runs only after the exact runtime-data commit is verified"
+            echo "- **Neon handoff:** Disabled by the production release manifest"
             echo ""
             echo "### 6. Release status"
             echo ""
