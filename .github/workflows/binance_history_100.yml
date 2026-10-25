@@ -11,7 +11,7 @@ on:
         default: binance
         required: true
       mode:
-        description: Plan base history, resume base downloads, or extend official daily history through October 26
+        description: Plan base history, resume base downloads, or extend official daily history through October 25
         type: choice
         options: [plan, download, extend]
         default: download
@@ -31,7 +31,7 @@ concurrency:
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  HISTORY_CODE_SHA: 41f2af68b30957acaa6f22d0e85ec50a623b63f2
+  HISTORY_CODE_SHA: 807cb29cdc999bb864c37dca67e9acad587e1f92
 
 jobs:
   history:
