@@ -71,7 +71,8 @@ jobs:
           case "$HISTORY_EXCHANGE:$HISTORY_MODE" in
             binance:plan|binance:download) python private_source/binance_history/run.py ;;
             binance:extend) python private_source/binance_history/extension.py ;;
-            kraken:plan|kraken:download) python private_source/binance_history/kraken_run.py ;;
+            kraken:plan) python private_source/binance_history/kraken_extension.py ;;
+            kraken:download) python private_source/binance_history/kraken_run.py ;;
             kraken:q3|kraken:october) python private_source/binance_history/kraken_extension.py ;;
             *) echo 'Unsupported exchange/mode combination' >&2; exit 2 ;;
           esac
