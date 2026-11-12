@@ -15,6 +15,8 @@ on:
       - "CodeQL Advanced"
       - "Binance History | 102 Markets"
       - "Binance Live | 102 Markets"
+      - "Market History | 102 Markets"
+      - "Market Live | 102 Markets"
     types: [completed]
 
 permissions:
@@ -55,10 +57,10 @@ jobs:
             const isMain = run?.path === ".github/workflows/crypto_runner.yml" &&
               /^Crypto Logger \| Main(?: \| #\d+)?$/.test(run.name);
             const isHistory = run?.path === ".github/workflows/binance_history_100.yml" &&
-              run.name === "Binance History | 102 Markets" &&
+              ["Binance History | 102 Markets", "Market History | 102 Markets"].includes(run.name) &&
               run.event === "workflow_dispatch" && run.head_branch === "main";
             const isLive = run?.path === ".github/workflows/binance_live_102.yml" &&
-              run.name === "Binance Live | 102 Markets" &&
+              ["Binance Live | 102 Markets", "Market Live | 102 Markets"].includes(run.name) &&
               run.event === "workflow_dispatch" && run.head_branch === "main";
             if (!run || (!supported.has(run.name) && !isMain && !isHistory && !isLive) || !failures.has(run.conclusion) ||
                 run.repository?.full_name !== `${owner}/${repo}` ||

@@ -1,19 +1,19 @@
-name: Binance History | 102 Markets
-run-name: Binance History | ${{ inputs.mode || 'download' }} | batch ${{ github.run_number }}
+name: Market History | 102 Markets
+run-name: Market History | ${{ inputs.mode || 'download' }} | batch ${{ github.run_number }}
 
 on:
   workflow_dispatch:
     inputs:
       exchange:
-        description: Binance only while Kraken collection is paused
+        description: Select the exchange to import
         type: choice
-        options: [binance]
+        options: [binance, kraken]
         default: binance
         required: true
       mode:
-        description: Plan base history, resume base downloads, or extend official daily history through October 25
+        description: Binance plan/download/extend; Kraken plan/download/q3/october
         type: choice
-        options: [plan, download, extend]
+        options: [plan, download, extend, q3, october]
         default: download
         required: true
       max_files:
@@ -26,12 +26,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: binance-history-102
+  group: market-data-102
   cancel-in-progress: false
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  HISTORY_CODE_SHA: 807cb29cdc999bb864c37dca67e9acad587e1f92
+  HISTORY_CODE_SHA: 16dba552fb482fe6e091f2e5a8afb85e86ac8643
 
 jobs:
   history:
@@ -68,19 +68,18 @@ jobs:
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         shell: bash
         run: |
-          if [[ "$HISTORY_EXCHANGE" != 'binance' ]]; then
-            echo 'Kraken history is paused; Binance is the only permitted exchange.' >&2
-            exit 2
-          fi
-          if [[ "$HISTORY_MODE" == 'extend' ]]; then
-            python private_source/binance_history/extension.py
-          else
-            python private_source/binance_history/run.py
-          fi
+          case "$HISTORY_EXCHANGE:$HISTORY_MODE" in
+            binance:plan|binance:download) python private_source/binance_history/run.py ;;
+            binance:extend) python private_source/binance_history/extension.py ;;
+            kraken:plan) python private_source/binance_history/kraken_extension.py ;;
+            kraken:download) python private_source/binance_history/kraken_run.py ;;
+            kraken:q3|kraken:october) python private_source/binance_history/kraken_extension.py ;;
+            *) echo 'Unsupported exchange/mode combination' >&2; exit 2 ;;
+          esac
 
       - name: Send history batch email
         id: history_email
-        if: always() && steps.private_code.outcome == 'success'
+        if: always() && steps.private_code.outcome == 'success' && inputs.exchange == 'binance'
         continue-on-error: true
         timeout-minutes: 1
         env:
@@ -107,7 +106,7 @@ jobs:
               fields=[('Status','status'),('Market','pair'),('Market index','market_index'),
                       ('Month','month'),('Next uncommitted UTC minute','next_uncommitted_minute_utc'),
                       ('Reason','reason'),('Error code','error_code')]
-              lines=['## Binance history checkpoint','','| Field | Value |','| --- | --- |']
+              lines=['## Market history checkpoint','','| Field | Value |','| --- | --- |']
               for title,key in fields:
                   value=str(data.get(key) or '-').replace('|','/')
                   lines.append(f'| {title} | {value} |')
@@ -117,7 +116,7 @@ jobs:
                     f"next uncommitted minute {data.get('next_uncommitted_minute_utc','unknown')}.")
           else:
               with summary.open('a',encoding='utf-8') as out:
-                  out.write('## Binance history checkpoint\n\nNo status file was created.\n')
+                  out.write('## Market history checkpoint\n\nNo status file was created.\n')
           PY
 
       - name: Remove private source and temporary report
