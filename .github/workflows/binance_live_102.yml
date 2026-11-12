@@ -1,5 +1,5 @@
 name: Binance Live | 102 Markets
-run-name: Market Live | manual batch ${{ github.run_number }}
+run-name: Binance Live | manual batch ${{ github.run_number }}
 
 on:
   workflow_dispatch:
