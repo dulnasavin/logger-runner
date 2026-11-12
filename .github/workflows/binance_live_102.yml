@@ -1,15 +1,9 @@
-name: Market Live | 102 Markets
-run-name: Market Live | manual batch ${{ github.run_number }}
+name: Binance Live | 102 Markets
+run-name: Binance Live | manual batch ${{ github.run_number }}
 
 on:
   workflow_dispatch:
     inputs:
-      exchange:
-        description: Select Binance or Kraken collection
-        required: true
-        default: binance
-        type: choice
-        options: [binance, kraken]
       pair:
         description: Optional one-market check; blank processes all 102
         required: false
@@ -52,18 +46,11 @@ jobs:
 
       - name: Check verified history gate and collect closed minutes
         env:
-          HISTORY_EXCHANGE: ${{ inputs.exchange || 'binance' }}
           HISTORY_LIVE_PRODUCTION: 'YES'
           HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
           HISTORY_LIVE_MAX_MINUTES: '55'
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-        shell: bash
-        run: |
-          case "$HISTORY_EXCHANGE" in
-            binance) python private_source/binance_history/live.py ;;
-            kraken) python private_source/binance_history/kraken_live.py ;;
-            *) echo 'Unsupported exchange' >&2; exit 2 ;;
-          esac
+        run: python private_source/binance_history/live.py
 
       - name: Remove private source
         if: always()
