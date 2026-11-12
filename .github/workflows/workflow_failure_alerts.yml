@@ -17,6 +17,7 @@ on:
       - "Binance Live | 102 Markets"
       - "Market History | 102 Markets"
       - "Market Live | 102 Markets"
+      - "Kraken Live | 102 Markets"
     types: [completed]
 
 permissions:
@@ -59,9 +60,12 @@ jobs:
             const isHistory = run?.path === ".github/workflows/binance_history_100.yml" &&
               ["Binance History | 102 Markets", "Market History | 102 Markets"].includes(run.name) &&
               run.event === "workflow_dispatch" && run.head_branch === "main";
-            const isLive = run?.path === ".github/workflows/binance_live_102.yml" &&
-              ["Binance Live | 102 Markets", "Market Live | 102 Markets"].includes(run.name) &&
-              run.event === "workflow_dispatch" && run.head_branch === "main";
+            const isLive = (
+              (run?.path === ".github/workflows/binance_live_102.yml" &&
+                ["Binance Live | 102 Markets", "Market Live | 102 Markets"].includes(run.name)) ||
+              (run?.path === ".github/workflows/kraken_live_102.yml" &&
+                run.name === "Kraken Live | 102 Markets")
+            ) && run.event === "workflow_dispatch" && run.head_branch === "main";
             if (!run || (!supported.has(run.name) && !isMain && !isHistory && !isLive) || !failures.has(run.conclusion) ||
                 run.repository?.full_name !== `${owner}/${repo}` ||
                 !Number.isSafeInteger(run.id) || run.id <= 0 ||
