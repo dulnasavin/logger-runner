@@ -53,7 +53,7 @@ jobs:
             const {owner, repo} = context.repo;
             const supported = new Set([
               "CSV Audit", "CSV Maintenance", "Neon Audit | Weekly", "Neon Audit | Daily", "Neon Maintenance",
-              "Neon Schema | Controlled Migration", "Crypto Logger | Staging", "Workflow Security", "CodeQL Advanced", "Main Queue Health"
+              "Neon Schema | Controlled Migration", "Crypto Logger | Staging", "Workflow Security", "CodeQL Advanced"
             ]);
             const failures = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
             const isMain = run?.path === ".github/workflows/crypto_runner.yml" &&
@@ -67,7 +67,10 @@ jobs:
               (run?.path === ".github/workflows/kraken_live_102.yml" &&
                 run.name === "Kraken Live | 102 Markets")
             ) && run.event === "workflow_dispatch" && run.head_branch === "main";
-            if (!run || (!supported.has(run.name) && !isMain && !isHistory && !isLive) || !failures.has(run.conclusion) ||
+            const isQueueHealth = run?.path === ".github/workflows/main_queue_health.yml" &&
+              run.name === "Main Queue Health" && run.head_branch === "main" &&
+              ["schedule", "workflow_dispatch"].includes(run.event);
+            if (!run || (!supported.has(run.name) && !isMain && !isHistory && !isLive && !isQueueHealth) || !failures.has(run.conclusion) ||
                 run.repository?.full_name !== `${owner}/${repo}` ||
                 !Number.isSafeInteger(run.id) || run.id <= 0 ||
                 !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 0 ||
