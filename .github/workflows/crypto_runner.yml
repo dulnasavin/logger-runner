@@ -46,7 +46,9 @@ env:
 concurrency:
   group: crypto-main
   cancel-in-progress: false
-  queue: max
+  # A pending run has no observed prices. Keep the newest invocation instead of
+  # sampling today's prices for an invocation that waited hours in the queue.
+  queue: single
 
 jobs:
   validate-invocation:
