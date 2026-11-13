@@ -93,6 +93,11 @@ jobs:
                 core.notice("Detailed history outcome email already acknowledged; skipping duplicate fallback.");
                 return;
               }
+              if (isMain && run.conclusion === "cancelled" && jobs.length === 0) {
+                core.setOutput("required", "false");
+                core.notice("Unsampled pending Main invocation was canceled; queue health monitors current dispatches.");
+                return;
+              }
               const failedJobs = jobs.filter(job => failures.has(job.conclusion)).slice(0, 10);
               jobOutcomes = jobs.slice(0, 20).map(job => `${clean(job.name)}: ${clean(job.conclusion)}`);
               if (failedJobs.length) {
