@@ -73,10 +73,13 @@ jobs:
               "Main runs: https://github.com/" + owner + "/" + repo + "/actions/workflows/crypto_runner.yml"
             ].join("\n");
             if (existing) {
+              if (!(existing.assignees || []).some(user => user.login === owner)) {
+                await github.rest.issues.addAssignees({owner, repo, issue_number: existing.number, assignees: [owner]});
+              }
               core.warning("Main queue remains delayed; issue #" + existing.number);
             } else {
               const created = await github.rest.issues.create({
-                owner, repo, title: "Crypto Logger: Main queue or dispatch delayed", body
+                owner, repo, title: "Crypto Logger: Main queue or dispatch delayed", body, assignees: [owner]
               });
               core.warning("Opened Main queue incident #" + created.data.number);
             }
