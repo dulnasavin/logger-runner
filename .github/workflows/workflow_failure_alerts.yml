@@ -167,6 +167,9 @@ jobs:
               issue.user?.login === "github-actions[bot]";
             const sameRun = issues.find(issue => trusted(issue) && (issue.body || "").includes(runMarker));
             if (sameRun) {
+              if (!(sameRun.assignees || []).some(user => user.login === owner)) {
+                await github.rest.issues.addAssignees({owner, repo, issue_number: sameRun.number, assignees: [owner]});
+              }
               core.setOutput("issue_number", String(sameRun.number));
               core.notice(`Incident already recorded in issue #${sameRun.number}`);
               return;
@@ -191,14 +194,14 @@ jobs:
               "Email status is recorded in the separate Workflow Failure Alerts run."
             ].join("\n");
             if (recurring) {
-              await github.rest.issues.update({owner, repo, issue_number: recurring.number, title: issueTitle, body: issueBody});
+              await github.rest.issues.update({owner, repo, issue_number: recurring.number, title: issueTitle, body: issueBody, assignees: [owner]});
               core.setOutput("issue_number", String(recurring.number));
               core.setOutput("email_required", String(shouldEmail));
               return;
             }
             const created = await github.rest.issues.create({owner, repo,
               title: issueTitle,
-              body: issueBody});
+              body: issueBody, assignees: [owner]});
             core.setOutput("issue_number", String(created.data.number));
 
       - name: Checkout trusted default-branch notification code
