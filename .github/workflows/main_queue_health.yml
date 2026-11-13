@@ -1,0 +1,82 @@
+name: "Main Queue Health"
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      issues: write
+      contents: read
+    steps:
+      - name: Detect stale Main dispatch or queue
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const {owner, repo} = context.repo;
+            const maxAgeMs = 20 * 60 * 1000;
+            const now = Date.now();
+            const latest = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: "crypto_runner.yml", per_page: 1
+            });
+            const newest = latest.data.workflow_runs[0];
+            if (!newest || !Number.isFinite(Date.parse(newest.created_at))) {
+              throw new Error("Cannot verify the latest Main dispatch");
+            }
+            const pending = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: "crypto_runner.yml", status: "pending", per_page: 100
+            });
+            const oldest = pending.data.workflow_runs.reduce((result, run) => {
+              const timestamp = Date.parse(run.created_at);
+              return Number.isFinite(timestamp) && timestamp < result ? timestamp : result;
+            }, Infinity);
+            const stopped = now - Date.parse(newest.created_at) > maxAgeMs;
+            const backlog = oldest !== Infinity && now - oldest > maxAgeMs;
+            const marker = "<!-- crypto-main-queue-health -->";
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", creator: "github-actions[bot]", per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request &&
+              issue.user?.login === "github-actions[bot]" &&
+              (issue.body || "").includes(marker));
+            if (!stopped && !backlog) {
+              if (existing) {
+                await github.rest.issues.update({owner, repo, issue_number: existing.number, state: "closed"});
+                core.notice("Main dispatch and pending queue are within the health window.");
+              }
+              return;
+            }
+            const reasons = [];
+            if (stopped) reasons.push("No new Main dispatch for more than 20 minutes.");
+            if (backlog) reasons.push("At least one Main run has waited pending for more than 20 minutes.");
+            const body = [
+              marker,
+              "Crypto Logger Main is delayed. Price data may still be saved by older runs, but its observation time is not current.",
+              "",
+              ...reasons,
+              "Pending runs reported: " + pending.data.total_count + ".",
+              "Latest dispatch: " + newest.created_at + ".",
+              "Oldest pending run in first 100: " + (oldest === Infinity ? "none" : new Date(oldest).toISOString()) + ".",
+              "",
+              "Inspect the Main runs and runtime-data manifest. Do not treat a queued run as a fresh five-minute price observation.",
+              "This issue closes automatically after a later health check finds both dispatch and pending queue within 20 minutes.",
+              "Main runs: https://github.com/" + owner + "/" + repo + "/actions/workflows/crypto_runner.yml"
+            ].join("\n");
+            if (existing) {
+              core.warning("Main queue remains delayed; issue #" + existing.number);
+            } else {
+              const created = await github.rest.issues.create({
+                owner, repo, title: "Crypto Logger: Main queue or dispatch delayed", body
+              });
+              core.warning("Opened Main queue incident #" + created.data.number);
+            }
