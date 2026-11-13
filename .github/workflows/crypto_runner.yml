@@ -1462,6 +1462,11 @@ jobs:
               `Attempt: ${process.env.GITHUB_RUN_ATTEMPT || "unknown"}`
             ].join("\n");
             if (existing) {
+              if (!(existing.assignees || []).some(user => user.login === owner)) {
+                await github.rest.issues.addAssignees({
+                  owner, repo, issue_number: existing.number, assignees: [owner]
+                });
+              }
               await github.rest.issues.createComment({
                 owner, repo, issue_number: existing.number, body: reminder
               });
@@ -1479,7 +1484,7 @@ jobs:
               "For a core job failure, open its first failed step. No credential value is included here."
             ].join("\n");
             const created = await github.rest.issues.create({
-              owner, repo, title, body, labels: [label]
+              owner, repo, title, body, labels: [label], assignees: [owner]
             });
             core.warning(`Created trusted fallback issue #${created.data.number}`);
 
@@ -1559,6 +1564,11 @@ jobs:
             ];
             const reminder = [`Provider alert delivery remains unconfirmed. Event: **${eventType}**; severity: **${severity}**; run: ${runUrl}`, ...evidence].join("\n");
             if (existing) {
+              if (!(existing.assignees || []).some(user => user.login === owner)) {
+                await github.rest.issues.addAssignees({
+                  owner, repo, issue_number: existing.number, assignees: [owner]
+                });
+              }
               await github.rest.issues.createComment({
                 owner, repo, issue_number: existing.number, body: reminder
               });
@@ -1577,7 +1587,7 @@ jobs:
               "The event remains pending in private runtime state for a later eligible retry with the same event ID. No provider API secret is included."
             ].join("\n");
             const created = await github.rest.issues.create({
-              owner, repo, title, body, labels: [label]
+              owner, repo, title, body, labels: [label], assignees: [owner]
             });
             core.warning(`Created trusted provider fallback issue #${created.data.number}`);
 
