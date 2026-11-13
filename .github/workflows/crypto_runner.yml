@@ -190,8 +190,32 @@ jobs:
           token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ref: ${{ env.PRIVATE_DATA_BRANCH }}
           path: private_data
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: false
+
+      - name: "04.3a Load deletion provenance for intentional CSV recreation"
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          if jq -e '(.last_action == "intentional_file_delete") or (.file_status == "intentionally_deleted")' private_data/csv_state.json >/dev/null; then
+            echo "Intentional deletion requires complete Git history before CSV recreation"
+            ASKPASS="${RUNNER_TEMP}/crypto-history-askpass"
+            trap 'rm -f "$ASKPASS"' EXIT
+            printf '%s\n' '#!/bin/sh' \
+              'case "$1" in' \
+              '  *Username*) printf "%s\n" "x-access-token" ;;' \
+              '  *Password*) printf "%s\n" "$PRIVATE_DATA_TOKEN" ;;' \
+              '  *) exit 1 ;;' \
+              'esac' > "$ASKPASS"
+            chmod 700 "$ASKPASS"
+            export GIT_ASKPASS="$ASKPASS"
+            if test "$(git -C private_data rev-parse --is-shallow-repository)" = true; then
+              git -C private_data fetch --unshallow origin "$PRIVATE_DATA_BRANCH"
+            fi
+            test "$(git -C private_data rev-parse --is-shallow-repository)" = false
+          fi
 
       - name: "04.4 Verify runtime-data branch and copy named state"
         id: stage_04_4_verify_runtime_data_branch_and_copy_named_state
