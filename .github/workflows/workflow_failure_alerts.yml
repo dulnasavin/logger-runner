@@ -25,7 +25,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: workflow-alert-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  # Serialize incidents for the same source workflow and outcome so parallel
+  # completions cannot each create a duplicate issue before seeing one another.
+  group: workflow-alert-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.conclusion }}
   cancel-in-progress: false
   queue: max
 
@@ -91,6 +93,11 @@ jobs:
                   step.name === "Send history batch email" && step.conclusion === "success"))) {
                 core.setOutput("required", "false");
                 core.notice("Detailed history outcome email already acknowledged; skipping duplicate fallback.");
+                return;
+              }
+              if (isMain && run.conclusion === "cancelled" && jobs.length === 0) {
+                core.setOutput("required", "false");
+                core.notice("Unsampled pending Main invocation was canceled; queue health monitors current dispatches.");
                 return;
               }
               const failedJobs = jobs.filter(job => failures.has(job.conclusion)).slice(0, 10);
