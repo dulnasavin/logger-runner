@@ -12,6 +12,8 @@ permissions:
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
   PRIVATE_DATA_BRANCH: runtime-data
+  # Free alert channel is GitHub Issues; avoid queuing Make requests at quota reset.
+  MAKE_EMAIL_ENABLED: "false"
 
 # ============================================================================
 # CRYPTO PRICE LOGGER - PRODUCTION S2
@@ -960,6 +962,12 @@ jobs:
             exit 0
           fi
           echo "required=true" >> "$GITHUB_OUTPUT"
+          if [ "$MAKE_EMAIL_ENABLED" != true ]; then
+            echo "delivery_status=failed" >> "$GITHUB_OUTPUT"
+            echo "delivery_error_code=MAKE_DISABLED_FREE_PLAN" >> "$GITHUB_OUTPUT"
+            echo "::notice::Make email is disabled; the trusted GitHub Issue fallback records this alert."
+            exit 0
+          fi
           echo "delivery_status=pending" >> "$GITHUB_OUTPUT"
           ALERT_TYPE="$(cat "$ALERT_FILE")"
           echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
@@ -1016,6 +1024,12 @@ jobs:
           echo "alert_severity=$EVENT_SEVERITY" >> "$GITHUB_OUTPUT"
           echo "event_id=$EVENT_ID" >> "$GITHUB_OUTPUT"
           echo "fingerprint=$EVENT_FINGERPRINT" >> "$GITHUB_OUTPUT"
+          if [ "$MAKE_EMAIL_ENABLED" != true ]; then
+            echo "delivery_status=failed" >> "$GITHUB_OUTPUT"
+            echo "delivery_error_code=MAKE_DISABLED_FREE_PLAN" >> "$GITHUB_OUTPUT"
+            echo "::notice::Make email is disabled; the trusted GitHub Issue fallback records this event."
+            exit 0
+          fi
           if timeout --kill-after=5s 45s python "$NOTIFIER" --alert-type "$EVENT_TYPE"; then
             echo "delivery_status=accepted" >> "$GITHUB_OUTPUT"
           else
