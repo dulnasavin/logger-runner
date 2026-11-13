@@ -25,7 +25,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: workflow-alert-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  # Serialize incidents for the same source workflow and outcome so parallel
+  # completions cannot each create a duplicate issue before seeing one another.
+  group: workflow-alert-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.conclusion }}
   cancel-in-progress: false
   queue: max
 
