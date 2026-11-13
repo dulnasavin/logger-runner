@@ -962,6 +962,8 @@ jobs:
             exit 0
           fi
           echo "required=true" >> "$GITHUB_OUTPUT"
+          ALERT_TYPE="$(cat "$ALERT_FILE")"
+          echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
           if [ "$MAKE_EMAIL_ENABLED" != true ]; then
             echo "delivery_status=failed" >> "$GITHUB_OUTPUT"
             echo "delivery_error_code=MAKE_DISABLED_FREE_PLAN" >> "$GITHUB_OUTPUT"
@@ -969,8 +971,6 @@ jobs:
             exit 0
           fi
           echo "delivery_status=pending" >> "$GITHUB_OUTPUT"
-          ALERT_TYPE="$(cat "$ALERT_FILE")"
-          echo "alert_type=$ALERT_TYPE" >> "$GITHUB_OUTPUT"
           test -s "$NOTIFIER" || { echo "❌ alert_email.py unavailable"; exit 1; }
           test -n "$ALERT_MAKE_WEBHOOK_URL" || { echo "❌ ALERT_MAKE_WEBHOOK_URL missing"; exit 1; }
           test -n "$ALERT_MAKE_API_KEY" || { echo "❌ ALERT_MAKE_API_KEY missing"; exit 1; }
