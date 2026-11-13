@@ -1412,11 +1412,15 @@ jobs:
               owner, repo, state: "open", labels: label, per_page: 100
             });
             const trustedAuthors = new Set(["github-actions[bot]", owner.toLowerCase()]);
-            const existing = issues.find(issue =>
+            const matching = issues.filter(issue =>
               !issue.pull_request &&
               trustedAuthors.has((issue.user?.login || "").toLowerCase()) &&
               issue.labels.some(item => (item.name || item) === label) &&
               (issue.body || "").includes(marker)
+            ).sort((a, b) => b.number - a.number);
+            // GitHub disables comments after 2,500. Rotate early and choose the newest writable issue.
+            const existing = matching.find(issue =>
+              Number.isSafeInteger(issue.comments) && issue.comments < 2400
             );
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
             const deliveryHelp = {
@@ -1520,11 +1524,15 @@ jobs:
               owner, repo, state: "open", labels: label, per_page: 100
             });
             const trustedAuthors = new Set(["github-actions[bot]", owner.toLowerCase()]);
-            const existing = issues.find(issue =>
+            const matching = issues.filter(issue =>
               !issue.pull_request &&
               trustedAuthors.has((issue.user?.login || "").toLowerCase()) &&
               issue.labels.some(item => (item.name || item) === label) &&
               (issue.body || "").includes(marker)
+            ).sort((a, b) => b.number - a.number);
+            // GitHub disables comments after 2,500. Rotate early and choose the newest writable issue.
+            const existing = matching.find(issue =>
+              Number.isSafeInteger(issue.comments) && issue.comments < 2400
             );
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
             const deliveryHelp = {
