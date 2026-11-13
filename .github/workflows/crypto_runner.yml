@@ -1467,6 +1467,13 @@ jobs:
                   owner, repo, issue_number: existing.number, assignees: [owner]
                 });
               }
+              // A sustained Make outage must not produce a new email every five minutes.
+              // New fingerprints still create a new incident immediately.
+              const lastNotice = Date.parse(existing.updated_at || "");
+              if (Number.isFinite(lastNotice) && Date.now() - lastNotice < 24 * 60 * 60 * 1000) {
+                core.notice("Matching incident already recorded; daily reminder is not due.");
+                return;
+              }
               await github.rest.issues.createComment({
                 owner, repo, issue_number: existing.number, body: reminder
               });
@@ -1568,6 +1575,13 @@ jobs:
                 await github.rest.issues.addAssignees({
                   owner, repo, issue_number: existing.number, assignees: [owner]
                 });
+              }
+              // A sustained Make outage must not produce a new email every five minutes.
+              // New fingerprints still create a new incident immediately.
+              const lastNotice = Date.parse(existing.updated_at || "");
+              if (Number.isFinite(lastNotice) && Date.now() - lastNotice < 24 * 60 * 60 * 1000) {
+                core.notice("Matching incident already recorded; daily reminder is not due.");
+                return;
               }
               await github.rest.issues.createComment({
                 owner, repo, issue_number: existing.number, body: reminder
