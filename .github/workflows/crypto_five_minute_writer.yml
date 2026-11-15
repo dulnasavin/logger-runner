@@ -36,7 +36,7 @@ jobs:
           fi
 
       - name: Checkout public release authority
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -49,7 +49,7 @@ jobs:
           --github-output "$GITHUB_OUTPUT"
 
       - name: Checkout immutable source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
@@ -58,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout runtime data
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.PRIVATE_REPOSITORY }}
           token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
