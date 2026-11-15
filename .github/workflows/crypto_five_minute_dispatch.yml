@@ -1,0 +1,91 @@
+name: "Crypto Logger | Three-lane dispatcher"
+run-name: "Crypto Logger | Dispatch | ${{ inputs.slot_utc }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      slot_utc:
+        description: "Current five-minute UTC slot, YYYY-MM-DDTHH:MM:00Z"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+concurrency:
+  group: crypto-five-minute-dispatcher
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  choose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SLOT_UTC: ${{ inputs.slot_utc }}
+    steps:
+      - name: Require current protected slot
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          python - <<'PY'
+          import os
+          from datetime import datetime, timezone, timedelta
+          slot = os.environ["SLOT_UTC"]
+          assert len(slot) == 20 and slot.endswith("Z")
+          value = datetime.strptime(slot, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+          assert value.minute % 5 == 0 and value.second == 0
+          now = datetime.now(timezone.utc)
+          assert value - timedelta(seconds=30) <= now <= value + timedelta(minutes=4, seconds=30)
+          PY
+
+      - name: Choose free lane and dispatch exactly this slot
+        id: route
+        env:
+          WORKFLOW: crypto_collector_v2.yml
+        run: |
+          set -euo pipefail
+          runs="$(gh api "repos/$GH_REPO/actions/workflows/$WORKFLOW/runs?per_page=100")"
+          if jq -e --arg slot "$SLOT_UTC" \
+            '.workflow_runs[] | select((.display_title // "") | endswith(" | " + $slot))' \
+            <<< "$runs" >/dev/null; then
+            echo "Slot $SLOT_UTC was already dispatched"
+            exit 0
+          fi
+          # Count queued as occupied. GitHub may delay a run appearing in this
+          # API; a later duplicate still fails at the receipt identity checks.
+          busy="$(jq -r '.workflow_runs[] |
+            select(.status == "queued" or .status == "waiting" or
+                   .status == "pending" or .status == "requested" or
+                   .status == "in_progress") |
+            (.display_title // "") | capture("Crypto Logger \\| (?<lane>main|main2|main3) \\|").lane' <<< "$runs" | sort -u)"
+          lane=""
+          for candidate in main main2 main3; do
+            if ! grep -qx "$candidate" <<< "$busy"; then
+              lane="$candidate"
+              break
+            fi
+          done
+          test -n "$lane" || { echo "::error::All three collector lanes occupied"; exit 1; }
+          dispatched="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          gh workflow run "$WORKFLOW" --ref main \
+            -f lane="$lane" -f slot_utc="$SLOT_UTC" -f dispatched_at_utc="$dispatched"
+          echo "lane=$lane" >> "$GITHUB_OUTPUT"
+          echo "Dispatched $SLOT_UTC to $lane at $dispatched"
+
+      - name: Record a missed dispatch or routing failure
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+          title="Five-minute dispatcher gap"
+          body="Slot ${SLOT_UTC} could not be assigned or dispatched. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. The gap audit must inspect all 102 markets."
+          number="$(gh issue list --state open --search "$title in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          if test -n "$number"; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
