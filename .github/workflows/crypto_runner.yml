@@ -195,18 +195,43 @@ jobs:
           ref: ${{ env.PRIVATE_DATA_BRANCH }}
           path: private_data
           fetch-depth: 0
+          # Keep the complete commit graph for generation and reset proofs while
+          # fetching historical CSV blobs only when a verified recovery needs them.
+          filter: blob:none
           persist-credentials: false
 
       - name: "04.4 Verify runtime-data branch and copy named state"
         id: stage_04_4_verify_runtime_data_branch_and_copy_named_state
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
+          test "$(git -C private_data rev-parse --is-shallow-repository)" = false
+          ASKPASS="${RUNNER_TEMP}/crypto-checkpoint-askpass"
+          trap 'rm -f "$ASKPASS"' EXIT
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
           python "private_logger/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" \
             --mode prepare-logger \
             --path private_data/price_log.csv \
             --state-path private_data/csv_state.json \
             --git-repository private_data
+          # Materialize the last Main checkpoint before VPN startup. Historical
+          # objects may be fetched on demand here, using the scoped token only
+          # for this step; the CSV audit then runs without GitHub credentials.
+          CHECKPOINT="$(git -C private_data log --first-parent -1 --format=%H -- runtime_manifest.json)"
+          [[ "$CHECKPOINT" =~ ^[0-9a-f]{40}$ ]] || { echo "❌ Missing Main checkpoint"; exit 1; }
+          git -C private_data show "$CHECKPOINT:runtime_manifest.json" >/dev/null
+          git -C private_data show "$CHECKPOINT:csv_state.json" >/dev/null
+          git -C private_data show "$CHECKPOINT:price_log.csv" >/dev/null
           for state_file in csv_state.json provider_incident_state.json; do
             test -f "private_data/$state_file" || {
               echo "❌ runtime-data is missing $state_file; restore it on runtime-data before activation"
