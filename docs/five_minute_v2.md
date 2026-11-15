@@ -93,6 +93,11 @@ still enabled; no production cutover has occurred.
    The legacy timestamp assigned before provider calls is a batch label,
    not proof of the precise minute for every coin. Benchmark one month of
    receipt intake and test the closeout and restore before relying on it.
+   Rebuild provider incident/FX state updates in the ordered v2 writer: the
+   collector currently reads the last legacy provider state but does not
+   publish its new state, so provider alerts and FX history would become
+   stale after cutover. Reject an out-of-order state update and prove incident
+   delivery acknowledgement and retries in concurrent-lane tests.
 7. Verify the 48-hour repair horizon against
    actual Binance/Kraken source availability. A missed five-minute spot quote
    cannot be recreated as an identical quote after its instant has passed.
