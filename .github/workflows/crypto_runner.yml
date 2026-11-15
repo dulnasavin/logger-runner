@@ -78,6 +78,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Require legacy five-minute collection mode
+        run: |
+          set -euo pipefail
+          python scripts/verify_collection_mode.py --require legacy
+
       - name: Validate enabled logger release capability
         id: release
         run: >-
