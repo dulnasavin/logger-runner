@@ -1,8 +1,9 @@
 # Five-minute collector v2: activation and failure rules
 
 The existing Main logger is authoritative while the protected collection mode
-is `legacy`. The new workflows are manual-only. No production schedule is
-configured.
+is `legacy`. A replacement cron-job.org entry targeting the new dispatcher is
+prepared at minutes 03, 08, …, 58 but remains disabled. The old Main cron is
+still enabled; no production cutover has occurred.
 
 ## Data contract
 
@@ -13,7 +14,9 @@ configured.
   running jobs, picks Main, Main 2, then Main 3, and creates one exclusive
   private claim for that slot. If Main finishes after Main 2 was claimed,
   Main 2 still owns the slot. An unassigned slot is reported to the persistent
-  GitHub issue and must appear in the gap audit.
+  GitHub issue and must appear in the gap audit. Cron itself can silently miss
+  an invocation, so an independent checker must enumerate expected UTC slots
+  from a durable watermark rather than infer expected slots from workflow runs.
 * A collector verifies that the private claim names its lane, slot, and
   dispatcher run before it starts. The protected mode file makes legacy Main
   and v2 mutually exclusive at invocation time. Completion estimates may be
@@ -64,10 +67,17 @@ configured.
    collection. An accidental direct call to a v2 collector fails without a
    valid private slot claim. The previous Main run must be drained before
    this switch because a run that already passed its gate can finish later.
-6. Only then decide a dispatch frequency. Audit an explicit UTC slot range;
-   a green workflow is not proof that 102 prices were observed. Monitor
-   receipt backlog and pending-writer queue independently.
-7. Implement and verify archival repair and monthly Releases before removing
+6. Before enabling the replacement cron, implement and exercise an independent
+   expected-slot watchdog with a durable audit watermark, alert delivery,
+   claimed-but-undispatched recovery, and outage replay. Test missed cron calls,
+   a discarded queued Actions run, and a multi-day outage. The watchdog must
+   inspect receipts and committed coverage, not merely green workflow results;
+   it must never advance its watermark past an unaudited slot. Monitor writer
+   backlog separately. This is a cutover gate, not a claim of punctuality.
+7. Choose the watchdog cadence and verify the 48-hour repair horizon against
+   actual Binance/Kraken source availability. A missed five-minute spot quote
+   cannot be recreated as an identical quote after its instant has passed.
+8. Implement and verify archival repair and monthly Releases before removing
    the legacy CSV. Keep an independent backup and a restore rehearsal.
 
 ## Failure and recovery
@@ -75,6 +85,7 @@ configured.
 | Condition | Required outcome |
 | --- | --- |
 | Main/Main 2 occupied | Choose the next free lane. |
+| Cron request absent or GitHub drops a queued run | Independent watchdog records the expected slot as missing, alerts, and starts verified archival repair when available; do not report a fresh quote for an elapsed instant. |
 | Main finishes after Main 2's claim | Keep Main 2 as owner; Main does not start this slot. |
 | Old cron still calls legacy Main after mode switch | Reject before collection and alert; retarget cron to the dispatcher. |
 | Claim saved but workflow dispatch fails | Keep the claim and raise an incident. Check Actions for an existing run. If none exists, manually dispatch the claimed lane with the original claim run ID; do not assign a new lane. |
@@ -95,3 +106,14 @@ claim is the assignment record; the API is only an occupancy hint. A direct
 manual trigger or a late API response cannot authorize a different lane for
 the same slot. Duplicate or conflicting receipts remain visible, and the
 writer's receipt identity and slot checks are the final data guard.
+
+## Reliability boundary
+
+An exclusive private claim can enforce one assigned lane per slot when the
+claim store is available. It cannot force cron-job.org or GitHub Actions to
+start at an exact second. Both services can delay work; GitHub can discard a
+queued job. The operational objective is therefore no silent missing slot,
+no duplicate authoritative row, and bounded detection and repair once the
+providers recover. A true wall-clock guarantee needs an always-on collector
+and scheduler with independent power/network paths; even those cannot
+manufacture an exchange quote that was never captured.
