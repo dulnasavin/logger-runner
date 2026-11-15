@@ -44,8 +44,9 @@ still enabled; no production cutover has occurred.
   immutable receipts, verifies each ledger and gap, and builds 102 coin CSVs
   plus a manifest. A manual workflow stages the assets, uploads a draft
   private Release, downloads all 103 assets, and verifies their SHA-256 values
-  before publication. A partial month stays labelled PARTIAL. Complete slot
-  coverage still awaits exchange source comparison.
+  before publication. A partial month stays labelled PARTIAL. Complete v2
+  slot coverage still awaits exchange source comparison; a pre-cutover month
+  is labelled BASELINE_ONLY_UNAUDITED.
   A synthetic 29-day benchmark measured about 54 MB of monthly content
   rewritten by one 102-coin update; that design is not suitable for active
   five-minute commits.

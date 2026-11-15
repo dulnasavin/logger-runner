@@ -21,7 +21,8 @@ def expected(archive):
     manifest = json.loads((archive / "manifest.json").read_text())
     if (manifest.get("version") != 1 or not isinstance(manifest.get("generation"), int)
             or manifest["generation"] < 1 or not MONTH.fullmatch(manifest.get("month_nz", ""))
-            or manifest.get("status") not in ("PARTIAL", "COVERAGE_COMPLETE_PENDING_SOURCE_COMPARISON")
+            or manifest.get("status") not in ("PARTIAL", "V2_COVERAGE_COMPLETE_PENDING_SOURCE_COMPARISON",
+                                               "BASELINE_ONLY_UNAUDITED")
             or not isinstance(manifest.get("assets"), dict) or len(manifest["assets"]) != 102):
         raise ValueError("Invalid monthly archive manifest or roster size")
     year, month = manifest["month_nz"].split("-")
