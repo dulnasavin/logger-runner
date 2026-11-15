@@ -1,0 +1,111 @@
+name: "Crypto Logger | One-time partition migration"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-five-minute-migration
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+      DATA_BRANCH: runtime-data
+    steps:
+      - name: Require public main
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Checkout public authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Select pinned private source
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability logger
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout immutable source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          path: private_source
+          persist-credentials: false
+
+      - name: Checkout runtime-data snapshot
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.DATA_BRANCH }}
+          path: private_data
+          persist-credentials: false
+
+      - name: Copy and verify legacy rows before publishing
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          SCRIPT="$GITHUB_WORKSPACE/private_source/Crypto Logger-Private Repo/five_minute_store.py"
+          test -s "$SCRIPT"
+          test -s private_data/price_log.csv
+          test -s private_data/csv_state.json
+          test ! -e private_data/five_minute/partition_manifest.json || {
+            echo "::error::Migration already published; do not overwrite it"
+            exit 1
+          }
+          START_CSV_SHA="$(git -C private_data rev-parse HEAD:price_log.csv)"
+          START_STATE_SHA="$(git -C private_data rev-parse HEAD:csv_state.json)"
+          python "$SCRIPT" migrate \
+            --source private_data/price_log.csv \
+            --state private_data/csv_state.json \
+            --destination "${RUNNER_TEMP}/partition-migration"
+          python "$SCRIPT" verify --root "${RUNNER_TEMP}/partition-migration"
+          ASKPASS="${RUNNER_TEMP}/five-minute-migrate-askpass"
+          trap 'rm -f "$ASKPASS"' EXIT
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          cd private_data
+          git fetch origin "$DATA_BRANCH"
+          git reset --hard FETCH_HEAD
+          test "$(git rev-parse HEAD:price_log.csv)" = "$START_CSV_SHA" || {
+            echo "::error::Legacy CSV changed during migration; rerun from a fresh snapshot"
+            exit 1
+          }
+          test "$(git rev-parse HEAD:csv_state.json)" = "$START_STATE_SHA" || {
+            echo "::error::Generation changed during migration; rerun"
+            exit 1
+          }
+          test ! -e five_minute/partition_manifest.json
+          mkdir -p five_minute
+          cp -a -- "${RUNNER_TEMP}/partition-migration/." five_minute/
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add -- five_minute/prices five_minute/partition_manifest.json
+          git commit -m "Migrate verified legacy CSV into per-coin monthly partitions"
+          git push origin "HEAD:$DATA_BRANCH"
+          local_sha="$(git rev-parse HEAD)"
+          remote_sha="$(git ls-remote origin "refs/heads/$DATA_BRANCH" | awk '{print $1}')"
+          test "$local_sha" = "$remote_sha"
+          echo "Verified migration commit: $local_sha" >> "$GITHUB_STEP_SUMMARY"
+          echo "The original price_log.csv and csv_state.json remain intact." >> "$GITHUB_STEP_SUMMARY"
