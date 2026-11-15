@@ -33,11 +33,19 @@ still enabled; no production cutover has occurred.
   The writer is a separate concurrency group with a maximum pending queue.
 * The writer replays the selected receipt from the current branch head,
   validates the dataset generation and deletion tombstones, and commits
-  per-symbol/year/month CSVs, daily ledgers and a hash manifest. A changed
-  remote head causes a fresh replay; force push is forbidden.
+  one small ledger for the UTC slot. It does not rewrite the 102 growing
+  monthly CSVs at every run. A changed remote head causes a fresh replay;
+  force push is forbidden.
   A blank writer input reconciles up to 50 unapplied inbox receipts; run it
   again if a larger backlog remains. The collector queues this reconciliation
   after each durable receipt publication.
+* The migration produces static per-symbol/year/month CSV baselines from
+  the legacy file. A monthly closeout must combine those baselines with the
+  immutable receipts, verify every row and gap, and publish 102 coin CSVs plus
+  a manifest to a private Release. This closeout is still to implement.
+  A synthetic 29-day benchmark measured about 54 MB of monthly content
+  rewritten by one 102-coin update; that design is not suitable for active
+  five-minute commits.
 * A receipt that finishes after its named slot is stored as late evidence.
   It does not count as an on-time observation in the gap audit.
 * A five-minute quote and a reconstructed one-minute candle close are distinct
@@ -64,29 +72,33 @@ still enabled; no production cutover has occurred.
    and damaged partition. Inject delayed and stale GitHub run listings; verify
    that a busy Main cannot be assigned when Main 2 is free. Confirm writer
    commits and remote SHAs.
-5. Change the protected collection mode to `v2` and retarget the one external
-   cron job to the dispatcher. An accidental call to old Main now fails before
-   collection. An accidental direct call to a v2 collector fails without a
-   valid private slot claim. The previous Main run must be drained before
-   this switch because a run that already passed its gate can finish later.
-6. Before enabling the replacement cron, replace the current run-list-only
+5. Before enabling the replacement cron, replace the current run-list-only
    lane choice with a durable lane occupancy record and completion or lease
    expiry/fencing rules. A stale Actions run list can otherwise assign an
    already busy Main while Main 2 is free, causing Main to queue. Test this
    with delayed API visibility, cancellation, late completion, and concurrent
    claims. Keep one exclusive claim per slot.
-7. Before enabling the replacement cron, implement and exercise an independent
+6. Exercise the independent
    expected-slot watchdog with a durable audit watermark, alert delivery,
    claimed-but-undispatched recovery, and outage replay. Test missed cron calls,
    a discarded queued Actions run, and a multi-day outage. The watchdog must
    inspect receipts and committed coverage, not merely green workflow results;
    it must never advance its watermark past an unaudited slot. Monitor writer
    backlog separately. This is a cutover gate, not a claim of punctuality.
-8. Choose the watchdog cadence and verify the 48-hour repair horizon against
+7. Add actual per-market observation timing and provider/source provenance.
+   The legacy timestamp assigned before provider calls is a batch label,
+   not proof of the precise minute for every coin. Benchmark one month of
+   receipt intake and test the closeout and restore before relying on it.
+8. Verify the 48-hour repair horizon against
    actual Binance/Kraken source availability. A missed five-minute spot quote
    cannot be recreated as an identical quote after its instant has passed.
 9. Implement and verify archival repair and monthly Releases before removing
    the legacy CSV. Keep an independent backup and a restore rehearsal.
+10. After all gates pass, stop the old cron, drain old Main, migrate and verify
+    the last old CSV batch, set protected `v2` mode with the exact
+    `first_slot_utc`, and enable the prepared dispatcher cron. A direct call
+    to old Main or an unclaimed collector will then fail closed. Never switch
+    the mode while an old Main run is still active.
 
 ## Failure and recovery
 
@@ -127,3 +139,4 @@ no duplicate authoritative row, and bounded detection and repair once the
 providers recover. A true wall-clock guarantee needs an always-on collector
 and scheduler with independent power/network paths; even those cannot
 manufacture an exchange quote that was never captured.
+
