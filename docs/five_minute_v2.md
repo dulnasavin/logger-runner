@@ -17,7 +17,7 @@ configured.
 * A collector verifies that the private claim names its lane, slot, and
   dispatcher run before it starts. The protected mode file makes legacy Main
   and v2 mutually exclusive at invocation time. Completion estimates may be
-  displayed for capacity planning, but the actual occupied state at the
+  updated from recent runs for capacity planning, but the actual occupied state at the
   handoff decides routing. GitHub runner startup can be delayed, so a ten
   second check is a target, not a guaranteed execution time.
 * Each collector uses the same pinned private source, VPN, provider consensus,
@@ -77,7 +77,7 @@ configured.
 | Main/Main 2 occupied | Choose the next free lane. |
 | Main finishes after Main 2's claim | Keep Main 2 as owner; Main does not start this slot. |
 | Old cron still calls legacy Main after mode switch | Reject before collection and alert; retarget cron to the dispatcher. |
-| Claim saved but workflow dispatch fails | Keep the claim and raise an incident. Inspect before retry; do not silently assign another lane. |
+| Claim saved but workflow dispatch fails | Keep the claim and raise an incident. Check Actions for an existing run. If none exists, manually dispatch the claimed lane with the original claim run ID; do not assign a new lane. |
 | All lanes occupied, dispatcher delayed, API unavailable | Fail the dispatch and record the slot; audit all 102 markets. |
 | 99 valid prices | Persist those 99 with three named gaps; fail visibly after saving. |
 | Collector canceled before receipt push | Audit marks the whole slot absent. |
