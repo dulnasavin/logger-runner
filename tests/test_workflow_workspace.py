@@ -49,7 +49,7 @@ class WorkflowWorkspaceTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(accepted({**outage, **change}))
         self.assertTrue(accepted({**outage, 'condition_code': 'PRICE_SOURCE_CRITICAL',
-                                  'decisions': {str(n): {'accepted_usd': None} for n in range(11)}}))
+                                  'decisions': {str(n): {'accepted_usd': None} for n in range(102)}}))
 
 
 
@@ -165,7 +165,8 @@ class WorkflowWorkspaceTests(unittest.TestCase):
             event = root / 'event.json'
             payload = {'event_type': 'PRICE_SOURCE_RECOVERED', 'severity': 'RECOVERY',
                        'event_id': 'a' * 32, 'fingerprint': 'b' * 64}
-            env = dict(os.environ, PROVIDER_EVENT_FILE=str(event), GITHUB_OUTPUT=str(root / 'output'))
+            env = dict(os.environ, PROVIDER_EVENT_FILE=str(event), GITHUB_OUTPUT=str(root / 'output'),
+                       MAKE_EMAIL_ENABLED='true')
             event.write_text(json.dumps(payload))
             result = subprocess.run(['bash', '-c', script], cwd=root, env=env,
                                     capture_output=True, text=True)
@@ -205,7 +206,7 @@ class WorkflowWorkspaceTests(unittest.TestCase):
                 output = root / 'output'
                 env = dict(os.environ, RUNNER_TEMP=directory, PROVIDER_EVENT_FILE=str(event),
                            GITHUB_OUTPUT=str(output), ALERT_MAKE_WEBHOOK_URL='offline',
-                           ALERT_MAKE_API_KEY='offline')
+                           ALERT_MAKE_API_KEY='offline', MAKE_EMAIL_ENABLED='true')
 
                 def run(**changes):
                     output.write_text('')
@@ -350,3 +351,4 @@ class WorkflowWorkspaceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
