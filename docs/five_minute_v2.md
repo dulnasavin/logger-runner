@@ -20,6 +20,9 @@ new workflows are manual-only. No production schedule is configured.
   validates the dataset generation and deletion tombstones, and commits
   per-symbol/year/month CSVs, daily ledgers and a hash manifest. A changed
   remote head causes a fresh replay; force push is forbidden.
+  A blank writer input reconciles up to 50 unapplied inbox receipts; run it
+  again if a larger backlog remains. The collector queues this reconciliation
+  after each durable receipt publication.
 * A receipt that finishes after its named slot is stored as late evidence.
   It does not count as an on-time observation in the gap audit.
 * A five-minute quote and a reconstructed one-minute candle close are distinct
