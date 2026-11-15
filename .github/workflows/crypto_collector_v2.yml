@@ -723,20 +723,22 @@ jobs:
           test -s "$FIVE_MINUTE_RECEIPT_PATH"
           PYTHONPATH="private_logger/Crypto Logger-Private Repo" python - <<'PY'
           import json, os
+          from datetime import timedelta
           from pathlib import Path
-          from five_minute_store import receipt_path, validate_receipt
+          from five_minute_store import receipt_path, validate_receipt, instant
           from market_roster import SYMBOLS
           payload = json.loads(Path(os.environ["FIVE_MINUTE_RECEIPT_PATH"]).read_text())
           receipt_hash = validate_receipt(payload, SYMBOLS)
           assert payload["source_code_sha"] == os.environ["PRIVATE_CODE_SHA"]
           assert payload["slot_utc"] == os.environ["FIVE_MINUTE_SLOT_UTC"]
           assert payload["lane"] == os.environ["FIVE_MINUTE_LANE"]
+          late = instant(payload["observed_at_utc"]) >= instant(payload["slot_utc"]) + timedelta(minutes=5)
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               print("receipt_rel=" + str(receipt_path(payload)), file=output)
               print("receipt_sha256=" + receipt_hash, file=output)
-              print("missing_count=" + str(len(payload["missing_symbols"])), file=output)
+              print("missing_count=" + str(len(SYMBOLS) if late else len(payload["missing_symbols"])), file=output)
           print("Validated receipt:", receipt_hash, "rows:", len(payload["rows"]),
-                "missing:", len(payload["missing_symbols"]))
+                "missing:", len(payload["missing_symbols"]), "late:", late)
           PY
 
       - name: "26.2 Publish receipt with fast-forward retry"
