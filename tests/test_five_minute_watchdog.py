@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from five_minute_watchdog import plan, record
+from five_minute_watchdog import parse_slot, plan, record
 
 UTC = timezone.utc
 START = "2026-11-15T00:00:00Z"
@@ -35,6 +35,8 @@ class WatchdogTests(unittest.TestCase):
     def test_legacy_skips_without_inventing_a_start(self):
         self.assertIsNone(plan({"schema_version": 1, "mode": "legacy"}, None,
                                datetime(2026, 11, 15, tzinfo=UTC)))
+        with self.assertRaisesRegex(ValueError, "aligned"):
+            parse_slot("2026-11-15T00:00:37Z")
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ def parse_slot(value):
         stamp = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     except ValueError as error:
         raise ValueError("Invalid UTC slot") from error
-    if stamp.minute % 5:
+    if stamp.minute % 5 or stamp.second:
         raise ValueError("Slot is not five-minute aligned")
     return stamp
 
@@ -34,7 +34,8 @@ def stamp(value):
 
 
 def plan(config, state, now):
-    if not isinstance(config, dict) or config.get("schema_version") != 1:
+    if (not isinstance(config, dict) or type(config.get("schema_version")) is not int
+            or config["schema_version"] != 1):
         raise ValueError("Invalid protected mode")
     if config.get("mode") == "legacy":
         if set(config) != {"schema_version", "mode"}:
@@ -52,7 +53,8 @@ def plan(config, state, now):
     previous = first - SLOT
     if state is not None:
         if (not isinstance(state, dict) or set(state) != {"version", "first_slot_utc", "last_audited_slot_utc"}
-                or state["version"] != 1 or state["first_slot_utc"] != config["first_slot_utc"]):
+                or type(state["version"]) is not int or state["version"] != 1
+                or state["first_slot_utc"] != config["first_slot_utc"]):
             raise ValueError("Audit watermark conflicts with protected first slot")
         previous = parse_slot(state["last_audited_slot_utc"])
         if previous < first - SLOT or previous > end:
@@ -71,9 +73,11 @@ def record(batch, gaps, roster):
     if not isinstance(batch, dict) or not isinstance(gaps, dict):
         raise ValueError("Invalid audit report")
     begin, end = parse_slot(batch["start"]), parse_slot(batch["end"])
+    if end < begin:
+        raise ValueError("Invalid audit range")
     slots = {stamp(begin + SLOT * i) for i in range(int((end - begin) // SLOT) + 1)}
     expected = set(roster)
-    if not expected or any(key not in slots or not isinstance(value, list)
+    if not expected or len(expected) != len(roster) or any(key not in slots or not isinstance(value, list)
             or not value or len(value) != len(set(value)) or not set(value) <= expected
             for key, value in gaps.items()):
         raise ValueError("Audit returned invalid slot or market")
