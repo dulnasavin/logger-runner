@@ -815,3 +815,25 @@ jobs:
           echo "### Partial five-minute collection" >> "$GITHUB_STEP_SUMMARY"
           echo "Slot: ${FIVE_MINUTE_SLOT_UTC}; missing symbols: ${MISSING_COUNT}" >> "$GITHUB_STEP_SUMMARY"
           exit 1
+
+  alert:
+    name: Record collector failure
+    needs: [validate-invocation, run-logger]
+    if: ${{ always() && (needs.validate-invocation.result != 'success' || needs.run-logger.result != 'success') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Open or update persistent collector incident
+        run: |
+          set -euo pipefail
+          title="Five-minute collector v2 failed"
+          body="Lane: ${{ inputs.lane }}; slot: ${{ inputs.slot_utc }}; run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Receipt may require replay or gap audit."
+          number="$(gh issue list --state open --search "$title in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          if test -n "$number"; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
