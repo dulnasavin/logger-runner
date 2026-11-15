@@ -52,6 +52,9 @@ jobs:
           set -euo pipefail
           test -n "$PRIVATE_DATA_TOKEN"
           gh api "repos/$GH_REPO/actions/workflows/$WORKFLOW/runs?per_page=100" > "$RUNNER_TEMP/collector-runs.json"
+          echo "Advisory running-time estimate (not used to choose a lane):"
+          python scripts/five_minute_handoff.py forecast --slot "$SLOT_UTC" \
+            --input "$RUNNER_TEMP/collector-runs.json"
           lane="$(python scripts/five_minute_handoff.py choose --slot "$SLOT_UTC" --input "$RUNNER_TEMP/collector-runs.json")"
           path="$(python scripts/five_minute_handoff.py path --slot "$SLOT_UTC")"
           python scripts/five_minute_handoff.py claim --slot "$SLOT_UTC" \
