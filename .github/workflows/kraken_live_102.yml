@@ -13,8 +13,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: market-data-102
+  group: market-data-kraken-live-102
   cancel-in-progress: false
+  queue: max
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
@@ -49,9 +50,20 @@ jobs:
           HISTORY_LIVE_PRODUCTION: 'YES'
           HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
           HISTORY_LIVE_MAX_MINUTES: '55'
+          HISTORY_LIVE_COVERAGE_PATH: ${{ runner.temp }}/kraken-live-coverage.json
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: python private_source/binance_history/kraken_live.py
+
+      - name: Retain per-market attempt outcome
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: kraken-live-coverage-${{ github.run_id }}
+          path: ${{ runner.temp }}/kraken-live-coverage.json
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Remove private source
         if: always()
         run: rm -rf private_source
+
