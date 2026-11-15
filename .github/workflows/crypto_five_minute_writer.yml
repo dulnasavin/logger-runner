@@ -15,6 +15,7 @@ permissions:
 concurrency:
   group: crypto-five-minute-writer
   cancel-in-progress: false
+  queue: max
 
 jobs:
   write:
