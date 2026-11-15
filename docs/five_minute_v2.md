@@ -47,6 +47,10 @@ still enabled; no production cutover has occurred.
   before publication. A partial month stays labelled PARTIAL. Complete v2
   slot coverage still awaits exchange source comparison; a pre-cutover month
   is labelled BASELINE_ONLY_UNAUDITED.
+  Migration also records a hashed six-hour history seed. Each v2 collector
+  reads that seed and verified recent slot ledgers into a small local snapshot
+  for provider consensus. It does not run a full legacy CSV preflight, copy
+  price_log.csv, or run the complete test suite in every five-minute job.
   A synthetic 29-day benchmark measured about 54 MB of monthly content
   rewritten by one 102-coin update; that design is not suitable for active
   five-minute commits.
