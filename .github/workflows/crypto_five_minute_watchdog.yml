@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: crypto-five-minute-watchdog
@@ -16,8 +15,14 @@ concurrency:
 
 jobs:
   audit:
+    name: Audit closed five-minute slots
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # This job creates or comments on the persistent incident issue when a
+    # closed slot is unaccounted for; other jobs have read-only permissions.
+    permissions:
+      contents: read
+      issues: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
