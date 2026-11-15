@@ -13,7 +13,8 @@ class ModeTests(unittest.TestCase):
             self.assertEqual(verify(file, "legacy"), "legacy")
             with self.assertRaisesRegex(ValueError, "disabled"):
                 verify(file, "v2")
-            file.write_text(json.dumps({"schema_version": 1, "mode": "v2"}))
+            file.write_text(json.dumps({"schema_version": 1, "mode": "v2",
+                                        "first_slot_utc": "2026-11-15T00:00:00Z"}))
             self.assertEqual(verify(file, "v2"), "v2")
             with self.assertRaisesRegex(ValueError, "disabled"):
                 verify(file, "legacy")
@@ -22,6 +23,9 @@ class ModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             file = Path(tmp) / "mode.json"
             file.write_text(json.dumps({"schema_version": 1, "mode": "v2", "extra": True}))
+            with self.assertRaisesRegex(ValueError, "Invalid"):
+                verify(file, "v2")
+            file.write_text(json.dumps({"schema_version": 1, "mode": "v2"}))
             with self.assertRaisesRegex(ValueError, "Invalid"):
                 verify(file, "v2")
 
