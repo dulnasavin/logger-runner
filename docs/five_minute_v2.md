@@ -1,13 +1,25 @@
 # Five-minute collector v2: activation and failure rules
 
-The existing Main logger is authoritative until a verified cutover. The four
-new workflows are manual-only. No production schedule is configured.
+The existing Main logger is authoritative while the protected collection mode
+is `legacy`. The new workflows are manual-only. No production schedule is
+configured.
 
 ## Data contract
 
-* The dispatcher names a UTC five-minute slot and tries Main, Main 2, Main 3.
-  It checks queued and running collector jobs. An unassigned slot is reported
-  to the persistent GitHub issue and must appear in the gap audit.
+* Exactly one external cron request must go to the dispatcher for each slot;
+  cron must never trigger Main 1, Main 2, or Main 3 directly. Invoke the
+  dispatcher early enough to start its runner before the slot, provisionally
+  two minutes ahead. At ten seconds before the slot, it inspects queued and
+  running jobs, picks Main, Main 2, then Main 3, and creates one exclusive
+  private claim for that slot. If Main finishes after Main 2 was claimed,
+  Main 2 still owns the slot. An unassigned slot is reported to the persistent
+  GitHub issue and must appear in the gap audit.
+* A collector verifies that the private claim names its lane, slot, and
+  dispatcher run before it starts. The protected mode file makes legacy Main
+  and v2 mutually exclusive at invocation time. Completion estimates may be
+  displayed for capacity planning, but the actual occupied state at the
+  handoff decides routing. GitHub runner startup can be delayed, so a ten
+  second check is a target, not a guaranteed execution time.
 * Each collector uses the same pinned private source, VPN, provider consensus,
   and 102-market roster. It writes one immutable receipt containing its slot,
   dispatch and observation times, valid rows, missing-symbol complement,
@@ -35,10 +47,10 @@ new workflows are manual-only. No production schedule is configured.
 ## Cutover gates
 
 1. Merge and pin the tested private source commit in the protected public
-   release manifest. Keep the old Main workflow active until the cutover.
-2. Choose a cutover slot and stop the legacy Main dispatcher at that point.
-   Do not reset or delete the existing CSV. Ensure no legacy run is still
-   writing before starting migration.
+   release manifest. Keep the protected collection mode at `legacy` until
+   cutover; v2 dispatches will fail closed meanwhile.
+2. Stop the old cron URL that directly dispatches legacy Main, then wait for
+   every legacy run to finish. Do not reset or delete the existing CSV.
 3. Run the one-time migration against an unchanged runtime-data snapshot.
    It verifies every legacy row, the source hash, partition hashes and the
    generation. If the source changes during migration, it aborts; rerun from
@@ -47,10 +59,15 @@ new workflows are manual-only. No production schedule is configured.
    the deliberate deletion state. Run manual dispatcher tests for each lane,
    partial 99/102, whole-slot failure, duplicate, stale quote, concurrent push,
    and damaged partition. Confirm writer commits and remote SHAs.
-5. Only then decide a dispatch frequency. Audit an explicit UTC slot range;
+5. Change the protected collection mode to `v2` and retarget the one external
+   cron job to the dispatcher. An accidental call to old Main now fails before
+   collection. An accidental direct call to a v2 collector fails without a
+   valid private slot claim. The previous Main run must be drained before
+   this switch because a run that already passed its gate can finish later.
+6. Only then decide a dispatch frequency. Audit an explicit UTC slot range;
    a green workflow is not proof that 102 prices were observed. Monitor
    receipt backlog and pending-writer queue independently.
-6. Implement and verify archival repair and monthly Releases before removing
+7. Implement and verify archival repair and monthly Releases before removing
    the legacy CSV. Keep an independent backup and a restore rehearsal.
 
 ## Failure and recovery
@@ -58,6 +75,9 @@ new workflows are manual-only. No production schedule is configured.
 | Condition | Required outcome |
 | --- | --- |
 | Main/Main 2 occupied | Choose the next free lane. |
+| Main finishes after Main 2's claim | Keep Main 2 as owner; Main does not start this slot. |
+| Old cron still calls legacy Main after mode switch | Reject before collection and alert; retarget cron to the dispatcher. |
+| Claim saved but workflow dispatch fails | Keep the claim and raise an incident. Inspect before retry; do not silently assign another lane. |
 | All lanes occupied, dispatcher delayed, API unavailable | Fail the dispatch and record the slot; audit all 102 markets. |
 | 99 valid prices | Persist those 99 with three named gaps; fail visibly after saving. |
 | Collector canceled before receipt push | Audit marks the whole slot absent. |
@@ -70,6 +90,8 @@ new workflows are manual-only. No production schedule is configured.
 | Only one exchange or unmatched anchor | Keep the gap open; no interpolation or guessed value. |
 | Writer queue exceeds GitHub's 100 pending maximum | Receipts remain durable; reconcile unprocessed receipts explicitly. |
 
-The dispatcher sees GitHub's run API, which may lag. It is a routing hint,
-not an atomic lock. Duplicate or conflicting receipts remain visible; the
+The dispatcher sees GitHub's run API, which may lag. The exclusive private
+claim is the assignment record; the API is only an occupancy hint. A direct
+manual trigger or a late API response cannot authorize a different lane for
+the same slot. Duplicate or conflicting receipts remain visible, and the
 writer's receipt identity and slot checks are the final data guard.
