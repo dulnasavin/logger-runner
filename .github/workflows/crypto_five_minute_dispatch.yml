@@ -22,58 +22,63 @@ concurrency:
 jobs:
   choose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 6
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       SLOT_UTC: ${{ inputs.slot_utc }}
     steps:
-      - name: Require current protected slot
+      - name: Checkout protected routing rules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Wait until handoff time
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
-          python - <<'PY'
-          import os
-          from datetime import datetime, timezone, timedelta
-          slot = os.environ["SLOT_UTC"]
-          assert len(slot) == 20 and slot.endswith("Z")
-          value = datetime.strptime(slot, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-          assert value.minute % 5 == 0 and value.second == 0
-          now = datetime.now(timezone.utc)
-          assert value - timedelta(seconds=30) <= now <= value + timedelta(minutes=4, seconds=30)
-          PY
+          python scripts/verify_collection_mode.py --require v2
+          seconds="$(python scripts/five_minute_handoff.py wait --slot "$SLOT_UTC")"
+          echo "Handoff opens 10 seconds before $SLOT_UTC; waiting $seconds seconds"
+          sleep "$seconds"
 
-      - name: Choose free lane and dispatch exactly this slot
+      - name: Choose and permanently claim one lane
         id: route
         env:
           WORKFLOW: crypto_collector_v2.yml
+          PRIVATE_REPO: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set -euo pipefail
-          runs="$(gh api "repos/$GH_REPO/actions/workflows/$WORKFLOW/runs?per_page=100")"
-          if jq -e --arg slot "$SLOT_UTC" \
-            '.workflow_runs[] | select((.display_title // "") | endswith(" | " + $slot))' \
-            <<< "$runs" >/dev/null; then
-            echo "Slot $SLOT_UTC was already dispatched"
-            exit 0
-          fi
-          # Count queued as occupied. GitHub may delay a run appearing in this
-          # API; a later duplicate still fails at the receipt identity checks.
-          busy="$(jq -r '.workflow_runs[] |
-            select(.status == "queued" or .status == "waiting" or
-                   .status == "pending" or .status == "requested" or
-                   .status == "in_progress") |
-            (.display_title // "") | capture("Crypto Logger \\| (?<lane>main|main2|main3) \\|").lane' <<< "$runs" | sort -u)"
-          lane=""
-          for candidate in main main2 main3; do
-            if ! grep -qx "$candidate" <<< "$busy"; then
-              lane="$candidate"
+          test -n "$PRIVATE_DATA_TOKEN"
+          gh api "repos/$GH_REPO/actions/workflows/$WORKFLOW/runs?per_page=100" > "$RUNNER_TEMP/collector-runs.json"
+          lane="$(python scripts/five_minute_handoff.py choose --slot "$SLOT_UTC" --input "$RUNNER_TEMP/collector-runs.json")"
+          path="$(python scripts/five_minute_handoff.py path --slot "$SLOT_UTC")"
+          python scripts/five_minute_handoff.py claim --slot "$SLOT_UTC" \
+            --lane "$lane" --run-id "$GITHUB_RUN_ID" --output "$RUNNER_TEMP/slot-claim.json"
+          content="$(base64 -w0 "$RUNNER_TEMP/slot-claim.json")"
+          claimed=0
+          for attempt in 1 2 3; do
+            if GH_TOKEN="$PRIVATE_DATA_TOKEN" gh api -X PUT \
+              "repos/$PRIVATE_REPO/contents/$path" \
+              -f branch=runtime-data -f message="Claim five-minute slot $SLOT_UTC for $lane" \
+              -f content="$content" >/dev/null; then
+              claimed=1
               break
             fi
+            if GH_TOKEN="$PRIVATE_DATA_TOKEN" gh api \
+              "repos/$PRIVATE_REPO/contents/$path?ref=runtime-data" >/dev/null 2>&1; then
+              echo "::error::Slot was already claimed; inspect existing claim and collector run"
+              exit 1
+            fi
+            sleep 1
           done
-          test -n "$lane" || { echo "::error::All three collector lanes occupied"; exit 1; }
+          test "$claimed" -eq 1 || { echo "::error::Could not safely claim slot"; exit 1; }
+          echo "Committed claim for $SLOT_UTC to $lane; a late finish cannot reassign it"
           dispatched="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           gh workflow run "$WORKFLOW" --ref main \
-            -f lane="$lane" -f slot_utc="$SLOT_UTC" -f dispatched_at_utc="$dispatched"
+            -f lane="$lane" -f slot_utc="$SLOT_UTC" \
+            -f dispatched_at_utc="$dispatched" -f claim_run_id="$GITHUB_RUN_ID"
           echo "lane=$lane" >> "$GITHUB_OUTPUT"
           echo "Dispatched $SLOT_UTC to $lane at $dispatched"
 
