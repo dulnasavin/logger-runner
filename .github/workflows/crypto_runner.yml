@@ -1470,6 +1470,7 @@ jobs:
             );
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
             const deliveryHelp = {
+              MAKE_DISABLED_FREE_PLAN: "Make email is intentionally disabled under the free-plan policy. The trusted GitHub Issue is the alert channel; inspect this issue and workflow logs. Re-enable email only after a free delivery route is configured and verified.",
               MAKE_EMAIL_AUTH_INVALID_GRANT: "Make reported invalid_grant: reauthorize Email send connection in Credentials > Connections, then verify it.",
               MAKE_WEBHOOK_AUTH_REJECTED: "Make rejected webhook authentication: check the configured webhook/API key without exposing either value.",
               MAKE_DELIVERY_UNCONFIRMED: 'No explicit email-module success was received. Inspect Make history before retrying: mail may already have been sent. Verify that the final Webhook response returns {"ok":true} only after the email module succeeds.',
@@ -1594,6 +1595,7 @@ jobs:
             );
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
             const deliveryHelp = {
+              MAKE_DISABLED_FREE_PLAN: "Make email is intentionally disabled under the free-plan policy. The trusted GitHub Issue is the alert channel; inspect this issue and workflow logs. Re-enable email only after a free delivery route is configured and verified.",
               MAKE_EMAIL_AUTH_INVALID_GRANT: "Make reported invalid_grant: reauthorize Email send connection in Credentials > Connections, then verify it.",
               MAKE_WEBHOOK_AUTH_REJECTED: "Make rejected webhook authentication: check the configured webhook/API key without exposing either value.",
               MAKE_DELIVERY_UNCONFIRMED: 'No explicit email-module success was received. Inspect Make history before retrying: mail may already have been sent. Verify that the final Webhook response returns {"ok":true} only after the email module succeeds.',
