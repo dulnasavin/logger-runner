@@ -1,0 +1,110 @@
+name: "Crypto Logger | Three-lane dispatcher"
+run-name: "Crypto Logger | Dispatch | ${{ inputs.slot_utc || inputs.trigger_unix }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      slot_utc:
+        description: "Manual UTC slot, leave blank for cron"
+        required: false
+        default: ""
+        type: string
+      trigger_unix:
+        description: "Cron execution Unix time (%cjo:unixtime%), leave blank for manual slot"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+concurrency:
+  group: crypto-five-minute-dispatcher
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  choose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SLOT_UTC: ${{ inputs.slot_utc }}
+      TRIGGER_UNIX: ${{ inputs.trigger_unix }}
+    steps:
+      - name: Checkout protected routing rules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Wait until handoff time
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          python scripts/verify_collection_mode.py --require v2
+          slot="$(python scripts/five_minute_handoff.py resolve \
+            --slot "$SLOT_UTC" --trigger-unix "$TRIGGER_UNIX")"
+          echo "SLOT_UTC=$slot" >> "$GITHUB_ENV"
+          SLOT_UTC="$slot"
+          seconds="$(python scripts/five_minute_handoff.py wait --slot "$SLOT_UTC")"
+          echo "Handoff opens 10 seconds before $SLOT_UTC; waiting $seconds seconds"
+          sleep "$seconds"
+
+      - name: Choose and permanently claim one lane
+        id: route
+        env:
+          WORKFLOW: crypto_collector_v2.yml
+          PRIVATE_REPO: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_DATA_TOKEN"
+          gh api "repos/$GH_REPO/actions/workflows/$WORKFLOW/runs?per_page=100" > "$RUNNER_TEMP/collector-runs.json"
+          echo "Advisory running-time estimate (not used to choose a lane):"
+          python scripts/five_minute_handoff.py forecast --slot "$SLOT_UTC" \
+            --input "$RUNNER_TEMP/collector-runs.json"
+          lane="$(python scripts/five_minute_handoff.py choose --slot "$SLOT_UTC" --input "$RUNNER_TEMP/collector-runs.json")"
+          path="$(python scripts/five_minute_handoff.py path --slot "$SLOT_UTC")"
+          python scripts/five_minute_handoff.py claim --slot "$SLOT_UTC" \
+            --lane "$lane" --run-id "$GITHUB_RUN_ID" --output "$RUNNER_TEMP/slot-claim.json"
+          content="$(base64 -w0 "$RUNNER_TEMP/slot-claim.json")"
+          claimed=0
+          for attempt in 1 2 3; do
+            if GH_TOKEN="$PRIVATE_DATA_TOKEN" gh api -X PUT \
+              "repos/$PRIVATE_REPO/contents/$path" \
+              -f branch=runtime-data -f message="Claim five-minute slot $SLOT_UTC for $lane" \
+              -f content="$content" >/dev/null; then
+              claimed=1
+              break
+            fi
+            if GH_TOKEN="$PRIVATE_DATA_TOKEN" gh api \
+              "repos/$PRIVATE_REPO/contents/$path?ref=runtime-data" >/dev/null 2>&1; then
+              echo "::error::Slot was already claimed; inspect existing claim and collector run"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$claimed" -eq 1 || { echo "::error::Could not safely claim slot"; exit 1; }
+          echo "Committed claim for $SLOT_UTC to $lane; a late finish cannot reassign it"
+          dispatched="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          gh workflow run "$WORKFLOW" --ref main \
+            -f lane="$lane" -f slot_utc="$SLOT_UTC" \
+            -f dispatched_at_utc="$dispatched" -f claim_run_id="$GITHUB_RUN_ID"
+          echo "lane=$lane" >> "$GITHUB_OUTPUT"
+          echo "Dispatched $SLOT_UTC to $lane at $dispatched"
+
+      - name: Record a missed dispatch or routing failure
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+          title="Five-minute dispatcher gap"
+          body="Slot ${SLOT_UTC} could not be assigned or dispatched. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. The gap audit must inspect all 102 markets."
+          number="$(gh issue list --state open --search "$title in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          if test -n "$number"; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
