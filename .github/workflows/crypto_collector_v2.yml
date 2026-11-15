@@ -272,6 +272,7 @@ jobs:
           LOGGER_DIR="private_logger/Crypto Logger-Private Repo"
           for required in \
             "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/five_minute_store.py" \
             "$LOGGER_DIR/provider_consensus.py" \
             "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
@@ -336,6 +337,7 @@ jobs:
           RECOVERY_DIR="$LOGGER_DIR/vpn_auth_recovery"
           python -m py_compile \
             "$LOGGER_DIR/price_logger.py" \
+            "$LOGGER_DIR/five_minute_store.py" \
             "$LOGGER_DIR/provider_consensus.py" \
             "$LOGGER_DIR/csv_integrity.py" \
             "$LOGGER_DIR/network_manager.py" \
@@ -791,7 +793,7 @@ jobs:
           echo "::error::Receipt not verified remotely; rerun this slot"
           exit 1
 
-      - name: "26.3 Report partial collection"
+      - name: "26.3 Queue ordered writer"
         if: ${{ steps.verify_core.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -825,12 +827,15 @@ jobs:
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      INCIDENT_LANE: ${{ inputs.lane }}
+      INCIDENT_SLOT: ${{ inputs.slot_utc }}
     steps:
       - name: Open or update persistent collector incident
         run: |
           set -euo pipefail
           title="Five-minute collector v2 failed"
-          body="Lane: ${{ inputs.lane }}; slot: ${{ inputs.slot_utc }}; run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Receipt may require replay or gap audit."
+          body="Lane: ${INCIDENT_LANE}; slot: ${INCIDENT_SLOT}; run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Receipt may require replay or gap audit."
           number="$(gh issue list --state open --search "$title in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
           if test -n "$number"; then
             gh issue comment "$number" --body "$body"
