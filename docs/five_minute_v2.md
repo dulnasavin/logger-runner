@@ -61,30 +61,38 @@ still enabled; no production cutover has occurred.
 4. Verify the partition copy against the original count and SHA, including
    the deliberate deletion state. Run manual dispatcher tests for each lane,
    partial 99/102, whole-slot failure, duplicate, stale quote, concurrent push,
-   and damaged partition. Confirm writer commits and remote SHAs.
+   and damaged partition. Inject delayed and stale GitHub run listings; verify
+   that a busy Main cannot be assigned when Main 2 is free. Confirm writer
+   commits and remote SHAs.
 5. Change the protected collection mode to `v2` and retarget the one external
    cron job to the dispatcher. An accidental call to old Main now fails before
    collection. An accidental direct call to a v2 collector fails without a
    valid private slot claim. The previous Main run must be drained before
    this switch because a run that already passed its gate can finish later.
-6. Before enabling the replacement cron, implement and exercise an independent
+6. Before enabling the replacement cron, replace the current run-list-only
+   lane choice with a durable lane occupancy record and completion or lease
+   expiry/fencing rules. A stale Actions run list can otherwise assign an
+   already busy Main while Main 2 is free, causing Main to queue. Test this
+   with delayed API visibility, cancellation, late completion, and concurrent
+   claims. Keep one exclusive claim per slot.
+7. Before enabling the replacement cron, implement and exercise an independent
    expected-slot watchdog with a durable audit watermark, alert delivery,
    claimed-but-undispatched recovery, and outage replay. Test missed cron calls,
    a discarded queued Actions run, and a multi-day outage. The watchdog must
    inspect receipts and committed coverage, not merely green workflow results;
    it must never advance its watermark past an unaudited slot. Monitor writer
    backlog separately. This is a cutover gate, not a claim of punctuality.
-7. Choose the watchdog cadence and verify the 48-hour repair horizon against
+8. Choose the watchdog cadence and verify the 48-hour repair horizon against
    actual Binance/Kraken source availability. A missed five-minute spot quote
    cannot be recreated as an identical quote after its instant has passed.
-8. Implement and verify archival repair and monthly Releases before removing
+9. Implement and verify archival repair and monthly Releases before removing
    the legacy CSV. Keep an independent backup and a restore rehearsal.
 
 ## Failure and recovery
 
 | Condition | Required outcome |
 | --- | --- |
-| Main/Main 2 occupied | Choose the next free lane. |
+| Main/Main 2 occupied | Choose the next free lane only after cross-checking durable occupancy; an API list alone can be stale. |
 | Cron request absent or GitHub drops a queued run | Independent watchdog records the expected slot as missing, alerts, and starts verified archival repair when available; do not report a fresh quote for an elapsed instant. |
 | Main finishes after Main 2's claim | Keep Main 2 as owner; Main does not start this slot. |
 | Old cron still calls legacy Main after mode switch | Reject before collection and alert; retarget cron to the dispatcher. |
@@ -102,7 +110,9 @@ still enabled; no production cutover has occurred.
 | Writer queue exceeds GitHub's 100 pending maximum | Receipts remain durable; reconcile unprocessed receipts explicitly. |
 
 The dispatcher sees GitHub's run API, which may lag. The exclusive private
-claim is the assignment record; the API is only an occupancy hint. A direct
+claim is the assignment record; the API is only an occupancy hint. The
+current draft has no durable per-lane occupancy record yet, so reliable
+handoff under stale API visibility remains unimplemented. A direct
 manual trigger or a late API response cannot authorize a different lane for
 the same slot. Duplicate or conflicting receipts remain visible, and the
 writer's receipt identity and slot checks are the final data guard.
