@@ -1,0 +1,121 @@
+name: "Crypto Logger | Ordered receipt writer"
+run-name: "Crypto Logger | Writer | ${{ inputs.receipt_path }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      receipt_path:
+        description: "Path within five_minute, e.g. inbox/2026/11/15/1200-main-123.json"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-five-minute-writer
+  cancel-in-progress: false
+
+jobs:
+  write:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+      DATA_BRANCH: runtime-data
+      RECEIPT_REL: ${{ inputs.receipt_path }}
+    steps:
+      - name: Validate protected invocation and receipt path
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$RECEIPT_REL" =~ ^inbox/[0-9]{4}/(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])/[0-2][0-9][0-5][0-9]-(main|main2|main3)-[0-9]{1,20}\.json$ ]]
+
+      - name: Checkout public release authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Select pinned private source
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability logger
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout immutable source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          path: private_source
+          persist-credentials: false
+
+      - name: Checkout runtime data
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.DATA_BRANCH }}
+          path: private_data
+          persist-credentials: false
+
+      - name: Apply receipt and publish one fast-forward commit
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          SCRIPT="$GITHUB_WORKSPACE/private_source/Crypto Logger-Private Repo/five_minute_store.py"
+          test -s "$SCRIPT"
+          ASKPASS="${RUNNER_TEMP}/five-minute-writer-askpass"
+          trap 'rm -f "$ASKPASS"' EXIT
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          cd private_data
+          test "$(git branch --show-current)" = "$DATA_BRANCH"
+          git config user.name github-actions
+          git config user.email actions@github.com
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$DATA_BRANCH"
+            git reset --hard FETCH_HEAD
+            test -s five_minute/partition_manifest.json || {
+              echo "::error::Verified legacy migration is required before writer activation"
+              exit 1
+            }
+            test -s "five_minute/$RECEIPT_REL"
+            python "$SCRIPT" apply \
+              --root five_minute \
+              --state csv_state.json \
+              --receipt "five_minute/$RECEIPT_REL"
+            git add -- five_minute
+            changed="$(git diff --cached --name-only)"
+            if test -z "$changed"; then
+              echo "Receipt already applied and committed"
+              exit 0
+            fi
+            if printf '%s\n' "$changed" | grep -Ev '^five_minute/'; then
+              echo "::error::Unexpected writer path"
+              exit 1
+            fi
+            git commit -m "Apply five-minute receipt ${RECEIPT_REL}"
+            if git push origin "HEAD:$DATA_BRANCH"; then
+              local_sha="$(git rev-parse HEAD)"
+              remote_sha="$(git ls-remote origin "refs/heads/$DATA_BRANCH" | awk '{print $1}')"
+              test "$local_sha" = "$remote_sha"
+              echo "Verified runtime-data commit: $local_sha" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Concurrent update; replaying against latest runtime-data"
+            sleep 2
+          done
+          echo "::error::Writer could not publish after five safe retries"
+          exit 1
