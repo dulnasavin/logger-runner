@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from five_minute_handoff import (
     HandoffError, choose_lane, claim_path, make_claim, seconds_until_handoff,
-    verify_claim,
+    verify_claim, runtime_forecast,
 )
 
 SLOT = "2026-11-15T12:00:00Z"
@@ -52,6 +52,17 @@ class HandoffTests(unittest.TestCase):
             seconds_until_handoff(SLOT, NOW - timedelta(minutes=4))
         with self.assertRaisesRegex(HandoffError, "aligned"):
             seconds_until_handoff("2026-11-15T12:01:00Z", NOW)
+
+    def test_estimate_adapts_but_never_routes_a_busy_lane(self):
+        runs = {"workflow_runs": [
+            {"status": "completed", "display_title": "Crypto Logger | main | 2026-11-15T11:45:00Z",
+             "run_started_at": "2026-11-15T11:45:00Z", "updated_at": "2026-11-15T11:48:00Z"},
+            {"status": "in_progress", "display_title": "Crypto Logger | main | 2026-11-15T11:55:00Z",
+             "run_started_at": "2026-11-15T11:55:00Z", "updated_at": "2026-11-15T11:55:00Z"},
+        ]}
+        forecast = runtime_forecast(runs, NOW)
+        self.assertTrue(forecast["main"]["over_recent_p90"])
+        self.assertEqual(choose_lane(runs, SLOT), "main2")
 
 
 if __name__ == "__main__":
