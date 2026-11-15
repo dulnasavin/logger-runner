@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from five_minute_handoff import (
     HandoffError, choose_lane, claim_path, make_claim, seconds_until_handoff,
-    verify_claim, runtime_forecast,
+    verify_claim, runtime_forecast, resolve_slot,
 )
 
 SLOT = "2026-11-15T12:00:00Z"
@@ -63,6 +63,13 @@ class HandoffTests(unittest.TestCase):
         forecast = runtime_forecast(runs, NOW)
         self.assertTrue(forecast["main"]["over_recent_p90"])
         self.assertEqual(choose_lane(runs, SLOT), "main2")
+
+    def test_cron_timestamp_resolves_next_five_minute_slot(self):
+        trigger = int(datetime(2026, 11, 15, 11, 58, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(resolve_slot("", str(trigger)), SLOT)
+        self.assertEqual(resolve_slot(SLOT, ""), SLOT)
+        with self.assertRaisesRegex(HandoffError, "exactly one"):
+            resolve_slot(SLOT, str(trigger))
 
 
 if __name__ == "__main__":
