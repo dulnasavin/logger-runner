@@ -26,6 +26,7 @@ const outputs={}, created=[], updated=[];
 const context={repo:{owner:'example',repo:'logger'},payload:{workflow_run:FIXTURE}};
 const core={setOutput:(k,v)=>outputs[k]=v,warning:()=>{},notice:()=>{}};
 const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listForRepo:()=>{},
+  addAssignees:async()=>{},
   create:async data=>{if(ISSUES_ERROR) throw Error('issues unavailable');created.push(data);return {data:{number:9}};},
   update:async data=>{if(ISSUES_ERROR) throw Error('issues unavailable');updated.push(data);return {data:{number:9}};}}},
   paginate:async (method,args)=>{
@@ -187,7 +188,8 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
                 with self.subTest(issue=issue,email=email):
                     env={**os.environ, 'GITHUB_STEP_SUMMARY':str(Path(directory)/'summary'),
                          'ISSUE_OUTCOME':issue,'EMAIL_OUTCOME':email,'ISSUE_NUMBER':'','ORIGINAL_RUN_ID':'42',
-                         'NOTIFICATION_REQUIRED':'true','EMAIL_REQUIRED':'true'}
+                         'NOTIFICATION_REQUIRED':'true','EMAIL_REQUIRED':'true',
+                         'MAKE_EMAIL_ENABLED':'false'}
                     result = subprocess.run(['bash','-c',script],env=env,text=True,capture_output=True)
                     self.assertEqual(result.returncode, int(issue!='success' and email!='success'), result.stderr)
             # A known recurring outage is safe with the trusted issue channel.
@@ -202,3 +204,4 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
 
 if __name__ == '__main__':
     unittest.main()
+
