@@ -31,6 +31,20 @@ def parse_slot(value):
     return slot
 
 
+def resolve_slot(slot_utc, trigger_unix):
+    """Use exactly one explicit slot or cron-job.org's execution timestamp."""
+    if bool(slot_utc) == bool(trigger_unix):
+        raise HandoffError("Provide exactly one slot input")
+    if slot_utc:
+        parse_slot(slot_utc)
+        return slot_utc
+    if not re.fullmatch(r"[0-9]{10,11}", str(trigger_unix)):
+        raise HandoffError("Invalid cron Unix timestamp")
+    epoch = int(trigger_unix)
+    planned = (epoch // 300 + 1) * 300
+    return datetime.fromtimestamp(planned, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def seconds_until_handoff(slot_utc, now, lead_seconds=10):
     slot = parse_slot(slot_utc)
     now = now.astimezone(UTC)
@@ -141,8 +155,9 @@ def verify_claim(api_response, slot_utc, lane, dispatcher_run_id):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("wait", "choose", "forecast", "claim", "verify", "path"))
-    parser.add_argument("--slot", required=True)
+    parser.add_argument("command", choices=("resolve", "wait", "choose", "forecast", "claim", "verify", "path"))
+    parser.add_argument("--slot", default="")
+    parser.add_argument("--trigger-unix", default="")
     parser.add_argument("--lane")
     parser.add_argument("--run-id")
     parser.add_argument("--input")
@@ -150,7 +165,9 @@ def main():
     parser.add_argument("--lead-seconds", type=int, default=10)
     args = parser.parse_args()
     now = datetime.now(UTC)
-    if args.command == "wait":
+    if args.command == "resolve":
+        print(resolve_slot(args.slot, args.trigger_unix))
+    elif args.command == "wait":
         print(seconds_until_handoff(args.slot, now, args.lead_seconds))
     elif args.command == "choose":
         print(choose_lane(json.loads(Path(args.input).read_text()), args.slot))
