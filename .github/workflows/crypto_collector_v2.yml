@@ -790,8 +790,9 @@ jobs:
         run: |
           set -euo pipefail
           if git -C private_data cat-file -e HEAD:five_minute/partition_manifest.json 2>/dev/null; then
-            gh workflow run crypto_five_minute_writer.yml --ref main
-            echo "Queued ordered writer reconciliation after $RECEIPT_REL"
+            gh workflow run crypto_five_minute_writer.yml --ref main \
+              -f receipt_path="$RECEIPT_REL"
+            echo "Queued ordered writer for $RECEIPT_REL"
           else
             echo "Legacy migration pending; receipt safely recorded for later replay"
           fi

@@ -36,9 +36,11 @@ still enabled; no production cutover has occurred.
   one small ledger for the UTC slot. It does not rewrite the 102 growing
   monthly CSVs at every run. A changed remote head causes a fresh replay;
   force push is forbidden.
-  A blank writer input reconciles up to 50 unapplied inbox receipts; run it
-  again if a larger backlog remains. The collector queues this reconciliation
-  after each durable receipt publication.
+  A normal collector queues the writer with its exact immutable receipt path,
+  avoiding a full inbox scan each five minutes. A blank writer input scans
+  for up to 50 unapplied receipts during outage recovery; run it again if a
+  larger backlog remains. Maintenance must eventually index this backlog so
+  years of inbox receipts do not make a full scan unbounded.
 * The migration produces static per-symbol/year/month CSV baselines from
   the legacy file. A monthly closeout combines the baselines with the
   immutable receipts, verifies each ledger and gap, and builds 102 coin CSVs
