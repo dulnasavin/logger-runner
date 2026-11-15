@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
@@ -35,8 +36,7 @@ env:
 # - Protected public release authority selects one full private source commit.
 # - Mutable repository variables cannot select or enable production code.
 # - Runtime CSV/state lives on the dedicated private runtime-data branch.
-# - Only price_log.csv, csv_state.json, provider_incident_state.json, and the
-#   non-secret runtime manifest may be written by this workflow.
+# - Collector v2 publishes one immutable receipt, never the price CSV.
 # - Stored VPN credentials are attempted first.
 # - Only AUTH_FAILED triggers live VPNBook credential recovery.
 # - Live credentials are fetched only from the official VPNBook OpenVPN page.
@@ -792,6 +792,20 @@ jobs:
           exit 1
 
       - name: "26.3 Report partial collection"
+        if: ${{ steps.verify_core.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECEIPT_REL: ${{ steps.validate_receipt.outputs.receipt_rel }}
+        run: |
+          set -euo pipefail
+          if git -C private_data cat-file -e HEAD:five_minute/partition_manifest.json 2>/dev/null; then
+            gh workflow run crypto_five_minute_writer.yml --ref main -f receipt_path="$RECEIPT_REL"
+            echo "Queued ordered writer for $RECEIPT_REL"
+          else
+            echo "Legacy migration pending; receipt safely recorded for later replay"
+          fi
+
+      - name: "26.4 Report partial collection"
         if: ${{ steps.validate_receipt.outputs.missing_count != '0' }}
         env:
           MISSING_COUNT: ${{ steps.validate_receipt.outputs.missing_count }}
