@@ -5,8 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       receipt_path:
-        description: "Path within five_minute, e.g. inbox/2026/11/15/1200-main-123.json"
-        required: true
+        description: "Receipt path; leave blank to reconcile up to 50 pending receipts"
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -30,7 +31,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
-          [[ "$RECEIPT_REL" =~ ^inbox/[0-9]{4}/(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])/[0-2][0-9][0-5][0-9]-(main|main2|main3)-[0-9]{1,20}\.json$ ]]
+          if test -n "$RECEIPT_REL"; then
+            [[ "$RECEIPT_REL" =~ ^inbox/[0-9]{4}/(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])/[0-2][0-9][0-5][0-9]-(main|main2|main3)-[0-9]{1,20}\.json$ ]]
+          fi
 
       - name: Checkout public release authority
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -92,11 +95,24 @@ jobs:
               echo "::error::Verified legacy migration is required before writer activation"
               exit 1
             }
-            test -s "five_minute/$RECEIPT_REL"
-            python "$SCRIPT" apply \
-              --root five_minute \
-              --state csv_state.json \
-              --receipt "five_minute/$RECEIPT_REL"
+            paths=()
+            if test -n "$RECEIPT_REL"; then
+              test -s "five_minute/$RECEIPT_REL"
+              paths+=("five_minute/$RECEIPT_REL")
+            else
+              pending_json="$(python "$SCRIPT" pending --root five_minute)"
+              mapfile -t pending < <(jq -r '.[:50][]' <<< "$pending_json")
+              for relative in "${pending[@]}"; do
+                paths+=("five_minute/$relative")
+              done
+              if test "${#paths[@]}" -eq 0; then
+                echo "No pending receipts"
+                exit 0
+              fi
+            fi
+            args=()
+            for file in "${paths[@]}"; do args+=(--receipt "$file"); done
+            python "$SCRIPT" apply --root five_minute --state csv_state.json "${args[@]}"
             git add -- five_minute
             changed="$(git diff --cached --name-only)"
             if test -z "$changed"; then
