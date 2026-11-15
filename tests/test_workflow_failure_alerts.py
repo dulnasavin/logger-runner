@@ -174,8 +174,9 @@ const github={rest:{actions:{listJobsForWorkflowRunAttempt:()=>{}},issues:{listF
         self.assertNotIn('download-artifact', workflow)
         self.assertNotIn('actions/cache', workflow)
         self.assertNotIn('workflow_dispatch:', workflow)
-        for name in ('CSV Audit', 'CSV Maintenance', 'Neon Audit | Weekly', 'Neon Audit | Daily', 'Neon Maintenance',
-                     'Neon Schema | Controlled Migration', 'Crypto Logger | Staging', 'Workflow Security', 'CodeQL Advanced'):
+        for name in ('CSV Audit', 'CSV Maintenance', 'Crypto Logger | Staging',
+                     'Workflow Security', 'CodeQL Advanced', 'Binance Live | 102 Markets',
+                     'Kraken Live | 102 Markets', 'Market History | 102 Markets'):
             self.assertIn(f'      - "{name}"', workflow)
 
     def test_both_reporting_channels_failing_is_visible(self):

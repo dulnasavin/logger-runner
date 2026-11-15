@@ -6,17 +6,11 @@ on:
       - "Crypto Logger | Main"
       - "CSV Audit"
       - "CSV Maintenance"
-      - "Neon Audit | Weekly"
-      - "Neon Audit | Daily"
-      - "Neon Maintenance"
-      - "Neon Schema | Controlled Migration"
       - "Crypto Logger | Staging"
       - "Workflow Security"
       - "CodeQL Advanced"
-      - "Binance History | 102 Markets"
       - "Binance Live | 102 Markets"
       - "Market History | 102 Markets"
-      - "Market Live | 102 Markets"
       - "Kraken Live | 102 Markets"
       - "Main Queue Health"
     types: [completed]
@@ -289,3 +283,4 @@ jobs:
       - name: Remove the private notifier checkout
         if: always()
         run: rm -rf private_notifier
+
