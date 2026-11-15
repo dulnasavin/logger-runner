@@ -108,6 +108,14 @@ still enabled; no production cutover has occurred.
 8. Test a monthly Release using disposable data and verify every downloaded
    asset. Complete source repair, partition-aware Audit and Maintenance,
    an independent backup, and a restore rehearsal before retiring legacy CSV.
+   At the November 15 inventory the private Releases list was empty, so
+   exchange history coverage and five-minute closeout cannot yet be claimed.
+   Prove the Binance and Kraken source manifests and exact asset hashes before
+   allowing an exchange candle to repair a five-minute gap.
+   Plan retention of the receipt inbox and slot ledgers: one Git commit and
+   102 row decisions every five minutes grow without bound even when monthly
+   CSVs are placed in Releases. Test storage and action-minute quotas against
+   the free budget before calling this a lasting archive.
 9. After all gates pass, stop the old cron and drain old Main. Migrate the
    unchanged final CSV snapshot, verify the rows and hashes, set protected
    `v2` mode with the exact
