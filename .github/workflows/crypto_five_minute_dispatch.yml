@@ -1,12 +1,18 @@
 name: "Crypto Logger | Three-lane dispatcher"
-run-name: "Crypto Logger | Dispatch | ${{ inputs.slot_utc }}"
+run-name: "Crypto Logger | Dispatch | ${{ inputs.slot_utc || inputs.trigger_unix }}"
 
 on:
   workflow_dispatch:
     inputs:
       slot_utc:
-        description: "Current five-minute UTC slot, YYYY-MM-DDTHH:MM:00Z"
-        required: true
+        description: "Manual UTC slot, leave blank for cron"
+        required: false
+        default: ""
+        type: string
+      trigger_unix:
+        description: "Cron execution Unix time (%cjo:unixtime%), leave blank for manual slot"
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -27,6 +33,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       SLOT_UTC: ${{ inputs.slot_utc }}
+      TRIGGER_UNIX: ${{ inputs.trigger_unix }}
     steps:
       - name: Checkout protected routing rules
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -38,6 +45,10 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
           python scripts/verify_collection_mode.py --require v2
+          slot="$(python scripts/five_minute_handoff.py resolve \
+            --slot "$SLOT_UTC" --trigger-unix "$TRIGGER_UNIX")"
+          echo "SLOT_UTC=$slot" >> "$GITHUB_ENV"
+          SLOT_UTC="$slot"
           seconds="$(python scripts/five_minute_handoff.py wait --slot "$SLOT_UTC")"
           echo "Handoff opens 10 seconds before $SLOT_UTC; waiting $seconds seconds"
           sleep "$seconds"
