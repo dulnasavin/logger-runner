@@ -232,10 +232,15 @@ jobs:
           token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ref: ${{ env.PRIVATE_DATA_BRANCH }}
           path: private_data
-          fetch-depth: 0
-          # Keep the complete commit graph for generation and reset proofs while
-          # fetching historical CSV blobs only when a verified recovery needs them.
+          fetch-depth: 1
+          # V2 reads only current state and receipt files. Historical CSV
+          # recovery runs in the independent Audit workflow.
           filter: blob:none
+          sparse-checkout: |
+            /csv_state.json
+            /provider_incident_state.json
+            /five_minute/
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: "04.4 Verify runtime-data branch and copy named state"
@@ -246,7 +251,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
-          test "$(git -C private_data rev-parse --is-shallow-repository)" = false
           ASKPASS="${RUNNER_TEMP}/crypto-checkpoint-askpass"
           trap 'rm -f "$ASKPASS"' EXIT
           printf '%s\n' '#!/bin/sh' \

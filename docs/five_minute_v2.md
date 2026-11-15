@@ -53,6 +53,8 @@ still enabled; no production cutover has occurred.
   reads that seed and verified recent slot ledgers into a small local snapshot
   for provider consensus. It does not run a full legacy CSV preflight, copy
   price_log.csv, or run the complete test suite in every five-minute job.
+  The v2 runtime checkout is shallow and sparse so it omits the large CSV
+  blob from the normal working tree. Audit retains full-history recovery.
   A synthetic 29-day benchmark measured about 54 MB of monthly content
   rewritten by one 102-coin update; that design is not suitable for active
   five-minute commits.
