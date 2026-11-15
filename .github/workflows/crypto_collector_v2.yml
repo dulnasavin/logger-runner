@@ -17,6 +17,10 @@ on:
         description: Actual UTC dispatch time
         required: true
         type: string
+      claim_run_id:
+        description: Dispatcher run that owns this slot
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -89,6 +93,24 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Verify immutable slot and lane assignment
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          SLOT_UTC: ${{ inputs.slot_utc }}
+          LANE: ${{ inputs.lane }}
+          CLAIM_RUN_ID: ${{ inputs.claim_run_id }}
+        run: |
+          set -euo pipefail
+          python scripts/verify_collection_mode.py --require v2
+          test -n "$PRIVATE_DATA_TOKEN"
+          path="$(python scripts/five_minute_handoff.py path --slot "$SLOT_UTC")"
+          GH_TOKEN="$PRIVATE_DATA_TOKEN" gh api \
+            "repos/dulnasavin/Repository-name-crypto-tracker-Private-Yes/contents/$path?ref=runtime-data" \
+            > "$RUNNER_TEMP/slot-claim-response.json"
+          python scripts/five_minute_handoff.py verify --slot "$SLOT_UTC" \
+            --lane "$LANE" --run-id "$CLAIM_RUN_ID" \
+            --input "$RUNNER_TEMP/slot-claim-response.json"
 
       - name: Validate enabled logger release capability
         id: release
@@ -664,6 +686,9 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
+          seconds="$(python scripts/five_minute_handoff.py wait \
+            --slot "$FIVE_MINUTE_SLOT_UTC" --lead-seconds 0)"
+          sleep "$seconds"
           cd private_logger/"Crypto Logger-Private Repo"
           echo "============================================================"
           echo "🚀 STARTING PRODUCTION CRYPTO PRICE LOGGER"
