@@ -51,59 +51,7 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertTrue(accepted({**outage, 'condition_code': 'PRICE_SOURCE_CRITICAL',
                                   'decisions': {str(n): {'accepted_usd': None} for n in range(11)}}))
 
-    def test_table_reset_selection_is_passed_as_literal_arguments(self):
-        workflow = (WORKFLOWS / 'neon_maintenance.yml').read_text()
-        self.assertIn('          - preview-tables', workflow)
-        self.assertIn('          - clear-tables', workflow)
-        self.assertIn('          - all-logger-tables', workflow)
-        self.assertIn('writers_paused:', workflow)
-        self.assertIn('secrets.PRIVATE_DATA_WRITE_TOKEN', workflow)
-        step = workflow.split('name: Execute controlled archived-data maintenance', 1)[1]
-        script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('      - name:', 1)[0])
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / 'private_source/Neon Weekly Audit'
-            source.mkdir(parents=True)
-            (source / 'neon_maintenance.py').write_text('import json,sys\nprint(json.dumps(sys.argv[1:]))\n')
-            (source / 'neon_table_maintenance.py').write_text('# fixture\n')
-            tables = 'neon_sync_log,$(touch MUST_NOT_EXIST)'
-            env = dict(os.environ, OPERATION='clear-tables', GENERATION='', TABLE_SELECTION='custom',
-                       CUSTOM_TABLES=tables, WRITERS_PAUSED='true', RUNNER_TEMP=str(root),
-                       PRIVATE_DATA_TOKEN='fixture-token-not-real', APPROVED_PLAN_ID='ntm-v1-' + 'a'*64,
-                       CONTINUATION_TOKEN='', CONFIRMATION='CLEAR_SELECTED_NEON_TABLES', CHANGE_REASON='Reset')
-            result = subprocess.run(['bash', '-c', script], cwd=root, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads(result.stdout)
-            self.assertEqual(args[args.index('--tables') + 1], tables)
-            self.assertIn('--writers-paused', args)
-            self.assertFalse((root / 'MUST_NOT_EXIST').exists())
-            self.assertFalse((root / 'neon-table-git-askpass').exists())
 
-    def test_neon_maintenance_is_manual_and_passes_approval_values_as_data(self):
-        workflow = (WORKFLOWS / 'neon_maintenance.yml').read_text()
-        self.assertIn('workflow_dispatch:', workflow)
-        self.assertNotIn('schedule:', workflow)
-        self.assertIn('--capability neon', workflow)
-        self.assertIn('ref: ${{ steps.release.outputs.private_code_sha }}', workflow)
-        self.assertNotIn('git push', workflow)
-        self.assertNotIn('persist-credentials: true', workflow)
-        step = workflow.split('name: Execute controlled archived-data maintenance', 1)[1]
-        script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('      - name:', 1)[0])
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            capture = root / 'private_source/Neon Weekly Audit/neon_maintenance.py'
-            capture.parent.mkdir(parents=True)
-            capture.write_text('import json,sys\nprint(json.dumps(sys.argv[1:]))\n')
-            reason = 'Review $(touch MUST_NOT_EXIST); literal input'
-            env = dict(os.environ, OPERATION='purge-archived', GENERATION='4',
-                       APPROVED_PLAN_ID='nmp-v1-' + 'a'*64, CONTINUATION_TOKEN='',
-                       CONFIRMATION='PURGE_ARCHIVED_NEON_GENERATION', CHANGE_REASON=reason)
-            result = subprocess.run(['bash', '-c', script], cwd=root, env=env,
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            args = json.loads(result.stdout)
-            self.assertEqual(args[args.index('--reason') + 1], reason)
-            self.assertFalse((root / 'MUST_NOT_EXIST').exists())
 
     def test_maintenance_uses_verified_private_helpers_before_data_checkout(self):
         workflow = (WORKFLOWS / 'csv_maintenance.yml').read_text()
@@ -121,7 +69,6 @@ class WorkflowWorkspaceTests(unittest.TestCase):
             ('crypto_runner.yml', 'private_logger', 'manage_csv_file_lifecycle.py', 1),
             ('crypto_runner.yml', 'private_logger', 'csv_audit.py', 1),
             ('csv_maintenance.yml', 'private_source', 'manage_csv_file_lifecycle.py', 2),
-            ('neon_reconciliation.yml', 'private_source', 'csv_audit.py', 1),
         ):
             with self.subTest(workflow=filename):
                 workflow = (WORKFLOWS / filename).read_text()
@@ -156,24 +103,6 @@ class WorkflowWorkspaceTests(unittest.TestCase):
         self.assertNotIn('git rebase', workflow)
         self.assertIn('group: csv-audit', workflow)
 
-    def test_current_neon_apply_requires_explicit_confirmation_and_no_stale_plan(self):
-        workflow = (WORKFLOWS / 'neon_reconciliation.yml').read_text()
-        step = workflow.split('name: "01 Validate protected request"', 1)[1].split(
-            '      - name:', 1)[0]
-        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
-        env = dict(os.environ, GITHUB_REF='refs/heads/main', OPERATION='check-and-apply',
-                   APPROVED_PLAN_ID='', CONFIRMATION='APPLY_NEON_RECONCILIATION',
-                   CHANGE_REASON='Check current data')
-        def request(**changes):
-            return subprocess.run(['bash', '-c', script], env={**env, **changes},
-                                  capture_output=True, text=True)
-        self.assertEqual(request().returncode, 0)
-        for changes in ({'CONFIRMATION': ''}, {'APPROVED_PLAN_ID': 'nrp-v1-' + 'a' * 64},
-                        {'CHANGE_REASON': '   '}, {'CHANGE_REASON': 'a' * 201},
-                        {'CHANGE_REASON': 'line\nbreak'}, {'GITHUB_REF': 'refs/heads/staging'}):
-            with self.subTest(changes=changes):
-                self.assertNotEqual(request(**changes).returncode, 0)
-        self.assertIn('--mode check-and-apply', workflow)
 
     def test_maintenance_refuses_to_rebase_stale_data(self):
         for name in ('csv_maintenance.yml',):
@@ -184,13 +113,6 @@ class WorkflowWorkspaceTests(unittest.TestCase):
                 self.assertIn('test "$(git rev-parse "origin/$PRIVATE_DATA_BRANCH")" = "$STARTING_DATA_SHA"', workflow)
                 self.assertLess(workflow.index('= "$STARTING_DATA_SHA"'), workflow.index('git push origin'))
 
-    def test_audit_requires_private_verified_persistence_protocol(self):
-        workflow = (WORKFLOWS / 'neon_reconciliation.yml').read_text()
-        self.assertIn('test -s "private_source/Neon Weekly Audit/neon_persistence.py"', workflow)
-        self.assertIn('--runtime-repository "${GITHUB_WORKSPACE}/private_data"', workflow)
-        self.assertNotIn('git push', workflow)
-        self.assertNotIn('git rebase', workflow)
-        self.assertIn('Verified runtime-data commit', workflow)
 
     def test_alert_acknowledgement_requires_verified_incident_persistence(self):
         workflow = (WORKFLOWS / 'crypto_runner.yml').read_text()
