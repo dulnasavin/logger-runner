@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,6 +66,39 @@ def choose_lane(runs, slot_utc):
     raise HandoffError("All three collector lanes are occupied")
 
 
+def runtime_forecast(runs, now):
+    """Advisory rolling p90; routing never depends on this estimate."""
+    completed = {lane: [] for lane in LANES}
+    active = {}
+    for run in runs.get("workflow_runs", []):
+        matched = TITLE.fullmatch(run.get("display_title") or "")
+        if not matched:
+            continue
+        lane = matched.group(1)
+        try:
+            start = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
+            updated = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        if run.get("status") == "completed":
+            duration = (updated - start).total_seconds()
+            if 0 < duration <= 3600 and len(completed[lane]) < 20:
+                completed[lane].append(duration)
+        elif run.get("status") == "in_progress":
+            active[lane] = max(0, (now.astimezone(UTC) - start).total_seconds())
+    result = {}
+    for lane, elapsed in active.items():
+        samples = sorted(completed[lane])
+        p90 = samples[math.ceil(len(samples) * .9) - 1] if samples else None
+        result[lane] = {
+            "elapsed_seconds": round(elapsed),
+            "recent_p90_seconds": round(p90) if p90 is not None else None,
+            "estimated_remaining_seconds": round(max(0, p90 - elapsed)) if p90 is not None else None,
+            "over_recent_p90": elapsed > p90 if p90 is not None else None,
+        }
+    return result
+
+
 def claim_path(slot_utc):
     slot = parse_slot(slot_utc)
     return f"five_minute/claims/{slot:%Y/%m/%d/%H%M}.json"
@@ -107,7 +141,7 @@ def verify_claim(api_response, slot_utc, lane, dispatcher_run_id):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("wait", "choose", "claim", "verify", "path"))
+    parser.add_argument("command", choices=("wait", "choose", "forecast", "claim", "verify", "path"))
     parser.add_argument("--slot", required=True)
     parser.add_argument("--lane")
     parser.add_argument("--run-id")
@@ -120,6 +154,8 @@ def main():
         print(seconds_until_handoff(args.slot, now, args.lead_seconds))
     elif args.command == "choose":
         print(choose_lane(json.loads(Path(args.input).read_text()), args.slot))
+    elif args.command == "forecast":
+        print(json.dumps(runtime_forecast(json.loads(Path(args.input).read_text()), now), sort_keys=True))
     elif args.command == "path":
         print(claim_path(args.slot))
     elif args.command == "claim":
