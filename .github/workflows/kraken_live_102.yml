@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: market-data-kraken-live-102
+  group: market-data-kraken-102
   cancel-in-progress: false
   queue: max
 
