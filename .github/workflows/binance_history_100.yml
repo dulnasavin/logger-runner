@@ -26,8 +26,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: market-data-102
+  group: market-data-${{ inputs.exchange || 'binance' }}-102
   cancel-in-progress: false
+  queue: max
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes

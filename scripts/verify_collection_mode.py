@@ -12,10 +12,15 @@ def verify(path: Path, required: str) -> str:
     if required not in {"legacy", "v2"}:
         raise ValueError("Unknown requested collection mode")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if (not isinstance(payload, dict) or set(payload) != {"schema_version", "mode"}
-            or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
-            or payload["mode"] not in {"legacy", "v2"}):
+    if (not isinstance(payload, dict)
+            or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1
+            or payload.get("mode") not in {"legacy", "v2"}
+            or (payload["mode"] == "legacy" and set(payload) != {"schema_version", "mode"})
+            or (payload["mode"] == "v2" and set(payload) != {"schema_version", "mode", "first_slot_utc"})):
         raise ValueError("Invalid protected collection mode")
+    if payload["mode"] == "v2":
+        from five_minute_watchdog import parse_slot
+        parse_slot(payload["first_slot_utc"])
     if payload["mode"] != required:
         raise ValueError(f"Collection mode is {payload['mode']}; {required} is disabled")
     return required

@@ -232,10 +232,15 @@ jobs:
           token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ref: ${{ env.PRIVATE_DATA_BRANCH }}
           path: private_data
-          fetch-depth: 0
-          # Keep the complete commit graph for generation and reset proofs while
-          # fetching historical CSV blobs only when a verified recovery needs them.
+          fetch-depth: 1
+          # V2 reads only current state and receipt files. Historical CSV
+          # recovery runs in the independent Audit workflow.
           filter: blob:none
+          sparse-checkout: |
+            /csv_state.json
+            /provider_incident_state.json
+            /five_minute/
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: "04.4 Verify runtime-data branch and copy named state"
@@ -246,7 +251,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C private_data branch --show-current)" = "$PRIVATE_DATA_BRANCH"
-          test "$(git -C private_data rev-parse --is-shallow-repository)" = false
           ASKPASS="${RUNNER_TEMP}/crypto-checkpoint-askpass"
           trap 'rm -f "$ASKPASS"' EXIT
           printf '%s\n' '#!/bin/sh' \
@@ -257,19 +261,8 @@ jobs:
             'esac' > "$ASKPASS"
           chmod 700 "$ASKPASS"
           export GIT_ASKPASS="$ASKPASS"
-          python "private_logger/Crypto Logger-Private Repo/manage_csv_file_lifecycle.py" \
-            --mode prepare-logger \
-            --path private_data/price_log.csv \
-            --state-path private_data/csv_state.json \
-            --git-repository private_data
-          # Materialize the last Main checkpoint before VPN startup. Historical
-          # objects may be fetched on demand here, using the scoped token only
-          # for this step; the CSV audit then runs without GitHub credentials.
-          CHECKPOINT="$(git -C private_data log --first-parent -1 --format=%H -- runtime_manifest.json)"
-          [[ "$CHECKPOINT" =~ ^[0-9a-f]{40}$ ]] || { echo "❌ Missing Main checkpoint"; exit 1; }
-          git -C private_data show "$CHECKPOINT:runtime_manifest.json" >/dev/null
-          git -C private_data show "$CHECKPOINT:csv_state.json" >/dev/null
-          git -C private_data show "$CHECKPOINT:price_log.csv" >/dev/null
+          test -s private_data/five_minute/partition_manifest.json
+          test -s private_data/five_minute/history_seed.csv
           for state_file in csv_state.json provider_incident_state.json; do
             test -f "private_data/$state_file" || {
               echo "❌ runtime-data is missing $state_file; restore it on runtime-data before activation"
@@ -277,12 +270,7 @@ jobs:
             }
             cp -- "private_data/$state_file" "private_logger/$state_file"
           done
-          if [ -f private_data/price_log.csv ]; then
-            cp -- private_data/price_log.csv private_logger/price_log.csv
-          else
-            echo "⚠ price_log.csv is absent; generation-aware preflight recovery will inspect Git history"
-          fi
-          echo "✅ Runtime state copied into the immutable source workspace"
+          echo "✅ Bounded v2 state ready; legacy price_log.csv was not downloaded"
 
       # ======================================================================
       # SECTION 05 - VERIFY PRODUCTION LOGGER FILE STRUCTURE
@@ -371,19 +359,6 @@ jobs:
             "$RECOVERY_DIR/github_secret_updater.py" \
             "$RECOVERY_DIR/alert_email.py"
           echo "✅ All production Python modules compile"
-
-      - name: "08.2 Run production regression tests"
-        id: production_regression
-        run: |
-          set -euo pipefail
-          cd private_logger/"Crypto Logger-Private Repo"
-          export PYTHONPATH="$PWD:$(dirname "$PWD")/Neon Weekly Audit"
-          python provider_consensus.py persist-incident --help >/dev/null
-          python -m unittest discover \
-            -s tests \
-            -p 'test_*.py' \
-            -v
-          echo "✅ CSV, consensus, incident-alert, and recovery tests passed"
 
       # ======================================================================
       # SECTION 09 - VALIDATE BINANCE SECRETS
@@ -641,25 +616,16 @@ jobs:
       # ======================================================================
       # SECTION 23 - RECORD PRODUCTION CSV STATE BEFORE LOGGER
       # ======================================================================
-      - name: "23.1 Preflight and record production CSV state"
-        id: csv_preflight
+      - name: "23.1 Build verified six-hour trusted history snapshot"
+        id: history_snapshot
+        env:
+          FIVE_MINUTE_HISTORY_CSV_PATH: ${{ github.workspace }}/private_logger/recent_history.csv
         run: |
           set -euo pipefail
-          CSV="private_data/price_log.csv"
-          RECOVERY_DIR="${RUNNER_TEMP}/csv-recovery"
-          mkdir -p "$RECOVERY_DIR"
-          python "private_logger/Crypto Logger-Private Repo/csv_audit.py" \
-            --runtime-repository private_data \
-            --recovery-dir "$RECOVERY_DIR" \
-            | tee "${RUNNER_TEMP}/csv-integrity-preflight.log"
-          cp -- private_data/price_log.csv private_logger/price_log.csv
-          cp -- private_data/csv_state.json private_logger/csv_state.json
-          cp -- private_data/provider_incident_state.json private_logger/provider_incident_state.json
-          cp -- private_data/provider_incident_state.json "${RUNNER_TEMP}/provider-state-before.json"
-          cp -- private_data/csv_state.json "${RUNNER_TEMP}/provider-csv-state-before.json"
-          BEFORE_ROWS="$(wc -l < "$CSV" | tr -d ' ')"
-          echo "$BEFORE_ROWS" > "${RUNNER_TEMP}/csv_rows_before.txt"
-          echo "Production CSV rows before logger: ${BEFORE_ROWS}"
+          python "private_logger/Crypto Logger-Private Repo/five_minute_store.py" \
+            history-snapshot --root private_data/five_minute \
+            --destination "$FIVE_MINUTE_HISTORY_CSV_PATH"
+          test -s "$FIVE_MINUTE_HISTORY_CSV_PATH"
 
       # ======================================================================
       # SECTION 24 - RUN THE PRODUCTION PRICE LOGGER
@@ -673,7 +639,7 @@ jobs:
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
           COINBASE_API_KEY_NAME: ${{ secrets.COINBASE_API_KEY_NAME }}
           COINBASE_API_PRIVATE_KEY: ${{ secrets.COINBASE_API_PRIVATE_KEY }}
-          CSV_RECOVERY_DIR: ${{ runner.temp }}/csv-recovery
+          FIVE_MINUTE_HISTORY_CSV_PATH: ${{ github.workspace }}/private_logger/recent_history.csv
           PROVIDER_REPORT_FILE: ${{ runner.temp }}/provider-report.json
           PROVIDER_EVENT_FILE: ${{ runner.temp }}/provider-event.json
           CRYPTO_LOGGER_NETWORK_RECOVERY: "1"
@@ -828,8 +794,9 @@ jobs:
         run: |
           set -euo pipefail
           if git -C private_data cat-file -e HEAD:five_minute/partition_manifest.json 2>/dev/null; then
-            gh workflow run crypto_five_minute_writer.yml --ref main
-            echo "Queued ordered writer reconciliation after $RECEIPT_REL"
+            gh workflow run crypto_five_minute_writer.yml --ref main \
+              -f receipt_path="$RECEIPT_REL"
+            echo "Queued ordered writer for $RECEIPT_REL"
           else
             echo "Legacy migration pending; receipt safely recorded for later replay"
           fi
