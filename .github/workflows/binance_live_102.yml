@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: market-data-binance-live-102
+  group: market-data-binance-102
   cancel-in-progress: false
   queue: max
 
