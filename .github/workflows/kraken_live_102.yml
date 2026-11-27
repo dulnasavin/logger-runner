@@ -13,12 +13,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: market-data-102
+  group: market-data-kraken-102
   cancel-in-progress: false
+  queue: max
 
 env:
   PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
-  HISTORY_CODE_SHA: 697c89e27b109c3157f676396b499af7a931a931
+  HISTORY_CODE_SHA: b4d27c46f56da859ffa359ef74b17b056a046232
 
 jobs:
   live:
@@ -26,6 +27,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     steps:
+      - name: Checkout public workflow support
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
       - name: Checkout pinned private collector
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -33,7 +39,9 @@ jobs:
           ref: ${{ env.HISTORY_CODE_SHA }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           path: private_source
-          sparse-checkout: binance_history
+          sparse-checkout: |
+            binance_history
+            Crypto Logger-Private Repo
           persist-credentials: false
 
       - name: Set up Python
@@ -44,14 +52,47 @@ jobs:
       - name: Verify history and live regression tests
         run: python -m unittest discover -s private_source/binance_history -p 'test_*.py' -q
 
+      - name: Bootstrap managed VPN1 with VPN2 standby
+        uses: ./.github/actions/market-live-network
+        with:
+          vpn1_config: ${{ secrets.VPNBOOK_CONFIG }}
+          vpn1_username: ${{ secrets.VPNBOOK_USERNAME }}
+          vpn1_password: ${{ secrets.VPNBOOK_PASSWORD }}
+          vpn2_config: ${{ secrets.VPN2_CONFIG }}
+          vpn2_username: ${{ secrets.VPN2_USERNAME }}
+          vpn2_password: ${{ secrets.VPN2_PASSWORD }}
+          secret_update_token: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
+
       - name: Check Kraken history handoff and collect closed minutes
         env:
           HISTORY_LIVE_PRODUCTION: 'YES'
+          PYTHONPATH: ${{ github.workspace }}/private_source/Crypto Logger-Private Repo
           HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
           HISTORY_LIVE_MAX_MINUTES: '55'
+          HISTORY_LIVE_COVERAGE_PATH: ${{ runner.temp }}/kraken-live-coverage.json
           HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
         run: python private_source/binance_history/kraken_live.py
+
+      - name: Retain per-market attempt outcome
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kraken-live-coverage-${{ github.run_id }}
+          path: ${{ runner.temp }}/kraken-live-coverage.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Stop managed network and clear runtime credentials
+        if: always()
+        run: |
+          if [ -d "${RUNNER_TEMP}/network-manager" ] && [ -d private_source ]; then
+            python "private_source/Crypto Logger-Private Repo/s2_network_manager.py" reset || \
+              echo '::warning::S2 reset failed; runner teardown must stop the tunnel'
+          fi
+          rm -rf "${RUNNER_TEMP}/vpn-runtime"
 
       - name: Remove private source
         if: always()
         run: rm -rf private_source
+
+

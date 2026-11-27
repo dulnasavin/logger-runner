@@ -101,7 +101,7 @@ jobs:
           cp -a -- "${RUNNER_TEMP}/partition-migration/." five_minute/
           git config user.name github-actions
           git config user.email actions@github.com
-          git add -- five_minute/prices five_minute/partition_manifest.json
+          git add -- five_minute/prices five_minute/history_seed.csv five_minute/partition_manifest.json
           git commit -m "Migrate verified legacy CSV into per-coin monthly partitions"
           git push origin "HEAD:$DATA_BRANCH"
           local_sha="$(git rev-parse HEAD)"

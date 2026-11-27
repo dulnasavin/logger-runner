@@ -1,0 +1,178 @@
+name: "Crypto Logger | Expected-slot watchdog"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "13,28,43,58 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-five-minute-watchdog
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  audit:
+    name: Audit closed five-minute slots
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # This job creates or comments on the persistent incident issue when a
+    # closed slot is unaccounted for; other jobs have read-only permissions.
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+      DATA_BRANCH: runtime-data
+    steps:
+      - name: Checkout protected mode and watchdog
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Require protected mode and main
+        id: mode
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          if python scripts/verify_collection_mode.py --require legacy; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Legacy Main is still authoritative; watchdog is dormant"
+          else
+            python scripts/verify_collection_mode.py --require v2
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Select protected private source
+        if: steps.mode.outputs.enabled == 'true'
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability logger
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout immutable private source
+        if: steps.mode.outputs.enabled == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          path: private_source
+          persist-credentials: false
+
+      - name: Checkout private runtime data
+        if: steps.mode.outputs.enabled == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.DATA_BRANCH }}
+          path: private_data
+          persist-credentials: false
+
+      - name: Audit and checkpoint every expected slot
+        if: steps.mode.outputs.enabled == 'true'
+        env:
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_DATA_TOKEN"
+          SCRIPT="$GITHUB_WORKSPACE/private_source/Crypto Logger-Private Repo/five_minute_store.py"
+          WATCHDOG="$GITHUB_WORKSPACE/scripts/five_minute_watchdog.py"
+          MODE="$GITHUB_WORKSPACE/config/five_minute_collection.json"
+          test -s "$SCRIPT"
+          test -s "$WATCHDOG"
+          ASKPASS="$RUNNER_TEMP/five-minute-watchdog-askpass"
+          trap 'rm -f "$ASKPASS"' EXIT
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$PRIVATE_DATA_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          export PYTHONPATH="$GITHUB_WORKSPACE/private_source/Crypto Logger-Private Repo"
+          cd private_data
+          test "$(git branch --show-current)" = "$DATA_BRANCH"
+          git config user.name github-actions
+          git config user.email actions@github.com
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$DATA_BRANCH"
+            git reset --hard FETCH_HEAD
+            # A lost push response must not cause the same run to scan ahead.
+            if find five_minute/audits -name "*-${GITHUB_RUN_ID}.json" -print -quit 2>/dev/null | grep -q .; then
+              echo "Audit already published by this run"
+              exit 0
+            fi
+            test -s five_minute/partition_manifest.json || {
+              echo "::error::Verified partition migration is missing"
+              exit 1
+            }
+            python "$WATCHDOG" plan --mode "$MODE" \
+              --state five_minute/audit_state.json > "$RUNNER_TEMP/audit-plan.json"
+            if test "$(cat "$RUNNER_TEMP/audit-plan.json")" = null; then
+              echo "No new closed slots; durable watermark is current"
+              exit 0
+            fi
+            start="$(jq -r '.start' "$RUNNER_TEMP/audit-plan.json")"
+            end="$(jq -r '.end' "$RUNNER_TEMP/audit-plan.json")"
+            python "$SCRIPT" audit --root five_minute --start "$start" --end "$end" \
+              > "$RUNNER_TEMP/audit-gaps.json"
+            python "$WATCHDOG" record --mode "$MODE" \
+              --state five_minute/audit_state.json --plan "$RUNNER_TEMP/audit-plan.json" \
+              --gaps "$RUNNER_TEMP/audit-gaps.json" --output "$RUNNER_TEMP/audit-record.json" \
+              > /dev/null
+            missing="$(jq -r '.missing_symbols' "$RUNNER_TEMP/audit-record.json")"
+            # Alert before advancing the watermark. A notification failure
+            # leaves this exact range eligible for the next run to retry.
+            if test "$missing" -gt 0; then
+              title="Five-minute missing market coverage"
+              body="Watchdog found $missing missing market observations in $start to $end. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Inspect the private audit record and repair only from verified sources."
+              issue="$(gh issue list --state open --search "$title in:title" --json number,title \
+                --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+              if test -n "$issue"; then
+                gh issue comment "$issue" --body "$body"
+              else
+                gh issue create --title "$title" --body "$body"
+              fi
+            fi
+            mkdir -p five_minute/audits
+            name="${start//[-:TZ]/}-${end//[-:TZ]/}-${GITHUB_RUN_ID}.json"
+            cp "$RUNNER_TEMP/audit-record.json" "five_minute/audits/$name"
+            jq -c '.next_state' "$RUNNER_TEMP/audit-plan.json" \
+              > five_minute/audit_state.json
+            git add -- "five_minute/audits/$name" five_minute/audit_state.json
+            git commit -m "Audit expected five-minute slots $start to $end"
+            if git push origin "HEAD:$DATA_BRANCH"; then
+              local_sha="$(git rev-parse HEAD)"
+              remote_sha="$(git ls-remote origin "refs/heads/$DATA_BRANCH" | awk '{print $1}')"
+              test "$local_sha" = "$remote_sha"
+              echo "Audited $start through $end; missing markets: $missing" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Concurrent runtime update; re-auditing fresh data"
+            sleep 2
+          done
+          echo "::error::Could not publish watchdog checkpoint after safe retries"
+          exit 1
+
+      - name: Report watchdog failure
+        if: failure()
+        run: |
+          title="Five-minute watchdog stopped"
+          body="Expected-slot audit did not checkpoint successfully. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. The next run must resume from the last durable watermark."
+          issue="$(gh issue list --state open --search "$title in:title" --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          if test -n "$issue"; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

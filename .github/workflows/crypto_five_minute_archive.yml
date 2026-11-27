@@ -1,0 +1,134 @@
+name: "Crypto Logger | Monthly coin archive"
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "NZ archive year"
+        required: true
+        type: string
+      month:
+        description: "NZ archive month (01-12)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-five-minute-monthly-archive
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  archive:
+    name: Verify and publish monthly coin assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PRIVATE_REPOSITORY: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+      DATA_BRANCH: runtime-data
+      GH_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+      ARCHIVE_YEAR: ${{ inputs.year }}
+      ARCHIVE_MONTH: ${{ inputs.month }}
+    steps:
+      - name: Require protected public main and valid month
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$ARCHIVE_YEAR" =~ ^20[2-9][0-9]$|^2100$ ]]
+          [[ "$ARCHIVE_MONTH" =~ ^(0[1-9]|1[0-2])$ ]]
+          test -n "$GH_TOKEN"
+
+      - name: Checkout public authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Require v2 cutover slot
+        id: mode
+        run: |
+          set -euo pipefail
+          jq -e '.schema_version == 1 and .mode == "v2" and (.first_slot_utc | type == "string")' config/five_minute_collection.json >/dev/null
+          first="$(jq -r .first_slot_utc config/five_minute_collection.json)"
+          [[ "$first" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:00Z$ ]]
+          echo "first_slot_utc=$first" >> "$GITHUB_OUTPUT"
+
+      - name: Select pinned private source
+        id: release
+        run: >-
+          python scripts/validate_release_manifest.py
+          --mode execute
+          --capability logger
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout immutable source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.release.outputs.private_code_sha }}
+          path: private_source
+          persist-credentials: false
+
+      - name: Checkout private runtime-data snapshot
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.PRIVATE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.DATA_BRANCH }}
+          path: private_data
+          persist-credentials: false
+
+      - name: Build, upload, download and verify every coin
+        env:
+          FIRST_SLOT_UTC: ${{ steps.mode.outputs.first_slot_utc }}
+        run: |
+          set -euo pipefail
+          source_dir="$GITHUB_WORKSPACE/private_source/Crypto Logger-Private Repo"
+          test -s "$source_dir/five_minute_archive.py"
+          test -s private_data/five_minute/partition_manifest.json
+          data_sha="$(git -C private_data rev-parse HEAD)"
+          archive="${RUNNER_TEMP}/archive"
+          staged="${RUNNER_TEMP}/assets"
+          downloaded="${RUNNER_TEMP}/downloaded"
+          PYTHONPATH="$source_dir" python "$source_dir/five_minute_archive.py" \
+            --root private_data/five_minute --destination "$archive" \
+            --year "$ARCHIVE_YEAR" --month "$(expr "$ARCHIVE_MONTH" + 0)" \
+            --first-slot-utc "$FIRST_SLOT_UTC"
+          python scripts/five_minute_release.py stage --archive "$archive" --directory "$staged"
+          metadata="$(python scripts/five_minute_release.py metadata --archive "$archive")"
+          generation="$(jq -r .generation <<< "$metadata")"
+          status="$(jq -r .status <<< "$metadata")"
+          manifest_sha="$(jq -r .manifest_sha256 <<< "$metadata")"
+          tag="five-minute-${ARCHIVE_YEAR}-${ARCHIVE_MONTH}-g${generation}-${manifest_sha:0:16}"
+          notes="${RUNNER_TEMP}/release-notes.txt"
+          printf 'Data commit: %s\nManifest SHA-256: %s\nStatus: %s\n\nEvery expected coin has an asset. PARTIAL means listed slot gaps remain; coverage complete still awaits source comparison.\n' \
+            "$data_sha" "$manifest_sha" "$status" > "$notes"
+          if tag_sha="$(gh api "repos/$PRIVATE_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)"; then
+            test "$tag_sha" = "$data_sha" || { echo "::error::Archive tag target differs from data snapshot"; exit 1; }
+          fi
+          if gh release view "$tag" -R "$PRIVATE_REPOSITORY" --json body,isDraft,assets > "${RUNNER_TEMP}/remote-release.json" 2>/dev/null; then
+            diff -u "$notes" <(jq -r .body "${RUNNER_TEMP}/remote-release.json")
+          else
+            gh release create "$tag" -R "$PRIVATE_REPOSITORY" \
+              --target "$data_sha" --draft --prerelease --latest=false \
+              --title "Five-minute ${ARCHIVE_YEAR}-${ARCHIVE_MONTH} | ${status}" --notes-file "$notes"
+            gh release view "$tag" -R "$PRIVATE_REPOSITORY" --json body,isDraft,assets > "${RUNNER_TEMP}/remote-release.json"
+          fi
+          if jq -e '.isDraft' "${RUNNER_TEMP}/remote-release.json" >/dev/null; then
+            for file in "$staged"/*; do
+              asset="$(basename "$file")"
+              if ! jq -e --arg name "$asset" '.assets[] | select(.name == $name)' "${RUNNER_TEMP}/remote-release.json" >/dev/null; then
+                gh release upload "$tag" "$file" -R "$PRIVATE_REPOSITORY"
+              fi
+            done
+          fi
+          mkdir "$downloaded"
+          gh release download "$tag" -R "$PRIVATE_REPOSITORY" --dir "$downloaded"
+          python scripts/five_minute_release.py verify --archive "$archive" --directory "$downloaded"
+          if jq -e '.isDraft' "${RUNNER_TEMP}/remote-release.json" >/dev/null; then
+            gh release edit "$tag" -R "$PRIVATE_REPOSITORY" --draft=false --prerelease --latest=false
+          fi
+          echo "Verified 102 monthly coin assets plus manifest against downloaded bytes: $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "Data snapshot: $data_sha; status: $status" >> "$GITHUB_STEP_SUMMARY"
