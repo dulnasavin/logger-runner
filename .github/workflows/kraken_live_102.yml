@@ -82,6 +82,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+      - name: Stop managed network and clear runtime credentials
+        if: always()
+        run: |
+          if [ -d "${RUNNER_TEMP}/network-manager" ] && [ -d private_source ]; then
+            python "private_source/Crypto Logger-Private Repo/s2_network_manager.py" reset || \
+              echo '::warning::S2 reset failed; runner teardown must stop the tunnel'
+          fi
+          rm -rf "${RUNNER_TEMP}/vpn-runtime"
+
       - name: Remove private source
         if: always()
         run: rm -rf private_source
