@@ -27,6 +27,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     steps:
+      - name: Checkout public workflow support
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
       - name: Checkout pinned private collector
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -34,7 +39,9 @@ jobs:
           ref: ${{ env.HISTORY_CODE_SHA }}
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           path: private_source
-          sparse-checkout: binance_history
+          sparse-checkout: |
+            binance_history
+            Crypto Logger-Private Repo
           persist-credentials: false
 
       - name: Set up Python
@@ -45,9 +52,21 @@ jobs:
       - name: Verify history and live regression tests
         run: python -m unittest discover -s private_source/binance_history -p 'test_*.py' -q
 
+      - name: Bootstrap managed VPN1 with VPN2 standby
+        uses: ./.github/actions/market-live-network
+        with:
+          vpn1_config: ${{ secrets.VPNBOOK_CONFIG }}
+          vpn1_username: ${{ secrets.VPNBOOK_USERNAME }}
+          vpn1_password: ${{ secrets.VPNBOOK_PASSWORD }}
+          vpn2_config: ${{ secrets.VPN2_CONFIG }}
+          vpn2_username: ${{ secrets.VPN2_USERNAME }}
+          vpn2_password: ${{ secrets.VPN2_PASSWORD }}
+          secret_update_token: ${{ secrets.VPN_SECRET_UPDATE_TOKEN }}
+
       - name: Check Kraken history handoff and collect closed minutes
         env:
           HISTORY_LIVE_PRODUCTION: 'YES'
+          PYTHONPATH: ${{ github.workspace }}/private_source/Crypto Logger-Private Repo
           HISTORY_LIVE_PAIR: ${{ inputs.pair || '' }}
           HISTORY_LIVE_MAX_MINUTES: '55'
           HISTORY_LIVE_COVERAGE_PATH: ${{ runner.temp }}/kraken-live-coverage.json
