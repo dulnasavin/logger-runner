@@ -55,6 +55,8 @@ jobs:
           token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ref: ${{ steps.release.outputs.private_code_sha }}
           path: private_source
+          sparse-checkout: |
+            Crypto Logger-Private Repo
           persist-credentials: false
 
       - name: Checkout runtime data
@@ -64,6 +66,12 @@ jobs:
           token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
           ref: ${{ env.DATA_BRANCH }}
           path: private_data
+          sparse-checkout: |
+            /csv_state.json
+            /provider_incident_state.json
+            /five_minute/partition_manifest.json
+            /five_minute/provider_events/
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: Apply receipt and publish one fast-forward commit
@@ -88,6 +96,13 @@ jobs:
           test "$(git branch --show-current)" = "$DATA_BRANCH"
           git config user.name github-actions
           git config user.email actions@github.com
+          if [[ -n "$RECEIPT_REL" ]]; then
+            day="${RECEIPT_REL#inbox/}"
+            day="${day%/*}"
+            git sparse-checkout add --no-cone "/five_minute/inbox/$day/" "/five_minute/ledger/$day/"
+          else
+            git sparse-checkout add --no-cone /five_minute/inbox/ /five_minute/ledger/
+          fi
           for attempt in 1 2 3 4 5; do
             git fetch origin "$DATA_BRANCH"
             git reset --hard FETCH_HEAD
@@ -113,21 +128,21 @@ jobs:
             args=()
             for file in "${paths[@]}"; do args+=(--receipt "$file"); done
             python "$SCRIPT" apply --root five_minute --state csv_state.json "${args[@]}"
-            git add -- five_minute
+            git add -- five_minute provider_incident_state.json
             changed="$(git diff --cached --name-only)"
             if test -z "$changed"; then
               echo "Receipt already applied and committed"
               exit 0
             fi
-            if printf '%s\n' "$changed" | grep -Ev '^five_minute/'; then
+            if printf '%s\n' "$changed" | grep -Ev '^(five_minute/|provider_incident_state[.]json$)'; then
               echo "::error::Unexpected writer path"
               exit 1
             fi
             git commit -m "Apply five-minute receipt ${RECEIPT_REL}"
             if git push origin "HEAD:$DATA_BRANCH"; then
               local_sha="$(git rev-parse HEAD)"
-              remote_sha="$(git ls-remote origin "refs/heads/$DATA_BRANCH" | awk '{print $1}')"
-              test "$local_sha" = "$remote_sha"
+              git fetch origin "$DATA_BRANCH"
+              git merge-base --is-ancestor "$local_sha" FETCH_HEAD
               echo "Verified runtime-data commit: $local_sha" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
@@ -135,4 +150,65 @@ jobs:
             sleep 2
           done
           echo "::error::Writer could not publish after five safe retries"
+          exit 1
+
+
+      - name: Record pending provider event in the private repository and verify acknowledgement
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_PROVIDER_ISSUE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          cd private_data
+          export GIT_ASKPASS="$RUNNER_TEMP/provider-ack-askpass"
+          trap 'rm -f "$GIT_ASKPASS"' EXIT
+          umask 077
+          cat > "$GIT_ASKPASS" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) echo x-access-token ;;
+            *Password*) printf '%s\n' "$PRIVATE_DATA_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 700 "$GIT_ASKPASS"
+          git fetch origin "$DATA_BRANCH"
+          git reset --hard FETCH_HEAD
+          id="$(jq -r '.pending_notification.event_id // empty' provider_incident_state.json)"
+          if [[ -z "$id" ]]; then exit 0; fi
+          [[ "$id" =~ ^[0-9a-f]{32}$ ]]
+          event="five_minute/provider_events/$id.json"
+          if [[ ! -f "$event" ]]; then
+            echo "::warning::Pending event predates the receipt writer; check existing delivery records"
+            exit 0
+          fi
+          title="Price logger provider event $id"
+          matches="$(gh api --paginate "repos/$PRIVATE_REPOSITORY/issues?state=all&per_page=100" \
+            --jq ".[] | select(.pull_request == null and .title == \"$title\") | .number")"
+          if [[ -z "$matches" ]]; then
+            summary="$(jq -r '[.event_type,.severity,.notification_reason] | join(" / ")' "$event")"
+            matches="$(gh api --method POST "repos/$PRIVATE_REPOSITORY/issues" \
+              -f title="$title" -f body="$summary. Evidence is recorded in the private runtime receipt journal." --jq .number)"
+          fi
+          [[ "$matches" =~ ^[0-9]+$ ]]
+          actual="$(gh api "repos/$PRIVATE_REPOSITORY/issues/$matches" --jq .title)"
+          [[ "$actual" == "$title" ]]
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$DATA_BRANCH"
+            git reset --hard FETCH_HEAD
+            ack="five_minute/provider_events/$id.ack.json"
+            if [[ -f "$ack" ]]; then jq -e --arg id "$id" --argjson n "$matches" '.event_id==$id and .private_issue==$n' "$ack"; exit 0; fi
+            jq -nc --arg id "$id" --argjson n "$matches" '{event_id:$id,private_issue:$n}' > "$ack"
+            if [[ "$(jq -r '.pending_notification.event_id // empty' provider_incident_state.json)" == "$id" ]]; then
+              python "$GITHUB_WORKSPACE/private_source/Crypto Logger-Private Repo/provider_consensus.py" \
+                acknowledge-delivery --state-file provider_incident_state.json --event-file "$event"
+            fi
+            git add -- "$ack" provider_incident_state.json
+            git commit -qm "Record confirmed private provider issue $matches"
+            commit="$(git rev-parse HEAD)"
+            git push origin "HEAD:$DATA_BRANCH" || true
+            git fetch origin "$DATA_BRANCH"
+            if git merge-base --is-ancestor "$commit" FETCH_HEAD; then exit 0; fi
+          done
           exit 1

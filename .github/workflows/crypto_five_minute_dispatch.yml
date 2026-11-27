@@ -81,8 +81,12 @@ jobs:
               break
             fi
             if GH_TOKEN="$PRIVATE_DATA_TOKEN" gh api \
-              "repos/$PRIVATE_REPO/contents/$path?ref=runtime-data" >/dev/null 2>&1; then
-              echo "::error::Slot was already claimed; inspect existing claim and collector run"
+              "repos/$PRIVATE_REPO/contents/$path?ref=runtime-data" --jq .content > "$RUNNER_TEMP/remote-claim.b64" 2>/dev/null; then
+              if base64 -d "$RUNNER_TEMP/remote-claim.b64" | jq -e --arg owner "$GITHUB_RUN_ID" --arg lane "$lane" --arg slot "$SLOT_UTC"                 '.dispatcher_run_id==$owner and .lane==$lane and .slot_utc==$slot' >/dev/null; then
+                claimed=1
+                break
+              fi
+              echo "::error::Another dispatcher already owns this slot"
               exit 1
             fi
             sleep 1
