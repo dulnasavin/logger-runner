@@ -104,6 +104,7 @@ jobs:
           set -euo pipefail
           python scripts/verify_collection_mode.py --require v2
           test -n "$PRIVATE_DATA_TOKEN"
+          python scripts/lane_lease.py verify
           path="$(python scripts/five_minute_handoff.py path --slot "$SLOT_UTC")"
           GH_TOKEN="$PRIVATE_DATA_TOKEN" gh api \
             "repos/dulnasavin/Repository-name-crypto-tracker-Private-Yes/contents/$path?ref=runtime-data" \
@@ -836,3 +837,4 @@ jobs:
           else
             gh issue create --title "$title" --body "$body"
           fi
+

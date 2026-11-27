@@ -1,0 +1,84 @@
+name: Market data | Verify, maintain and archive
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation on the private ready dataset
+        type: choice
+        options: [verify, prepare, audit, restore, publish]
+        required: true
+      day:
+        description: UTC day (YYYY-MM-DD). Verify accepts historical and recent days.
+        type: string
+        required: true
+      pair:
+        description: One roster pair or blank for every market
+        type: string
+        required: false
+      logger_start:
+        description: First expected five-minute UTC slot for this dataset generation
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ready-data-ordered-writer
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  ready:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      PRIVATE_REPO: dulnasavin/Repository-name-crypto-tracker-Private-Yes
+      HISTORY_CODE_SHA: 174ea3a588dabf15429cfc17bd23b010df3de5a3
+    steps:
+      - name: Checkout reviewed calculation and storage code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ env.HISTORY_CODE_SHA }}
+          token: ${{ secrets.PRIVATE_CODE_READ_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          path: source
+          persist-credentials: false
+      - name: Checkout active private data with recovery history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: runtime-data
+          token: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          path: runtime
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Verify and commit bounded batches
+        env:
+          HISTORY_STORAGE_TOKEN: ${{ secrets.PRIVATE_DATA_WRITE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          READY_OPERATION: ${{ inputs.operation }}
+          READY_DAY: ${{ inputs.day }}
+          READY_PAIR: ${{ inputs.pair }}
+          READY_LOGGER_START: ${{ inputs.logger_start }}
+          GIT_TERMINAL_PROMPT: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd runtime
+          git config user.name github-actions
+          git config user.email actions@github.com
+          export GIT_ASKPASS="$RUNNER_TEMP/ready-askpass"
+          trap 'rm -f "$GIT_ASKPASS"' EXIT
+          umask 077
+          cat > "$GIT_ASKPASS" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) echo x-access-token ;;
+            *Password*) printf '%s\n' "$HISTORY_STORAGE_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 700 "$GIT_ASKPASS"
+          python ../source/binance_history/ready_git.py
