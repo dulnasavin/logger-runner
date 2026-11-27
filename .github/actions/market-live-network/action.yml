@@ -1,0 +1,106 @@
+name: Bootstrap market live VPN
+description: Start the same S2 VPN1/VPN2 boundary used by the five-minute logger
+inputs:
+  vpn1_config:
+    required: true
+    description: VPN1 OpenVPN profile
+  vpn1_username:
+    required: true
+    description: VPN1 username
+  vpn1_password:
+    required: true
+    description: VPN1 password
+  vpn2_config:
+    required: true
+    description: VPN2 OpenVPN profile
+  vpn2_username:
+    required: true
+    description: VPN2 username
+  vpn2_password:
+    required: true
+    description: VPN2 password
+  secret_update_token:
+    required: false
+    description: Token for authenticated credential refresh
+runs:
+  using: composite
+  steps:
+    - name: Install OpenVPN
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y openvpn
+        sudo -n true
+    - name: Create private runtime profiles
+      shell: bash
+      env:
+        VPN1_PROFILE: ${{ inputs.vpn1_config }}
+        VPN1_USER: ${{ inputs.vpn1_username }}
+        VPN1_PASS: ${{ inputs.vpn1_password }}
+        VPN2_PROFILE: ${{ inputs.vpn2_config }}
+        VPN2_USER: ${{ inputs.vpn2_username }}
+        VPN2_PASS: ${{ inputs.vpn2_password }}
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        root = Path(os.environ['RUNNER_TEMP']) / 'vpn-runtime'
+        root.mkdir(mode=0o700)
+        contents = {
+            'vpn1.ovpn': os.environ['VPN1_PROFILE'] + '\n',
+            'vpn1-auth.txt': os.environ['VPN1_USER'] + '\n' + os.environ['VPN1_PASS'] + '\n',
+            'vpn2.ovpn': os.environ['VPN2_PROFILE'] + '\n',
+            'vpn2-auth.txt': os.environ['VPN2_USER'] + '\n' + os.environ['VPN2_PASS'] + '\n',
+        }
+        for name, body in contents.items():
+            if not body.strip():
+                raise ValueError(f'Missing VPN runtime input: {name}')
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+            fd = os.open(root / name, flags, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as file:
+                file.write(body)
+                file.flush()
+                os.fsync(file.fileno())
+        PY
+    - name: Bootstrap and verify S2
+      shell: bash
+      env:
+        NETWORK_MANAGER_STATE_DIR: ${{ runner.temp }}/network-manager
+        NETWORK_MANAGER_ALLOWED_ROOTS: ${{ runner.temp }}:${{ github.workspace }}
+        VPN1_CONFIG: ${{ runner.temp }}/vpn-runtime/vpn1.ovpn
+        VPN1_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn1-auth.txt
+        VPN2_CONFIG_FILE: ${{ runner.temp }}/vpn-runtime/vpn2.ovpn
+        VPN2_AUTH_FILE: ${{ runner.temp }}/vpn-runtime/vpn2-auth.txt
+        VPN_SECRET_UPDATE_TOKEN: ${{ inputs.secret_update_token }}
+      run: |
+        set -euo pipefail
+        root="private_source/Crypto Logger-Private Repo"
+        test -s "$root/s2_network_manager.py"
+        test -s "$root/provider_network_recovery.py"
+        test -s "$root/vpn_auth_recovery/recovery_controller.py"
+        python "$root/vpn_auth_recovery/recovery_controller.py" \
+          --state-dir "$NETWORK_MANAGER_STATE_DIR" \
+          --vpn1-config "$VPN1_CONFIG" --vpn1-auth "$VPN1_AUTH_FILE" \
+          --vpn2-config "$VPN2_CONFIG_FILE" --vpn2-auth "$VPN2_AUTH_FILE" \
+          --self-test-output "${RUNNER_TEMP}/s2-live-bootstrap.json" \
+          --recovered-marker "${RUNNER_TEMP}/vpn-auth-recovered" \
+          --recovery-failed-marker "${RUNNER_TEMP}/vpn-auth-recovery-failed" \
+          --secret-update-success-marker "${RUNNER_TEMP}/vpn-secret-update-success" \
+          --secret-update-failed-marker "${RUNNER_TEMP}/vpn-secret-update-failed" \
+          --repository "$GITHUB_REPOSITORY" --persist-secrets --update-vpn2-secrets
+        jq -e '.passed == true and .vpn2_standby_validated == true and
+          (.startup_network == "VPN1" or .startup_network == "VPN2")' \
+          "${RUNNER_TEMP}/s2-live-bootstrap.json" >/dev/null
+        python "$root/s2_network_manager.py" status > "${RUNNER_TEMP}/s2-live-status.json"
+        jq -e '.running == true and .switch_count <= 1' "${RUNNER_TEMP}/s2-live-status.json" >/dev/null
+        {
+          echo "NETWORK_MANAGER_STATE_DIR=$NETWORK_MANAGER_STATE_DIR"
+          echo "NETWORK_MANAGER_ALLOWED_ROOTS=$NETWORK_MANAGER_ALLOWED_ROOTS"
+          echo "VPN1_CONFIG=$VPN1_CONFIG"
+          echo "VPN1_AUTH_FILE=$VPN1_AUTH_FILE"
+          echo "VPN2_CONFIG_FILE=$VPN2_CONFIG_FILE"
+          echo "VPN2_AUTH_FILE=$VPN2_AUTH_FILE"
+          echo 'CRYPTO_LOGGER_NETWORK_RECOVERY=true'
+        } >> "$GITHUB_ENV"
